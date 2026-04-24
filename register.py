@@ -14,22 +14,26 @@ try:
 except ImportError:
     GPIO_AVAILABLE = False
 
-def run_register(name: str):
-    # Setup IR-CUT (Pin 12)
+def _put(frame, text, y, color=config.COLOR_WHITE):
+    cv2.putText(frame, text, (10, y), cv2.FONT_HERSHEY_SIMPLEX, config.FONT_SCALE, color, config.LINE_TYPE)
+
+def run_register(name):
+    # Setup IR-CUT
     IR_CUT_PIN = 12
     if GPIO_AVAILABLE:
         GPIO.setmode(GPIO.BCM)
         GPIO.setup(IR_CUT_PIN, GPIO.OUT)
-        GPIO.output(IR_CUT_PIN, GPIO.HIGH)
+        GPIO.output(IR_CUT_PIN, GPIO.HIGH) # Aktifkan filter IR
+        print("[IR-CUT] Filter Diaktifkan (Mode Siang)")
 
     cam      = CameraStream(config.CAMERA_INDEX, config.FRAME_WIDTH, config.FRAME_HEIGHT).start()
-    detector = FaceMeshDetector()
-    liveness = LivenessManager()
-    model    = MobileFaceNet()
-    spoof_ai = SilentAntiSpoofing() # Pastikan file ini ada di folder liveness
+    detector = FaceMeshDetector(min_detection_confidence=0.7, min_tracking_confidence=0.7)
+    liveness      = LivenessManager()
+    model         = MobileFaceNet()
+    anti_spoofing = SilentAntiSpoofing()
 
     liveness.start_register()
-    saved = False
+    embedding_saved = False
 
     try:
         while True:
@@ -39,37 +43,51 @@ def run_register(name: str):
             faces = detector.detect(frame)
 
             if not faces:
-                cv2.putText(display, "Mencari Wajah...", (10, 30), 1, 1, (0, 0, 255), 2)
-            else:
-                face = faces[0]
-                # 1. Cek Anti-Spoofing Pasif (Cek Foto/Layar)
-                is_real = spoof_ai.is_real(frame, face.bbox)
-                
-                if not is_real["real"]:
-                    cv2.putText(display, "SPOOFING DETECTED! GUNAKAN WAJAH ASLI", (10, 30), 1, 1, (0, 0, 255), 2)
-                else:
-                    # 2. Jalankan Alur Bertahap (State Machine)
-                    res = liveness.update_register(face, detector)
-                    
-                    cv2.putText(display, f"Langkah: {res['step']}", (10, 30), 1, 1, (0, 255, 0), 2)
-                    cv2.putText(display, res["instruction"], (10, 60), 1, 1, (255, 255, 255), 2)
+                _put(display, "Wajah tidak terdeteksi", 30, config.COLOR_RED)
+                cv2.imshow("Register", display)
+                if cv2.waitKey(1) & 0xFF == ord("q"): break
+                continue
 
-                    if res["status"] == "complete" and not saved:
-                        # 3. Ekstraksi MobileFaceNet
-                        crop = model.crop_face(frame, face.bbox)
-                        emb  = model.get_embedding(crop)
-                        save_face(name, emb)
-                        saved = True
-                        print(f"Berhasil meregistrasi {name}")
-                        break
+            face = faces[0]
+            cv2.rectangle(display, (face.bbox[0], face.bbox[1]), (face.bbox[0]+face.bbox[2], face.bbox[1]+face.bbox[3]), (255, 255, 0), 2)
+
+            # 1. Cek Anti-Spoofing
+            spoof_check = anti_spoofing.is_real(frame, face.bbox)
+            if not spoof_check["real"]:
+                _put(display, f"REGISTER: {name}", 30, config.COLOR_YELLOW)
+                _put(display, "SPOOFING DETECTED! GUNAKAN WAJAH ASLI", 60, config.COLOR_RED)
+            else:
+                # 2. Alur Bertahap (State Machine)
+                result = liveness.update_register(face, detector)
+                _put(display, f"REGISTER: {name} (Real)", 30, config.COLOR_GREEN)
+                _put(display, f"Langkah: {result.get('step', '')}", 60, config.COLOR_CYAN)
+                _put(display, f"Instruksi: {result.get('instruction', '')}", 90, config.COLOR_WHITE)
+
+                # 3. Selesai -> Ekstraksi MobileFaceNet
+                if result["status"] == "complete" and not embedding_saved:
+                    _put(display, "Valid! Mengekstraksi Wajah...", 130, config.COLOR_GREEN)
+                    cv2.imshow("Register", display)
+                    cv2.waitKey(500)
+                    
+                    face_crop = model.crop_face(frame, face.bbox)
+                    embedding = model.get_embedding(face_crop)
+                    save_face(name, embedding)
+                    embedding_saved = True
+                    _put(display, "Berhasil! Keluar dalam 3 detik...", 160, config.COLOR_GREEN)
+                    cv2.imshow("Register", display)
+                    cv2.waitKey(3000)
+                    break
 
             cv2.imshow("Register", display)
             if cv2.waitKey(1) & 0xFF == ord("q"): break
     finally:
         if GPIO_AVAILABLE: GPIO.cleanup()
         cam.stop()
+        detector.close()
         cv2.destroyAllWindows()
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1: run_register(sys.argv[1])
-    else: print("Gunakan: python3 register.py <nama>")
+    if len(sys.argv) < 2:
+        print("Gunakan: python3 register.py <nama>")
+    else:
+        run_register(sys.argv[1].strip())

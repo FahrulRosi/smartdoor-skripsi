@@ -11,60 +11,43 @@ class SilentAntiSpoofing:
         if os.path.isfile(model_path):
             try:
                 import onnxruntime as ort
-                # Menggunakan CPU provider agar aman di Raspberry Pi
+                # Menggunakan CPU execution provider untuk Raspberry Pi
                 self._session = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
                 self._input_name = self._session.get_inputs()[0].name
-                print(f"[AntiSpoofing] Loaded ONNX model: {model_path}")
-            except Exception as exc:
-                print(f"[AntiSpoofing] Gagal memuat ONNX ({exc}).")
+                print(f"[AntiSpoofing] Model ONNX berhasil dimuat: {model_path}")
+            except Exception as e:
+                print(f"[AntiSpoofing] Gagal memuat model: {e}")
         else:
-            print(f"[AntiSpoofing] Model tidak ditemukan di '{model_path}'.")
+            print(f"[AntiSpoofing] Model tidak ditemukan di '{model_path}'")
 
-    def is_real(self, frame: np.ndarray, bbox: tuple) -> dict:
-        """
-        Mengembalikan status True jika wajah asli, False jika foto/layar.
-        """
+    def is_real(self, frame, bbox):
         if not self._session:
-            # Fallback jika model tidak ada, anggap True (bahaya, hanya untuk testing)
-            return {"real": True, "score": 1.0, "label": "No_Model"}
+            return {"real": True, "score": 1.0}
 
-        # 1. Perlebar bounding box (MiniFASNet butuh sedikit latar belakang)
         x, y, w, h = bbox
         ih, iw = frame.shape[:2]
         
-        # Scale bbox sekitar 1.5x - 2.0x
+        # Perlebar area potong agar model mendapatkan konteks tekstur
         scale = 1.5
         cx, cy = x + w//2, y + h//2
         new_w, new_h = int(w * scale), int(h * scale)
         
-        x1 = max(0, cx - new_w // 2)
-        y1 = max(0, cy - new_h // 2)
-        x2 = min(iw, cx + new_w // 2)
-        y2 = min(ih, cy + new_h // 2)
+        x1, y1 = max(0, cx - new_w // 2), max(0, cy - new_h // 2)
+        x2, y2 = min(iw, cx + new_w // 2), min(ih, cy + new_h // 2)
         
         face_crop = frame[y1:y2, x1:x2]
         if face_crop.size == 0:
-            return {"real": False, "score": 0.0, "label": "Invalid_Crop"}
+            return {"real": False, "score": 0.0}
 
-        # 2. Preprocessing (Resize ke 80x80 sesuai standar MiniFASNetV2)
+        # Preprocessing untuk MiniFASNet (80x80)
         img = cv2.resize(face_crop, (80, 80))
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         img = img.astype(np.float32) / 255.0
-        img = np.transpose(img, (2, 0, 1))  # HWC ke CHW
-        img = np.expand_dims(img, axis=0)   # Tambah batch dimension
+        img = np.transpose(img, (2, 0, 1))
+        img = np.expand_dims(img, axis=0)
 
-        # 3. Inference
         outputs = self._session.run(None, {self._input_name: img})
-        preds = outputs[0][0] # Array probabilitas [Spoof, Real]
-
-        # Indeks 1 biasanya untuk kelas 'Real' (Asli), Indeks 0 untuk 'Spoof' (Palsu)
-        score_real = float(preds[1])
+        preds = outputs[0][0]
+        score_real = float(preds[1]) # Indeks 1 adalah probabilitas "Real"
         
-        is_real = score_real >= self.threshold
-        label = "Asli" if is_real else "Palsu (Spoof)"
-
-        return {
-            "real": is_real,
-            "score": round(score_real, 4),
-            "label": label
-        }
+        return {"real": score_real >= self.threshold, "score": round(score_real, 4)}

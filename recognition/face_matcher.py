@@ -1,12 +1,17 @@
 import numpy as np
 from database.face_db import get_all_faces
 
-
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
+    # Flatten array untuk mencegah error dimensi matriks, misal (1, 512) dengan (512,)
+    a = a.flatten()
+    b = b.flatten()
+    
     a = a / (np.linalg.norm(a) + 1e-8)
     b = b / (np.linalg.norm(b) + 1e-8)
-    return float(np.dot(a, b))
-
+    
+    # Hitung similarity dan cegah hasil float di luar batas -1.0 hingga 1.0
+    similarity = float(np.dot(a, b))
+    return max(-1.0, min(1.0, similarity))
 
 class FaceMatcher:
     def __init__(self, threshold: float = 0.55):
@@ -15,13 +20,13 @@ class FaceMatcher:
     def match(self, embedding: np.ndarray) -> dict:
         """
         Compare `embedding` against every stored face.
-        Returns the best match (if similarity >= threshold), else None.
+        Returns the best match (if similarity >= threshold).
         """
         faces = get_all_faces()
         if not faces:
-            return {"matched": False, "name": None, "score": 0.0, "reason": "No registered faces"}
+            return {"matched": False, "name": "No_DB", "score": 0.0, "reason": "Belum ada wajah di DB"}
 
-        best_name  = None
+        best_name  = "Unknown"
         best_score = -1.0
 
         for face in faces:
@@ -31,9 +36,12 @@ class FaceMatcher:
                 best_name  = face["name"]
 
         matched = best_score >= self.threshold
+        
         return {
             "matched": matched,
-            "name":    best_name if matched else None,
+            # Tetap kembalikan nama terdekat agar saat tidak match, 
+            # main.py bisa menampilkan "Wajah terdekat: Nama (Score)" di layar HUD
+            "name":    best_name, 
             "score":   round(best_score, 4),
             "reason":  "OK" if matched else f"Score {best_score:.4f} < threshold {self.threshold}",
         }

@@ -10,21 +10,25 @@ class LivenessManager:
         self._register_blink = None
         
         # ── FRAME COUNTERS untuk validasi stabil ──
-        self._step_frame_count = 0  # Counter frame di tahap saat ini
-        self._required_frames = 15  # Perlu 15 frame konsisten sebelum advance
+        self._step_frame_count = 0  
+        self._required_frames = 10  # Cukup 10 frame agar responsif
         self._last_valid_pose = None
+        
+        # [BARU] Counter untuk jeda antar tahap agar tidak ke-skip
+        self._cooldown_frames = 0
 
     def start_register(self):
         self._register_step = 0
         self._step_frame_count = 0
         self._register_blink = BlinkDetector(target_blinks=config.REGISTER_BLINK_COUNT)
         self._last_valid_pose = None
+        self._cooldown_frames = 0
 
     def update_register(self, face: FaceResult, detector: FaceMeshDetector) -> dict:
         pose = self.pose_estimator.estimate(face, detector)
         
         if not pose["valid"]:
-            self._step_frame_count = 0  # Reset counter
+            self._step_frame_count = 0  
             return {
                 "status": "pending",
                 "step": "NO_FACE",
@@ -34,22 +38,38 @@ class LivenessManager:
 
         yaw, pitch, roll = pose["yaw"], pose["pitch"], pose["roll"]
 
+        # ──── [BARU] JEDA TRANSISI & WAJIB KEMBALI LURUS ────
+        if self._cooldown_frames > 0:
+            # Tahap selanjutnya DITAHAN sampai wajah kembali melihat LURUS ke kamera
+            if abs(yaw) < 15 and abs(pitch) < 15 and abs(roll) < 15:
+                self._cooldown_frames -= 1
+                instruction = "✅ Bagus! Tahan posisi lurus..."
+            else:
+                # Jika kepala masih miring/menoleh, cooldown berhenti
+                instruction = "⚠️ Kembalikan wajah melihat LURUS ke depan"
+            
+            return {
+                "status": "pending",
+                "step": "WAIT",
+                "instruction": instruction,
+                "progress": "Persiapan transisi..."
+            }
+
         # ──── TAHAP 0: FACEMESH (Lurus) ────
         if self._register_step == 0:
-            # Check kondisi: semua angle kecil (lurus)
-            if abs(yaw) < 10 and abs(pitch) < 10 and abs(roll) < 10:
+            if abs(yaw) < 15 and abs(pitch) < 15 and abs(roll) < 15:
                 self._step_frame_count += 1
             else:
-                self._step_frame_count = 0  # Reset kalau gerak
+                self._step_frame_count = max(0, self._step_frame_count - 1)
 
-            # Advance ke tahap berikutnya setelah N frame konsisten
             if self._step_frame_count >= self._required_frames:
                 self._register_step = 1
                 self._step_frame_count = 0
+                self._cooldown_frames = 20  # Beri jeda 20 frame untuk bernapas
                 return {
                     "status": "pending",
                     "step": "FACEMESH",
-                    "instruction": "✅ Tahap Facemesh berhasil! Lanjut ke Yaw",
+                    "instruction": "✅ Tahap Facemesh berhasil!",
                     "progress": "DONE"
                 }
 
@@ -63,47 +83,45 @@ class LivenessManager:
 
         # ──── TAHAP 1: YAW (Toleh Kiri/Kanan) ────
         elif self._register_step == 1:
-            # Check kondisi: yaw harus > 20 derajat
-            if abs(yaw) > 20:
+            if abs(yaw) > 15:
                 self._step_frame_count += 1
             else:
-                if self._step_frame_count > 0:  # Hanya reset kalau udah detect sebelumnya
-                    self._step_frame_count = max(0, self._step_frame_count - 1)  # Soft reset
+                self._step_frame_count = max(0, self._step_frame_count - 1) 
 
             if self._step_frame_count >= self._required_frames:
                 self._register_step = 2
                 self._step_frame_count = 0
+                self._cooldown_frames = 30  # Jeda sebelum Pitch, wajib kembali lurus
                 return {
                     "status": "pending",
                     "step": "YAW",
-                    "instruction": "✅ Tahap Yaw berhasil! Lanjut ke Pitch",
+                    "instruction": "✅ Tahap Yaw berhasil!",
                     "progress": "DONE"
                 }
 
             return {
                 "status": "pending",
                 "step": "YAW",
-                "instruction": "2. Tolehkan kepala ke Kiri atau Kanan (min 20°)",
+                "instruction": "2. Tolehkan kepala ke Kiri atau Kanan (min 15°)",
                 "progress": f"Terdeteksi: {self._step_frame_count}/{self._required_frames}",
-                "yaw": f"{yaw:.1f}° {'⏳' if abs(yaw) > 20 else '❌'}"
+                "yaw": f"{yaw:.1f}° {'⏳' if abs(yaw) > 15 else '❌'}"
             }
 
         # ──── TAHAP 2: PITCH (Angkat/Tunduk) ────
         elif self._register_step == 2:
-            # Check kondisi: pitch harus > 15 derajat
             if abs(pitch) > 15:
                 self._step_frame_count += 1
             else:
-                if self._step_frame_count > 0:
-                    self._step_frame_count = max(0, self._step_frame_count - 1)
+                self._step_frame_count = max(0, self._step_frame_count - 1)
 
             if self._step_frame_count >= self._required_frames:
                 self._register_step = 3
                 self._step_frame_count = 0
+                self._cooldown_frames = 30  # Jeda sebelum Roll, wajib kembali lurus
                 return {
                     "status": "pending",
                     "step": "PITCH",
-                    "instruction": "✅ Tahap Pitch berhasil! Lanjut ke Roll",
+                    "instruction": "✅ Tahap Pitch berhasil!",
                     "progress": "DONE"
                 }
 
@@ -117,20 +135,19 @@ class LivenessManager:
 
         # ──── TAHAP 3: ROLL (Miringkan Kepala) ────
         elif self._register_step == 3:
-            # Check kondisi: roll harus > 15 derajat
             if abs(roll) > 15:
                 self._step_frame_count += 1
             else:
-                if self._step_frame_count > 0:
-                    self._step_frame_count = max(0, self._step_frame_count - 1)
+                self._step_frame_count = max(0, self._step_frame_count - 1)
 
             if self._step_frame_count >= self._required_frames:
                 self._register_step = 4
                 self._step_frame_count = 0
+                self._cooldown_frames = 20  # Jeda sebelum Blink
                 return {
                     "status": "pending",
                     "step": "ROLL",
-                    "instruction": "✅ Tahap Roll berhasil! Lanjut ke Blink",
+                    "instruction": "✅ Tahap Roll berhasil!",
                     "progress": "DONE"
                 }
 

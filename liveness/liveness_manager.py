@@ -6,58 +6,175 @@ import config
 class LivenessManager:
     def __init__(self):
         self.pose_estimator = HeadPoseEstimator()
-        self._register_step = 0 # 0: Yaw, 1: Pitch, 2: Roll, 3: Blink, 4: Done
+        self._register_step = 0  # 0: FaceMesh, 1: Yaw, 2: Pitch, 3: Roll, 4: Blink, 5: Done
         self._register_blink = None
+        
+        # ── FRAME COUNTERS untuk validasi stabil ──
+        self._step_frame_count = 0  # Counter frame di tahap saat ini
+        self._required_frames = 15  # Perlu 15 frame konsisten sebelum advance
+        self._last_valid_pose = None
 
     def start_register(self):
         self._register_step = 0
+        self._step_frame_count = 0
         self._register_blink = BlinkDetector(target_blinks=config.REGISTER_BLINK_COUNT)
+        self._last_valid_pose = None
 
     def update_register(self, face: FaceResult, detector: FaceMeshDetector) -> dict:
         pose = self.pose_estimator.estimate(face, detector)
         
         if not pose["valid"]:
-            return {"status": "pending", "step": "NO_FACE", "instruction": "Wajah tidak terdeteksi"}
+            self._step_frame_count = 0  # Reset counter
+            return {
+                "status": "pending",
+                "step": "NO_FACE",
+                "instruction": "Wajah tidak terdeteksi",
+                "progress": f"Frame: 0/{self._required_frames}"
+            }
 
-        # Threshold toleransi dari config
-        yaw_ok   = abs(pose["yaw"])   <= config.MAX_YAW
-        pitch_ok = abs(pose["pitch"]) <= config.MAX_PITCH
-        roll_ok  = abs(pose["roll"])  <= config.MAX_ROLL
+        yaw, pitch, roll = pose["yaw"], pose["pitch"], pose["roll"]
 
-        # Tahap 0: Validasi Yaw (Lurus ke depan)
+        # ──── TAHAP 0: FACEMESH (Lurus) ────
         if self._register_step == 0:
-            if yaw_ok:
+            # Check kondisi: semua angle kecil (lurus)
+            if abs(yaw) < 10 and abs(pitch) < 10 and abs(roll) < 10:
+                self._step_frame_count += 1
+            else:
+                self._step_frame_count = 0  # Reset kalau gerak
+
+            # Advance ke tahap berikutnya setelah N frame konsisten
+            if self._step_frame_count >= self._required_frames:
                 self._register_step = 1
-            else:
-                return {"status": "pending", "step": "YAW", "instruction": "Arahkan wajah lurus ke depan (Yaw)"}
+                self._step_frame_count = 0
+                return {
+                    "status": "pending",
+                    "step": "FACEMESH",
+                    "instruction": "✅ Tahap Facemesh berhasil! Lanjut ke Yaw",
+                    "progress": "DONE"
+                }
 
-        # Tahap 1: Validasi Pitch (Lurus/Tidak mendongak)
-        if self._register_step == 1:
-            if not yaw_ok: self._register_step = 0
-            elif pitch_ok: self._register_step = 2
-            else:
-                return {"status": "pending", "step": "PITCH", "instruction": "Arahkan wajah lurus ke depan (Pitch)"}
+            return {
+                "status": "pending",
+                "step": "FACEMESH",
+                "instruction": "1. Tatap kamera dengan lurus (jangan gerak)",
+                "progress": f"Stabil: {self._step_frame_count}/{self._required_frames}",
+                "yaw": f"{yaw:.1f}°", "pitch": f"{pitch:.1f}°", "roll": f"{roll:.1f}°"
+            }
 
-        # Tahap 2: Validasi Roll (Tegak/Tidak miring)
-        if self._register_step == 2:
-            if not pitch_ok: self._register_step = 1
-            elif roll_ok: self._register_step = 3
+        # ──── TAHAP 1: YAW (Toleh Kiri/Kanan) ────
+        elif self._register_step == 1:
+            # Check kondisi: yaw harus > 20 derajat
+            if abs(yaw) > 20:
+                self._step_frame_count += 1
             else:
-                return {"status": "pending", "step": "ROLL", "instruction": "Pastikan kepala tegak (Roll)"}
+                if self._step_frame_count > 0:  # Hanya reset kalau udah detect sebelumnya
+                    self._step_frame_count = max(0, self._step_frame_count - 1)  # Soft reset
 
-        # Tahap 3: Validasi Blink (Berkedip)
-        if self._register_step == 3:
-            if not (yaw_ok and pitch_ok and roll_ok):
-                return {"status": "pending", "step": "HOLD", "instruction": "Tahan posisi wajah tetap lurus!"}
-            
+            if self._step_frame_count >= self._required_frames:
+                self._register_step = 2
+                self._step_frame_count = 0
+                return {
+                    "status": "pending",
+                    "step": "YAW",
+                    "instruction": "✅ Tahap Yaw berhasil! Lanjut ke Pitch",
+                    "progress": "DONE"
+                }
+
+            return {
+                "status": "pending",
+                "step": "YAW",
+                "instruction": "2. Tolehkan kepala ke Kiri atau Kanan (min 20°)",
+                "progress": f"Terdeteksi: {self._step_frame_count}/{self._required_frames}",
+                "yaw": f"{yaw:.1f}° {'⏳' if abs(yaw) > 20 else '❌'}"
+            }
+
+        # ──── TAHAP 2: PITCH (Angkat/Tunduk) ────
+        elif self._register_step == 2:
+            # Check kondisi: pitch harus > 15 derajat
+            if abs(pitch) > 15:
+                self._step_frame_count += 1
+            else:
+                if self._step_frame_count > 0:
+                    self._step_frame_count = max(0, self._step_frame_count - 1)
+
+            if self._step_frame_count >= self._required_frames:
+                self._register_step = 3
+                self._step_frame_count = 0
+                return {
+                    "status": "pending",
+                    "step": "PITCH",
+                    "instruction": "✅ Tahap Pitch berhasil! Lanjut ke Roll",
+                    "progress": "DONE"
+                }
+
+            return {
+                "status": "pending",
+                "step": "PITCH",
+                "instruction": "3. Angkat atau Tundukkan kepala (min 15°)",
+                "progress": f"Terdeteksi: {self._step_frame_count}/{self._required_frames}",
+                "pitch": f"{pitch:.1f}° {'⏳' if abs(pitch) > 15 else '❌'}"
+            }
+
+        # ──── TAHAP 3: ROLL (Miringkan Kepala) ────
+        elif self._register_step == 3:
+            # Check kondisi: roll harus > 15 derajat
+            if abs(roll) > 15:
+                self._step_frame_count += 1
+            else:
+                if self._step_frame_count > 0:
+                    self._step_frame_count = max(0, self._step_frame_count - 1)
+
+            if self._step_frame_count >= self._required_frames:
+                self._register_step = 4
+                self._step_frame_count = 0
+                return {
+                    "status": "pending",
+                    "step": "ROLL",
+                    "instruction": "✅ Tahap Roll berhasil! Lanjut ke Blink",
+                    "progress": "DONE"
+                }
+
+            return {
+                "status": "pending",
+                "step": "ROLL",
+                "instruction": "4. Miringkan kepala ke samping (min 15°)",
+                "progress": f"Terdeteksi: {self._step_frame_count}/{self._required_frames}",
+                "roll": f"{roll:.1f}° {'⏳' if abs(roll) > 15 else '❌'}"
+            }
+
+        # ──── TAHAP 4: BLINK (Berkedip) ────
+        elif self._register_step == 4:
             blink_res = self._register_blink.update(face, detector)
             if blink_res["complete"]:
-                self._register_step = 4
+                self._register_step = 5
+                self._step_frame_count = 0
+                return {
+                    "status": "pending",
+                    "step": "BLINK",
+                    "instruction": "✅ Tahap Blink berhasil! Lanjut ekstraksi",
+                    "progress": "DONE"
+                }
             else:
-                needed = config.REGISTER_BLINK_COUNT - self._register_blink.blink_count
-                return {"status": "pending", "step": "BLINK", "instruction": f"Silakan berkedip {needed} kali lagi"}
+                needed = max(0, config.REGISTER_BLINK_COUNT - self._register_blink.blink_count)
+                return {
+                    "status": "pending",
+                    "step": "BLINK",
+                    "instruction": f"5. Berkedip {needed} kali lagi",
+                    "progress": f"Blink: {self._register_blink.blink_count}/{config.REGISTER_BLINK_COUNT}"
+                }
 
-        if self._register_step == 4:
-            return {"status": "complete", "step": "DONE", "instruction": "Liveness Selesai!"}
+        # ──── TAHAP 5: SELESAI ────
+        elif self._register_step == 5:
+            return {
+                "status": "complete",
+                "step": "DONE",
+                "instruction": "Liveness Berhasil! Mengambil data...",
+                "progress": "COMPLETE"
+            }
 
-        return {"status": "pending", "step": "WAIT", "instruction": "Menunggu..."}
+        return {
+            "status": "pending",
+            "step": "WAIT",
+            "instruction": "Menunggu...",
+            "progress": "WAIT"
+        }

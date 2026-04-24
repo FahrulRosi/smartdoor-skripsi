@@ -2,36 +2,43 @@
 #  SMART_DOOR_LOCK  –  config.py
 # ──────────────────────────────────────────────────────────────────────────────
 
-# Camera
+# ── Camera & Hardware ─────────────────────────────────────────────────────────
 CAMERA_INDEX    = 0
 FRAME_WIDTH     = 640
 FRAME_HEIGHT    = 480
+IR_CUT_PIN      = 12   # Pin GPIO untuk mengontrol Filter IR-CUT (Mode Siang/Malam)
 
-# FaceMesh
-MIN_DETECTION_CONFIDENCE = 0.7
-MIN_TRACKING_CONFIDENCE  = 0.7
+# ── FaceMesh ──────────────────────────────────────────────────────────────────
+MIN_DETECTION_CONFIDENCE = 0.5  # ← Turun dari 0.7
+MIN_TRACKING_CONFIDENCE  = 0.5  # ← Turun dari 0.7
 
-# ── Register liveness thresholds ──────────────────────────────────────────────
-MAX_YAW   = 15.0    # degrees — head must face forward (±)
-MAX_PITCH = 15.0
-MAX_ROLL  = 15.0
-REGISTER_BLINK_COUNT = 2   # must blink twice during registration
+# ── Register Liveness Thresholds (Alur Bertahap) ──────────────────────────────
+# Batas toleransi untuk wajah dianggap "Lurus / Tengah" (untuk FaceMesh awal)
+MAX_YAW   = 10.0  
+MAX_PITCH = 10.0
+MAX_ROLL  = 10.0
 
-# ── Unlock challenge ──────────────────────────────────────────────────────────
-NUM_CHALLENGES      = 2     # how many random challenges per unlock attempt
-CHALLENGE_TIMEOUT   = 8.0   # seconds to complete each challenge
-LOOK_YAW_THRESHOLD  = 20.0  # minimum |yaw| to count as "looking left/right"
+# Batas minimum derajat gerakan untuk dinyatakan lulus tantangan (Challenge)
+CHALLENGE_YAW   = 20.0  # Harus menoleh (Kiri/Kanan) lebih dari 20 derajat
+CHALLENGE_PITCH = 15.0  # Harus mendongak/menunduk lebih dari 15 derajat
+CHALLENGE_ROLL  = 15.0  # Harus miringkan kepala lebih dari 15 derajat
 
-# ── Face recognition ──────────────────────────────────────────────────────────
-MATCH_THRESHOLD = 0.55          # cosine similarity threshold
+REGISTER_BLINK_COUNT = 2   # Jumlah wajib kedip saat tahap Blink
+
+# ── Anti-Spoofing (Passive Liveness) ──────────────────────────────────────────
+ANTI_SPOOFING_MODEL = "liveness/2.7_80x80_MiniFASNetV2.onnx"
+ANTI_SPOOFING_THRESHOLD = 0.85 # Skor minimum untuk dianggap manusia hidup (bukan foto)
+
+# ── Face Recognition (MobileFaceNet) ──────────────────────────────────────────
+MATCH_THRESHOLD = 0.55         # Batas kecocokan wajah (Cosine Similarity)
 MOBILEFACENET_PATH = "recognition/mobilefacenet.onnx"
 
-# ── Door lock ─────────────────────────────────────────────────────────────────
-LOCK_GPIO_PIN    = 18
-UNLOCK_DURATION  = 5   # seconds door stays unlocked
+# ── Door Lock ─────────────────────────────────────────────────────────────────
+LOCK_GPIO_PIN   = 18
+UNLOCK_DURATION = 5   # Detik pintu tetap terbuka saat akses diterima
 
-# ── Display ───────────────────────────────────────────────────────────────────
-FONT       = 1          # cv2.FONT_HERSHEY_SIMPLEX shorthand
+# ── Display & UI ──────────────────────────────────────────────────────────────
+FONT       = 1  # cv2.FONT_HERSHEY_SIMPLEX
 FONT_SCALE = 0.65
 LINE_TYPE  = 2
 

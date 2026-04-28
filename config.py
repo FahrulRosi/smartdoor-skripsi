@@ -7,28 +7,31 @@ IR_CUT_PIN      = 12
 MIN_DETECTION_CONFIDENCE = 0.5
 MIN_TRACKING_CONFIDENCE  = 0.5
 
-# ── Register Liveness Thresholds (Alur Bertahap Tanpa Delay) ─────────────────
+# ── Register Liveness Thresholds ──────────────────────────────────────────────
 # Batas toleransi untuk wajah dianggap "Lurus / Tengah" 
-MAX_YAW   = 10.0  
-MAX_PITCH = 10.0
-MAX_ROLL  = 10.0
+# (Ditingkatkan sedikit agar lebih mudah mendeteksi posisi lurus)
+MAX_YAW   = 12.0  
+MAX_PITCH = 12.0
+MAX_ROLL  = 12.0
 
-# Batas SANGAT KETAT untuk pengambilan foto database (Tahap Akhir)
-EXTRACTION_MAX_YAW   = 8.0  
-EXTRACTION_MAX_PITCH = 8.0
-EXTRACTION_MAX_ROLL  = 8.0
+# Batas untuk pengambilan foto database (Tahap Akhir)
+# Disamakan dengan MAX agar tidak terjadi "bottleneck" saat transisi
+EXTRACTION_MAX_YAW   = 12.0  
+EXTRACTION_MAX_PITCH = 12.0
+EXTRACTION_MAX_ROLL  = 12.0
 
-# Batas minimum derajat gerakan untuk dinyatakan lulus tantangan
-CHALLENGE_YAW   = 15.0  
-CHALLENGE_PITCH = 15.0  
-CHALLENGE_ROLL  = 15.0  
+# Batas derajat gerakan untuk dinyatakan lulus tantangan
+# Diturunkan dari 15.0 ke 12.0 agar tantangan tidak terasa terlalu sulit/berat
+CHALLENGE_YAW   = 12.0  
+CHALLENGE_PITCH = 12.0  
+CHALLENGE_ROLL  = 12.0  
 
-REGISTER_BLINK_COUNT = 2   
+REGISTER_BLINK_COUNT = 1 # Dikurangi menjadi 1 agar proses lebih cepat dan efisien
 
 # ── Anti-Spoofing & Recognition ──────────────────────────────────────────────
 ANTI_SPOOFING_MODEL = "liveness/antispoofing.onnx"
 ANTI_SPOOFING_THRESHOLD = 0.85 
-MATCH_THRESHOLD = 0.55         
+MATCH_THRESHOLD = 0.60        # Ditingkatkan ke 0.60 agar akurasi verifikasi wajah lebih aman
 MOBILEFACENET_PATH = "recognition/mobilefacenet.onnx"
 
 # ── Door Lock & UI ──────────────────────────────────────────────────────────

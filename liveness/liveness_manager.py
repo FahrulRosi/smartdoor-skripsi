@@ -19,7 +19,7 @@ class LivenessManager:
         
         # Tracker untuk menahan frame agar benar-benar stabil di tahap awal
         self._step_frame_count = 0  
-        self._required_frames = 10  # Butuh 10 frame beruntun (tanpa timer)
+        self._required_frames = 3  # Butuh 10 frame beruntun (tanpa timer)
 
     def start_register(self):
         self.reset_state()

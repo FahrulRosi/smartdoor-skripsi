@@ -23,12 +23,12 @@ except ImportError:
 
 # ─── STATE MACHINE ────────────────────────────────────────────────────────────
 class ValidationState(Enum):
-    IDLE = 0                    # Menunggu wajah
-    CHALLENGE = 1               # Menjalankan 1 tantangan acak (Liveness)
-    RECOGNIZING = 2             # Memproses identitas (MobileFaceNet)
-    UNMATCHED = 3               # Wajah tidak dikenal
-    LOCKED = 4                  # Akses ditolak
-    UNLOCKED = 5                # Pintu Terbuka
+    IDLE = 0
+    CHALLENGE = 1
+    RECOGNIZING = 2
+    UNMATCHED = 3
+    LOCKED = 4
+    UNLOCKED = 5
 
 # ─── HUD HELPERS ──────────────────────────────────────────────────────────────
 def _put(frame, text, y, color=config.COLOR_WHITE, x=10, scale=0.6):
@@ -47,10 +47,12 @@ def _print_log(msg, level="INFO"):
 def run_unlock():
     _print_log("Memulai Smart Door Lock (Mode Challenge Acak)...", "SYSTEM")
 
-    # Ambil data dari register (faces.pkl)
+    # Verifikasi database agar sinkron dengan hasil register.py
     registered_faces = get_all_faces()
     if not registered_faces:
-        _print_log("DB KOSONG: Jalankan register.py terlebih dahulu!", "ERROR")
+        _print_log("DB KOSONG: Belum ada wajah di sistem. Jalankan register.py terlebih dahulu!", "WARNING")
+    else:
+        _print_log(f"Berhasil memuat {len(registered_faces)} data wajah dari database.", "SYSTEM")
 
     if GPIO_AVAILABLE:
         try:
@@ -66,7 +68,7 @@ def run_unlock():
         model = MobileFaceNet()
         matcher = FaceMatcher(threshold=config.MATCH_THRESHOLD)
         pose_estimator = HeadPoseEstimator()
-        door = DoorLock(pin=config.LOCK_GPIO_PIN, unlock_duration=5) # Terbuka 5 detik
+        door = DoorLock(pin=config.LOCK_GPIO_PIN, unlock_duration=5)
         _print_log("Sistem Siap!", "SYSTEM")
     except Exception as e:
         _print_log(f"Load Error: {e}", "ERROR")
@@ -76,8 +78,10 @@ def run_unlock():
     state = ValidationState.IDLE
     current_challenge = None
     blink_checker = None
-    challenge_frames = 0
-    required_frames = 3 # Stabil selama 3 frame
+    
+    # Trackers pergerakan Challenge 2 arah
+    dir_1_done = False
+    dir_2_done = False
     
     last_name = "Unknown"
     last_score = 0.0
@@ -91,7 +95,7 @@ def run_unlock():
             faces = detector.detect(frame)
 
             if not faces:
-                # Reset jika wajah hilang
+                # Reset seluruh state jika wajah keluar dari frame kamera
                 if state != ValidationState.UNLOCKED:
                     state = ValidationState.IDLE
                 door.lock()
@@ -99,72 +103,82 @@ def run_unlock():
             else:
                 face = faces[0]
                 x_f, y_f, w_f, h_f = face.bbox
-                
-                # Alur 1: FaceMesh (Visualisasi Opsional agar RPi Ringan)
-                # display = detector.draw(display, face) 
 
                 if state == ValidationState.IDLE:
-                    # Pilih 1 tantangan acak dari daftar: Yaw, Pitch, Roll, atau Blink
                     challenges = ["YAW", "PITCH", "ROLL", "BLINK"]
                     current_challenge = random.choice(challenges)
-                    challenge_frames = 0
+                    dir_1_done, dir_2_done = False, False
+                    
                     if current_challenge == "BLINK":
                         blink_checker = BlinkDetector(target_blinks=1)
+                        
                     state = ValidationState.CHALLENGE
                     _print_log(f"Tantangan terpilih: {current_challenge}")
 
                 elif state == ValidationState.CHALLENGE:
-                    # Alur 2 & 3: Liveness Aktif (Hanya 1 Tantangan agar Cepat)
                     passed = False
                     instruction = ""
+                    progress_text = ""
                     
                     if current_challenge == "BLINK":
                         instruction = "Silakan Berkedip"
                         res = blink_checker.update(face, detector)
                         if res["complete"]: passed = True
+                        progress_text = f"Blink: {blink_checker.blink_count}/1"
                     else:
                         pose = pose_estimator.estimate(face, detector)
                         if pose["valid"]:
                             yaw, pitch, roll = pose["yaw"], pose["pitch"], pose["roll"]
-                            if current_challenge == "YAW":
-                                instruction = "Toleh Kiri/Kanan"
-                                if abs(yaw) > config.CHALLENGE_YAW: challenge_frames += 1
-                            elif current_challenge == "PITCH":
-                                instruction = "Angkat/Tunduk Kepala"
-                                if abs(pitch) > config.CHALLENGE_PITCH: challenge_frames += 1
-                            elif current_challenge == "ROLL":
-                                instruction = "Miringkan Kepala"
-                                if abs(roll) > config.CHALLENGE_ROLL: challenge_frames += 1
                             
-                            if challenge_frames >= required_frames: passed = True
+                            if current_challenge == "YAW":
+                                instruction = "Toleh Kanan DAN Kiri"
+                                if yaw > config.CHALLENGE_YAW: dir_1_done = True
+                                if yaw < -config.CHALLENGE_YAW: dir_2_done = True
+                                progress_text = f"Kanan {'✅' if dir_1_done else '❌'} | Kiri {'✅' if dir_2_done else '❌'}"
+                                
+                            elif current_challenge == "PITCH":
+                                instruction = "Tunduk DAN Angkat Kepala"
+                                if pitch > config.CHALLENGE_PITCH: dir_1_done = True
+                                if pitch < -config.CHALLENGE_PITCH: dir_2_done = True
+                                progress_text = f"Bawah {'✅' if dir_1_done else '❌'} | Atas {'✅' if dir_2_done else '❌'}"
+                                
+                            elif current_challenge == "ROLL":
+                                instruction = "Miring Kanan DAN Kiri"
+                                if roll > config.CHALLENGE_ROLL: dir_1_done = True
+                                if roll < -config.CHALLENGE_ROLL: dir_2_done = True
+                                progress_text = f"Kanan {'✅' if dir_1_done else '❌'} | Kiri {'✅' if dir_2_done else '❌'}"
+                            
+                            # Kedua aksi harus dicentang sebelum lolos
+                            if dir_1_done and dir_2_done: passed = True
 
                     if passed:
                         state = ValidationState.RECOGNIZING
+                        _print_log("Liveness Challenge berhasil! Mengekstrak wajah...", "INFO")
                     else:
                         _draw_validation_box(display, x_f, y_f, w_f, h_f, "LIVENESS CHECK", config.COLOR_YELLOW)
                         _put(display, f"CHALLENGE: {instruction}", 70, config.COLOR_YELLOW)
+                        _put(display, progress_text, 100, config.COLOR_WHITE)
 
                 elif state == ValidationState.RECOGNIZING:
-                    # Alur 4: MobileFaceNet & Pencocokan Database
                     _put(display, "Memverifikasi Identitas...", 70, config.COLOR_CYAN)
                     face_crop = model.crop_face(frame, face.bbox)
                     embedding = model.get_embedding(face_crop)
                     
-                    # Bandingkan dengan data register
+                    # Validasi database dilakukan di dalam FaceMatcher, memuat face.pkl secara dinamis
                     match = matcher.match(embedding)
                     
                     if match["matched"]:
                         last_name = match["name"]
                         last_score = match["score"]
                         state = ValidationState.UNLOCKED
-                        _print_log(f"AKSES DIBERIKAN: {last_name}", "ACCESS")
+                        _print_log(f"AKSES DIBERIKAN: {last_name} (Akurasi: {last_score})", "ACCESS")
                         door.unlock()
                     else:
                         state = ValidationState.UNMATCHED
                         last_name = "Tidak Dikenal"
                         _print_log("Akses Ditolak: Wajah tidak terdaftar.", "WARNING")
 
-                # --- Visualisasi Status Akhir ---
+                # Visualisasi Akhir
                 if state == ValidationState.UNLOCKED:
                     _draw_validation_box(display, x_f, y_f, w_f, h_f, last_name, config.COLOR_GREEN)
                     _put(display, f"Selamat Datang, {last_name}!", 70, config.COLOR_GREEN)
@@ -172,12 +186,12 @@ def run_unlock():
                     _draw_validation_box(display, x_f, y_f, w_f, h_f, "UNKNOWN", config.COLOR_RED)
                     _put(display, "Akses Ditolak!", 70, config.COLOR_RED)
 
-            # Indikator Pintu
+            # Indikator Hardware Pintu
             p_color = config.COLOR_GREEN if not door.locked else config.COLOR_RED
             status_pintu = "TERBUKA" if not door.locked else "TERKUNCI"
             _put(display, f"PINTU: {status_pintu}", config.FRAME_HEIGHT - 20, p_color)
 
-            cv2.imshow("Smart Door Lock - Unlock Mode", display)
+            cv2.imshow("Smart Door Lock", display)
             if cv2.waitKey(1) & 0xFF == ord("q"): break
 
     finally:

@@ -26,7 +26,7 @@ CHALLENGE_ROLL  = 15.0
 REGISTER_BLINK_COUNT = 2   
 
 # ── Anti-Spoofing & Recognition ──────────────────────────────────────────────
-ANTI_SPOOFING_MODEL = "liveness/2.7_80x80_MiniFASNetV2.onnx"
+ANTI_SPOOFING_MODEL = "liveness/antispoofing.onnx"
 ANTI_SPOOFING_THRESHOLD = 0.85 
 MATCH_THRESHOLD = 0.55         
 MOBILEFACENET_PATH = "recognition/mobilefacenet.onnx"

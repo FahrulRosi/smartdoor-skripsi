@@ -1,3 +1,5 @@
+# config.py
+
 CAMERA_INDEX    = 0
 FRAME_WIDTH     = 640
 FRAME_HEIGHT    = 480
@@ -9,30 +11,34 @@ MIN_TRACKING_CONFIDENCE  = 0.5
 
 # ── Register Liveness Thresholds ──────────────────────────────────────────────
 # Batas toleransi untuk wajah dianggap "Lurus / Tengah" 
-# (Ditingkatkan sedikit agar lebih mudah mendeteksi posisi lurus)
 MAX_YAW   = 12.0  
 MAX_PITCH = 12.0
 MAX_ROLL  = 12.0
 
 # Batas untuk pengambilan foto database (Tahap Akhir)
-# Disamakan dengan MAX agar tidak terjadi "bottleneck" saat transisi
 EXTRACTION_MAX_YAW   = 12.0  
 EXTRACTION_MAX_PITCH = 12.0
 EXTRACTION_MAX_ROLL  = 12.0
 
 # Batas derajat gerakan untuk dinyatakan lulus tantangan
-# Diturunkan dari 15.0 ke 12.0 agar tantangan tidak terasa terlalu sulit/berat
 CHALLENGE_YAW   = 12.0  
 CHALLENGE_PITCH = 12.0  
 CHALLENGE_ROLL  = 12.0  
 
-REGISTER_BLINK_COUNT = 1 # Dikurangi menjadi 1 agar proses lebih cepat dan efisien
+# Mapping agar register.py bisa membaca threshold tersebut
+YAW_THRESHOLD   = CHALLENGE_YAW
+PITCH_THRESHOLD = CHALLENGE_PITCH
+ROLL_THRESHOLD  = CHALLENGE_ROLL
+
+# Liveness Blinking
+BLINK_EAR_THRESHOLD  = 0.22 # Pastikan nilai ini ada untuk deteksi kedipan
+REGISTER_BLINK_COUNT = 1 
 
 # ── Anti-Spoofing & Recognition ──────────────────────────────────────────────
-ANTI_SPOOFING_MODEL = "liveness/antispoofing.onnx"
+ANTI_SPOOFING_MODEL     = "liveness/antispoofing.onnx"
 ANTI_SPOOFING_THRESHOLD = 0.85 
-MATCH_THRESHOLD = 0.60        # Ditingkatkan ke 0.60 agar akurasi verifikasi wajah lebih aman
-MOBILEFACENET_PATH = "recognition/mobilefacenet.onnx"
+MATCH_THRESHOLD         = 0.60 
+MOBILEFACENET_PATH      = "recognition/mobilefacenet.onnx"
 
 # ── Door Lock & UI ──────────────────────────────────────────────────────────
 LOCK_GPIO_PIN   = 18

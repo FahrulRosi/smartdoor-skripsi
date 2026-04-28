@@ -11,6 +11,7 @@ from liveness.liveness_manager  import LivenessManager
 from recognition.mobilefacenet  import MobileFaceNet
 from recognition.face_matcher   import FaceMatcher  
 from database.face_db           import save_face
+from liveness.anti_spoofing     import SilentAntiSpoofing
 
 try:
     import RPi.GPIO as GPIO
@@ -125,6 +126,7 @@ def run_register(name):
     liveness = LivenessManager()
     model = MobileFaceNet()
     matcher = FaceMatcher(threshold=config.MATCH_THRESHOLD) 
+    anti_spoof = SilentAntiSpoofing()
 
     liveness.start_register()
     current_stage = RegistrationStage.FACEMESH
@@ -150,6 +152,21 @@ def run_register(name):
                 # MENGGAMBAR FACEMESH: Baris ini diaktifkan kembali
                 display = detector.draw(display, face) 
                 
+                # --- PENAMBAHAN PENGECEKAN ANTI-SPOOFING ---
+                spoof_res = anti_spoof.is_real(frame, face.bbox)
+                
+                if not spoof_res["real"]:
+                    # Jika terdeteksi foto/video, tampilkan peringatan merah dan tahan proses
+                    _draw_validation_box(display, face.bbox, "WAJAH PALSU!", config.COLOR_RED)
+                    _draw_status_panel(display, current_stage, "Terdeteksi Foto/Video!", f"Skor: {spoof_res['score']}", "Gunakan wajah asli!")
+                    
+                    cv2.imshow("Register", display)
+                    if cv2.waitKey(1) & 0xFF == ord("q"):
+                        _print_log("Registrasi dibatalkan oleh user", "WARNING")
+                        break
+                    continue  # Kembali ke awal loop, abaikan tahap Liveness
+                # -------------------------------------------
+
                 # TAHAP 2 & 3: Liveness Detection (Yaw, Pitch, Roll) & Blink
                 if current_stage != RegistrationStage.EXTRACTION and not extraction_in_progress:
                     result = liveness.update_register(face, detector)

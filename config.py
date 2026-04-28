@@ -31,9 +31,6 @@ ANTI_SPOOFING_THRESHOLD = 0.85
 MATCH_THRESHOLD = 0.55         
 MOBILEFACENET_PATH = "recognition/mobilefacenet.onnx"
 
-# ── Enhanced Anti-Spoofing ─────────────────────────────────────────
-ANTI_SPOOFING_REQUIRED_CONSECUTIVE_FRAMES = 3
-
 # ── Door Lock & UI ──────────────────────────────────────────────────────────
 LOCK_GPIO_PIN   = 18
 UNLOCK_DURATION = 5   

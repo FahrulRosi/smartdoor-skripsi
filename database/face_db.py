@@ -2,8 +2,7 @@ import os
 import pickle
 import numpy as np
 
-# PAKSA agar faces.pkl selalu berada di folder root project (smartdoor-skripsi)
-# Naik 1 level dari folder 'database' ke folder utama
+# Path database
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB_PATH  = os.path.join(ROOT_DIR, "faces.pkl")
 
@@ -15,7 +14,7 @@ class FaceDB:
     def load(self):
         print(f"[DEBUG] Sedang mencari database di: {self.path}")
         if not os.path.exists(self.path):
-            print("[DEBUG] File faces.pkl BELUM ADA di lokasi tersebut!")
+            print("[DEBUG] File faces.pkl BELUM ADA, akan dibuat baru.")
             return []
         try:
             with open(self.path, "rb") as f:
@@ -39,81 +38,40 @@ class FaceDB:
 _db = FaceDB()
 
 
-# ─── PUBLIC API ───────────────────────────────────────────────────────────────
-
 def get_all_faces():
-    """Mengambil semua data wajah yang terdaftar dari file pkl."""
     return _db.load()
 
 
 def save_face(name: str, embedding: np.ndarray, captured: dict | None = None):
-    """
-    Menyimpan data lengkap registrasi ke dalam file pkl.
-
-    Struktur record yang disimpan
-    ─────────────────────────────
-    {
-        "name": str,
-
-        # Tahap 1 – FaceMesh
-        "facemesh_vector": np.ndarray | None,      # (1404,) float32
-
-        # Tahap 2 – Pose
-        "yaw_snapshots":   list[dict],             # [{tag, yaw, pitch, roll}, ...]
-        "pitch_snapshots": list[dict],
-        "roll_snapshots":  list[dict],
-
-        # Tahap 3 – Blink
-        "blink_closed": dict | None,               # {left_ear, right_ear, avg_ear, blink_detected}
-        "blink_open":   dict | None,
-
-        # Tahap 4 – MobileFaceNet (dipakai untuk recognition / matching)
-        "embedding":    np.ndarray,                # (512,) float32   ← kunci utama matcher
-    }
-
-    Parameter
-    ---------
-    name      : Nama pengguna yang didaftarkan.
-    embedding : Vektor MobileFaceNet (512-dim) – wajib ada.
-    captured  : Dict hasil tangkapan tiap tahap dari register.py.
-                Jika None, hanya embedding yang disimpan (fallback).
-    """
     faces = _db.load()
 
-    # Bangun record baru dari semua data yang dikumpulkan
     record = {
         "name":      name,
-        "embedding": embedding,   # ← tetap di key "embedding" agar FaceMatcher tidak berubah
+        "embedding": embedding,
+        "registered_at": "unknown",
     }
 
     if captured is not None:
-        # ── Tahap 1 – FaceMesh ───────────────────────────────────────────────
-        record["facemesh_vector"] = captured.get("facemesh_vector")   # np.ndarray | None
+        record.update({
+            "facemesh_vector": captured.get("facemesh_vector"),
+            "yaw_snapshots":   captured.get("yaw_snapshots", []),
+            "pitch_snapshots": captured.get("pitch_snapshots", []),
+            "roll_snapshots":  captured.get("roll_snapshots", []),
+            "blink_closed":    captured.get("blink_closed"),
+            "blink_open":      captured.get("blink_open"),
+            "mobilefacenet_embedding": captured.get("mobilefacenet_embedding", embedding),
+        })
 
-        # ── Tahap 2 – Pose snapshots ─────────────────────────────────────────
-        record["yaw_snapshots"]   = captured.get("yaw_snapshots",   [])
-        record["pitch_snapshots"] = captured.get("pitch_snapshots", [])
-        record["roll_snapshots"]  = captured.get("roll_snapshots",  [])
-
-        # ── Tahap 3 – Blink ───────────────────────────────────────────────────
-        record["blink_closed"] = captured.get("blink_closed")
-        record["blink_open"]   = captured.get("blink_open")
-
-        # Embedding MobileFaceNet juga disimpan di key khusus agar mudah diakses
-        record["mobilefacenet_embedding"] = captured.get("mobilefacenet_embedding", embedding)
-
-        # ── Log ringkasan apa yang berhasil disimpan ──────────────────────────
         _log_saved_summary(name, record)
     else:
-        # Fallback: hanya embedding yang ada (tidak ada data tahap lain)
-        print(f"[FaceDB] WARNING: captured=None untuk {name}. Hanya embedding yang disimpan.")
+        print(f"[FaceDB] WARNING: captured=None untuk {name}.")
 
-    # Update jika nama sudah ada, tambah jika baru
+    # Update atau tambah data baru
     updated = False
     for i, face in enumerate(faces):
-        if face["name"] == name:
+        if face.get("name") == name:
             faces[i] = record
-            updated   = True
+            updated = True
             print(f"[FaceDB] Data wajah '{name}' diperbarui.")
             break
 
@@ -125,31 +83,31 @@ def save_face(name: str, embedding: np.ndarray, captured: dict | None = None):
 
 
 def _log_saved_summary(name: str, record: dict):
-    """Cetak ringkasan data yang berhasil disimpan ke database."""
-    fm  = record.get("facemesh_vector")
-    emb = record.get("embedding")
-
-    print("\n" + "─" * 60)
+    """Versi AMAN dari summary (mencegah error NoneType)"""
+    print("\n" + "─" * 75)
     print(f"  [FaceDB] RINGKASAN DATA TERSIMPAN UNTUK: {name}")
-    print("─" * 60)
-    print(f"  Tahap 1 – FaceMesh vector   : "
-          f"{'shape=' + str(fm.shape) if fm is not None else 'TIDAK ADA'}")
-    print(f"  Tahap 2 – YAW snapshots     : "
-          f"{len(record.get('yaw_snapshots', []))} snapshot(s) "
-          f"{[s['tag'] for s in record.get('yaw_snapshots', [])]}")
-    print(f"  Tahap 2 – PITCH snapshots   : "
-          f"{len(record.get('pitch_snapshots', []))} snapshot(s) "
-          f"{[s['tag'] for s in record.get('pitch_snapshots', [])]}")
-    print(f"  Tahap 2 – ROLL snapshots    : "
-          f"{len(record.get('roll_snapshots', []))} snapshot(s) "
-          f"{[s['tag'] for s in record.get('roll_snapshots', [])]}")
+    print("─" * 75)
 
+    fm = record.get("facemesh_vector")
+    print(f"  Tahap 1 – FaceMesh vector   : {'shape=' + str(fm.shape) if fm is not None else 'TIDAK ADA'}")
+
+    print(f"  Tahap 2 – YAW snapshots     : {len(record.get('yaw_snapshots', []))} snapshot(s)")
+    print(f"  Tahap 2 – PITCH snapshots   : {len(record.get('pitch_snapshots', []))} snapshot(s)")
+    print(f"  Tahap 2 – ROLL snapshots    : {len(record.get('roll_snapshots', []))} snapshot(s)")
+
+    # === PERBAIKAN UTAMA: Penanganan aman untuk blink ===
     bc = record.get("blink_closed")
     bo = record.get("blink_open")
-    print(f"  Tahap 3 – BLINK closed EAR  : "
-          f"{bc['avg_ear']:.4f if bc else 'TIDAK ADA'}")
-    print(f"  Tahap 3 – BLINK open EAR    : "
-          f"{bo['avg_ear']:.4f if bo else 'TIDAK ADA'}")
-    print(f"  Tahap 4 – MobileFaceNet emb : "
-          f"shape={emb.shape}, norm={np.linalg.norm(emb):.4f}")
-    print("─" * 60 + "\n")
+
+    blink_closed_ear = bc.get('avg_ear', 'TIDAK ADA') if bc is not None else 'TIDAK ADA / BELUM KEDIP'
+    blink_open_ear   = bo.get('avg_ear', 'TIDAK ADA') if bo is not None else 'TIDAK ADA / BELUM KEDIP'
+
+    print(f"  Tahap 3 – BLINK closed EAR  : {blink_closed_ear}")
+    print(f"  Tahap 3 – BLINK open EAR    : {blink_open_ear}")
+
+    emb = record.get("embedding")
+    emb_norm = np.linalg.norm(emb) if emb is not None else 0
+    print(f"  Tahap 4 – MobileFaceNet emb : shape={emb.shape if emb is not None else 'TIDAK ADA'}, "
+          f"norm={emb_norm:.4f}")
+
+    print("─" * 75 + "\n")

@@ -1,5 +1,5 @@
-import sys
 import cv2
+from datetime import datetime
 from enum import Enum
 import numpy as np
 
@@ -18,377 +18,337 @@ try:
 except ImportError:
     GPIO_AVAILABLE = False
 
-
-# ─── REGISTRATION STAGES ──────────────────────────────────────────────────────
+# ─── STAGES ───────────────────────────────────────────────────────────────────
 class RegistrationStage(Enum):
-    IDLE       = 0
-    FACEMESH   = 1
-    YAW        = 2
-    PITCH      = 3
-    ROLL       = 4
-    BLINK      = 5
-    EXTRACTION = 6
-    COMPLETE   = 7
-
+    IDLE=0; FACEMESH=1; YAW=2; PITCH=3; ROLL=4; BLINK=5; EXTRACTION=6; COMPLETE=7
 
 STAGE_NAMES = {
-    RegistrationStage.FACEMESH:   "1. FaceMesh (Deteksi Struktur Wajah)",
-    RegistrationStage.YAW:        "2a. Liveness - Toleh Kiri & Kanan",
-    RegistrationStage.PITCH:      "2b. Liveness - Ngangguk Atas & Bawah",
-    RegistrationStage.ROLL:       "2c. Liveness - Miring Kiri & Kanan",
-    RegistrationStage.BLINK:      "3. Liveness - Kedipkan Mata",
-    RegistrationStage.EXTRACTION: "4. Ekstraksi MobileFaceNet",
+    RegistrationStage.FACEMESH:   "1. FaceMesh (Deteksi Struktur)",
+    RegistrationStage.YAW:        "2a. Liveness (Toleh Kiri & Kanan)",
+    RegistrationStage.PITCH:      "2b. Liveness (Ngangguk Atas & Bawah)",
+    RegistrationStage.ROLL:       "2c. Liveness (Miring Kiri & Kanan)",
+    RegistrationStage.BLINK:      "3. Liveness (Kedipkan Mata)",
+    RegistrationStage.EXTRACTION: "4. Validasi MobileFaceNet",
 }
 
+STEP_TO_STAGE = {
+    "FACEMESH": RegistrationStage.FACEMESH, "YAW": RegistrationStage.YAW,
+    "PITCH":    RegistrationStage.PITCH,    "ROLL": RegistrationStage.ROLL,
+    "BLINK":    RegistrationStage.BLINK,    "DONE": RegistrationStage.EXTRACTION,
+}
 
-# ─── FEATURE CAPTURE HELPERS ──────────────────────────────────────────────────
+# Indeks landmark MediaPipe untuk EAR blink
+_LEFT_EYE  = [33, 160, 158, 133, 153, 144]
+_RIGHT_EYE = [362, 385, 387, 263, 373, 380]
 
-def _capture_facemesh_vector(face) -> np.ndarray | None:
-    """Capture & normalize FaceMesh landmarks (468 points × 3 = 1404 dim)"""
+# ─── CAPTURE HELPERS ──────────────────────────────────────────────────────────
+def _capture_facemesh(face):
     try:
         lm = face.landmarks
-        if lm is None or len(lm) == 0:
-            return None
-
-        arr = np.array(lm, dtype=np.float32)        # shape: (468, 3)
-
-        # Normalisasi: center + scale
-        center = np.mean(arr, axis=0)
-        arr = arr - center
-
-        scale = np.max(np.linalg.norm(arr, axis=1)) + 1e-8
-        arr = arr / scale
-
-        return arr.flatten()                        # (1404,)
+        # PERBAIKAN: Menghindari Numpy Truth Value ValueError
+        if lm is None or len(lm) == 0: return None
+        return np.array(lm, dtype=np.float32).flatten()
     except Exception as e:
-        _print_log(f"Gagal capture facemesh vector: {e}", "WARNING")
-        return None
+        _log(f"Gagal capture facemesh: {e}", "WARNING"); return None
 
+def _capture_pose(pose, tag):
+    return {k: float(pose.get(k, 0.0)) for k in ("yaw", "pitch", "roll")} | {"tag": tag}
 
-def _capture_pose_snapshot(pose: dict, tag: str) -> dict:
-    """Tanpa timestamp"""
-    return {
-        "tag":   tag,
-        "yaw":   float(pose.get("yaw",   0.0)),
-        "pitch": float(pose.get("pitch", 0.0)),
-        "roll":  float(pose.get("roll",  0.0)),
-    }
-
-
-def _capture_blink_vector(face, detector) -> dict | None:
+def _capture_blink(face):
     try:
-        LEFT_EYE  = [33, 160, 158, 133, 153, 144]
-        RIGHT_EYE = [362, 385, 387, 263, 373, 380]
-
         lm = face.landmarks
-        if lm is None or len(lm) < 400:
-            return None
-
-        def eye_aspect_ratio(indices):
-            pts = np.array([lm[i][:2] for i in indices], dtype=np.float32)
-            A = np.linalg.norm(pts[1] - pts[5])
-            B = np.linalg.norm(pts[2] - pts[4])
-            C = np.linalg.norm(pts[0] - pts[3])
-            return (A + B) / (2.0 * C + 1e-6)
-
-        left_ear  = eye_aspect_ratio(LEFT_EYE)
-        right_ear = eye_aspect_ratio(RIGHT_EYE)
-        avg_ear   = (left_ear + right_ear) / 2.0
-
-        return {
-            "left_ear":  float(left_ear),
-            "right_ear": float(right_ear),
-            "avg_ear":   float(avg_ear),
-            "blink_detected": avg_ear < config.BLINK_EAR_THRESHOLD,
-        }
+        if lm is None or len(lm) < 400: return None
+        def ear(idx):
+            p = np.array([lm[i][:2] for i in idx], dtype=np.float32)
+            return (np.linalg.norm(p[1]-p[5]) + np.linalg.norm(p[2]-p[4])) / (2*np.linalg.norm(p[0]-p[3]) + 1e-6)
+        l, r = ear(_LEFT_EYE), ear(_RIGHT_EYE)
+        avg  = (l + r) / 2.0
+        # Mengembalikan EAR murni tanpa komparasi limit
+        return {"left_ear": float(l), "right_ear": float(r), "avg_ear": float(avg)}
     except Exception as e:
-        _print_log(f"Gagal capture blink vector: {e}", "WARNING")
-        return None
-
+        _log(f"Gagal capture blink: {e}", "WARNING"); return None
 
 # ─── HUD HELPERS ──────────────────────────────────────────────────────────────
-
 def _put(frame, text, y, color=config.COLOR_WHITE, x=10, scale=0.6, thickness=1):
-    cv2.putText(frame, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale, color, thickness, cv2.LINE_AA)
+    cv2.putText(frame, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale, color, thickness)
 
+def _draw_progress_bar(frame, stage, total=6):
+    W, bw, bh = config.FRAME_WIDTH, 350, 25
+    x, y = (W - bw) // 2, 15
+    sv   = min(stage.value, total)
+    cv2.rectangle(frame, (x, y), (x+bw, y+bh), (30,30,30), -1)
+    pw = int(bw * (sv-1) / total)
+    if pw > 0: cv2.rectangle(frame, (x, y), (x+pw, y+bh), config.COLOR_GREEN, -1)
+    cv2.rectangle(frame, (x, y), (x+bw, y+bh), config.COLOR_WHITE, 2)
+    txt  = f"Tahap {sv if sv<=5 else 6}/6"
+    ts   = cv2.getTextSize(txt, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)[0]
+    cv2.putText(frame, txt, (x+(bw-ts[0])//2, y+(bh+ts[1])//2), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,255,255), 1)
 
-def _draw_stage_progress_bar(frame, current_stage, total_stages=6):
-    bar_width  = 380
-    bar_height = 28
-    x = (config.FRAME_WIDTH - bar_width) // 2
-    y = 15
+def _draw_panel(frame, stage, instruction, progress="", details=""):
+    cv2.rectangle(frame, (0,50), (config.FRAME_WIDTH, 150), (20,20,20), -1)
+    cv2.rectangle(frame, (0,50), (config.FRAME_WIDTH, 150), config.COLOR_CYAN, 2)
+    _put(frame, STAGE_NAMES.get(stage,"Proses..."), 75,  config.COLOR_GREEN,  20, 0.85, 2)
+    _put(frame, instruction,                        105, config.COLOR_YELLOW, 20, 0.65, 2)
+    if progress: _put(frame, f"Status: {progress}", 125, config.COLOR_CYAN,  20, 0.6)
+    if details:  _put(frame, details,               145, config.COLOR_WHITE, 20, 0.55)
 
-    cv2.rectangle(frame, (x, y), (x + bar_width, y + bar_height), (40, 40, 40), -1)
-    progress = min((current_stage.value - 1) / total_stages, 1.0)
-    progress_width = int(bar_width * progress)
+def _draw_box(frame, bbox, status, color):
+    x, y, w, h = bbox
+    cv2.rectangle(frame, (x,y), (x+w,y+h), color, 3)
+    cl = 25
+    for (a,b),(c,d) in [((x,y),(x+cl,y)),((x,y),(x,y+cl)),((x+w,y),(x+w-cl,y)),((x+w,y),(x+w,y+cl))]:
+        cv2.line(frame, (a,b), (c,d), color, 3)
+    cv2.rectangle(frame, (x,y-35), (x+180,y-5), color, -1)
+    cv2.putText(frame, status, (x+5,y-12), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255,255,255), 2)
 
-    if progress_width > 0:
-        cv2.rectangle(frame, (x, y), (x + progress_width, y + bar_height), config.COLOR_GREEN, -1)
+def _log(msg, level="INFO"):
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] [{level}] {msg}")
 
-    cv2.rectangle(frame, (x, y), (x + bar_width, y + bar_height), config.COLOR_WHITE, 2)
-
-    text = f"Tahap {min(current_stage.value, 6)}/6"
-    t_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)[0]
-    t_x = x + (bar_width - t_size[0]) // 2
-    t_y = y + (bar_height + t_size[1]) // 2
-    cv2.putText(frame, text, (t_x, t_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
-
-
-def _draw_status_panel(frame, stage, instruction, progress="", details=""):
-    panel_h = 110
-    cv2.rectangle(frame, (0, 50), (config.FRAME_WIDTH, 50 + panel_h), (25, 25, 35), -1)
-    cv2.rectangle(frame, (0, 50), (config.FRAME_WIDTH, 50 + panel_h), config.COLOR_CYAN, 2)
-
-    stage_name = STAGE_NAMES.get(stage, "Proses Registrasi")
-    _put(frame, stage_name, 75, config.COLOR_GREEN, 20, scale=0.85, thickness=2)
-    _put(frame, instruction, 105, config.COLOR_YELLOW, 20, scale=0.65, thickness=2)
-
-    if progress:
-        _put(frame, f"Status: {progress}", 130, config.COLOR_CYAN, 20, scale=0.6)
-    if details:
-        _put(frame, details, 150, config.COLOR_WHITE, 20, scale=0.55)
-
-
-def _draw_validation_box(frame, face_bbox, status, color):
-    x, y, w, h = face_bbox
-    cv2.rectangle(frame, (x, y), (x + w, y + h), color, 3)
-
-    cl = 28
-    cv2.line(frame, (x, y), (x + cl, y), color, 3)
-    cv2.line(frame, (x, y), (x, y + cl), color, 3)
-    cv2.line(frame, (x + w, y), (x + w - cl, y), color, 3)
-    cv2.line(frame, (x + w, y), (x + w, y + cl), color, 3)
-
-    cv2.rectangle(frame, (x, y - 35), (x + 190, y - 5), color, -1)
-    cv2.putText(frame, status, (x + 8, y - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.68, (255, 255, 255), 2)
-
-
-def _print_log(msg, level="INFO"):
-    print(f"[{level}] {msg}")
-
-
-# ─── MAIN REGISTRATION ────────────────────────────────────────────────────────
-
-def run_register(name: str):
-    _print_log(f"Memulai registrasi untuk: {name}", "SYSTEM")
-    print("\n" + "="*80)
-    print("          REGISTRASI WAJAH MULTI-FITUR")
-    print("  FaceMesh → Pose Liveness → Blink → MobileFaceNet")
-    print("="*80 + "\n")
+# ─── MAIN ─────────────────────────────────────────────────────────────────────
+def run_register(name):
+    _log(f"Memulai registrasi: {name}", "SYSTEM")
 
     if GPIO_AVAILABLE:
         try:
-            GPIO.setmode(GPIO.BCM)
-            GPIO.setup(config.IR_CUT_PIN, GPIO.OUT)
+            GPIO.setmode(GPIO.BCM); GPIO.setup(config.IR_CUT_PIN, GPIO.OUT)
             GPIO.output(config.IR_CUT_PIN, GPIO.HIGH)
-        except Exception as e:
-            _print_log(f"Gagal setup GPIO IR-CUT: {e}", "WARNING")
+        except Exception as e: _log(f"Gagal IR-CUT: {e}", "WARNING")
 
-    cam = CameraStream(config.CAMERA_INDEX, config.FRAME_WIDTH, config.FRAME_HEIGHT).start()
+    try:
+        cam = CameraStream(config.CAMERA_INDEX, config.FRAME_WIDTH, config.FRAME_HEIGHT).start()
+    except Exception as e:
+        _log(f"Gagal kamera: {e}", "ERROR"); return
 
-    # Inisialisasi modul
-    detector   = FaceMeshDetector(
-        min_detection_confidence=config.MIN_DETECTION_CONFIDENCE,
-        min_tracking_confidence=config.MIN_TRACKING_CONFIDENCE,
+    detector = FaceMeshDetector(
+        min_detection_confidence=config.MIN_DETECTION_CONFIDENCE, 
+        min_tracking_confidence=config.MIN_TRACKING_CONFIDENCE
     )
     liveness   = LivenessManager()
     model      = MobileFaceNet()
     matcher    = FaceMatcher(threshold=config.MATCH_THRESHOLD)
     anti_spoof = SilentAntiSpoofing()
-
     liveness.start_register()
-    current_stage = RegistrationStage.FACEMESH
-    extraction_in_progress = False
 
-    # Container untuk semua data yang akan disimpan
-    captured = {
-        "facemesh_vector": None,
-        "yaw_snapshots": [],
-        "pitch_snapshots": [],
-        "roll_snapshots": [],
-        "blink_closed": None,
-        "blink_open": None,
-        "mobilefacenet_embedding": None,
+    stage  = RegistrationStage.FACEMESH
+    in_ext = False
+
+    # Wadah hasil capture tiap tahap
+    cap = {
+        "facemesh_vector":         None,   
+        "yaw_snapshots":           [],     
+        "pitch_snapshots":         [],     
+        "roll_snapshots":          [],     
+        "blink_closed":            None,   
+        "blink_open":              None,
+        "mobilefacenet_embedding": None,   
     }
 
-    _blink_was_closed = False
+    _pose_buf         = {"yaw": {}, "pitch": {}, "roll": {}}
+    _blink_buf        = {"closed": None, "open": None}
+    _prev_step        = "FACEMESH"  
+
+    POSE_CFG = {
+        RegistrationStage.YAW:   ("yaw_snapshots",   "yaw_left",  "yaw_right",  "yaw",   config.YAW_THRESHOLD),
+        RegistrationStage.PITCH: ("pitch_snapshots", "pitch_up",  "pitch_down", "pitch", config.PITCH_THRESHOLD),
+        RegistrationStage.ROLL:  ("roll_snapshots",  "roll_left", "roll_right", "roll",  config.ROLL_THRESHOLD),
+    }
+    STEP_COMMIT = {"YAW": "yaw", "PITCH": "pitch", "ROLL": "roll"}
 
     try:
         while True:
             ret, frame = cam.read()
-            if not ret:
-                continue
-
+            if not ret: continue
             display = frame.copy()
-            faces = detector.detect(frame)
+            faces   = detector.detect(frame)
 
             if not faces:
-                cv2.rectangle(display, (0, 0), (config.FRAME_WIDTH, config.FRAME_HEIGHT), config.COLOR_RED, 5)
-                _draw_stage_progress_bar(display, current_stage)
-                _draw_status_panel(display, current_stage, "Wajah tidak terdeteksi", "Hadapkan wajah ke kamera")
+                cv2.rectangle(display,(0,0),(config.FRAME_WIDTH,config.FRAME_HEIGHT),config.COLOR_RED,4)
+                _draw_panel(display, stage, "Wajah tidak terdeteksi", "Hadapkan wajah ke kamera")
             else:
-                face = faces[0]
+                face    = faces[0]
                 display = detector.draw(display, face)
 
-                # Anti-Spoofing Check
-                spoof_res = anti_spoof.is_real(frame, face.bbox)
-                if not spoof_res.get("real", True):
-                    _draw_validation_box(display, face.bbox, "WAJAH PALSU!", config.COLOR_RED)
-                    _draw_status_panel(display, current_stage, "Terdeteksi Spoofing!", f"Score: {spoof_res.get('score', 0):.3f}")
+                # Anti-spoofing
+                spoof = anti_spoof.is_real(frame, face.bbox)
+                if not spoof["real"]:
+                    _draw_box(display, face.bbox, "WAJAH PALSU!", config.COLOR_RED)
+                    _draw_panel(display, stage, "Terdeteksi Foto/Video!", f"Skor: {spoof['score']}", "Gunakan wajah asli!")
                     cv2.imshow("Register", display)
-                    if cv2.waitKey(1) & 0xFF == ord('q'):
-                        break
+                    if cv2.waitKey(1) & 0xFF == ord("q"): break
                     continue
 
-                # Tahap 1: Capture FaceMesh
-                if captured["facemesh_vector"] is None:
-                    vec = _capture_facemesh_vector(face)
-                    if vec is not None:
-                        captured["facemesh_vector"] = vec
-                        _print_log(f"FaceMesh vector captured: shape={vec.shape}", "SUCCESS")
-
-                # Liveness stages
-                if current_stage != RegistrationStage.EXTRACTION and not extraction_in_progress:
-                    result = liveness.update_register(face, detector)
-                    new_step = result.get("step", "WAIT")
-
-                    step_map = {
-                        "FACEMESH": RegistrationStage.FACEMESH,
-                        "YAW":      RegistrationStage.YAW,
-                        "PITCH":    RegistrationStage.PITCH,
-                        "ROLL":     RegistrationStage.ROLL,
-                        "BLINK":    RegistrationStage.BLINK,
-                        "DONE":     RegistrationStage.EXTRACTION,
-                    }
-                    current_stage = step_map.get(new_step, current_stage)
-
+                if stage != RegistrationStage.EXTRACTION and not in_ext:
                     pose = liveness.pose_estimator.estimate(face, detector)
 
-                    # Capture Pose Snapshots
-                    if current_stage == RegistrationStage.YAW:
-                        yaw = pose.get("yaw", 0.0)
-                        snaps = captured["yaw_snapshots"]
-                        if yaw < -config.YAW_THRESHOLD and not any(s["tag"] == "yaw_left" for s in snaps):
-                            snaps.append(_capture_pose_snapshot(pose, "yaw_left"))
-                            _print_log("YAW Left captured", "SUCCESS")
-                        if yaw > config.YAW_THRESHOLD and not any(s["tag"] == "yaw_right" for s in snaps):
-                            snaps.append(_capture_pose_snapshot(pose, "yaw_right"))
-                            _print_log("YAW Right captured", "SUCCESS")
+                    # ─── 1. CAPTURE DATA DULU (Tahan Ekstrem) ───
+                    
+                    # A. Tangkap FaceMesh Secepatnya
+                    if stage == RegistrationStage.FACEMESH:
+                        if cap["facemesh_vector"] is None:
+                            fm = _capture_facemesh(face)
+                            if fm is not None:
+                                cap["facemesh_vector"] = fm
+                                _log("[COMMIT] FaceMesh: 468 landmarks (1404 dim)", "SUCCESS")
 
-                    if current_stage == RegistrationStage.PITCH:
-                        pitch = pose.get("pitch", 0.0)
-                        snaps = captured["pitch_snapshots"]
-                        if pitch > config.PITCH_THRESHOLD and not any(s["tag"] == "pitch_up" for s in snaps):
-                            snaps.append(_capture_pose_snapshot(pose, "pitch_up"))
-                            _print_log("PITCH Up captured", "SUCCESS")
-                        if pitch < -config.PITCH_THRESHOLD and not any(s["tag"] == "pitch_down" for s in snaps):
-                            snaps.append(_capture_pose_snapshot(pose, "pitch_down"))
-                            _print_log("PITCH Down captured", "SUCCESS")
+                    # B. Tangkap Snapshot Kemiringan Wajah
+                    if stage in POSE_CFG:
+                        _, tag_neg, tag_pos, axis, thr = POSE_CFG[stage]
+                        val = pose.get(axis, 0.0)
+                        buf = _pose_buf[axis]
+                        cap_thr = thr * 0.7  
 
-                    if current_stage == RegistrationStage.ROLL:
-                        roll = pose.get("roll", 0.0)
-                        snaps = captured["roll_snapshots"]
-                        if roll < -config.ROLL_THRESHOLD and not any(s["tag"] == "roll_left" for s in snaps):
-                            snaps.append(_capture_pose_snapshot(pose, "roll_left"))
-                            _print_log("ROLL Left captured", "SUCCESS")
-                        if roll > config.ROLL_THRESHOLD and not any(s["tag"] == "roll_right" for s in snaps):
-                            snaps.append(_capture_pose_snapshot(pose, "roll_right"))
-                            _print_log("ROLL Right captured", "SUCCESS")
+                        if val < -cap_thr:
+                            if tag_neg not in buf or val < buf[tag_neg][axis]:
+                                buf[tag_neg] = _capture_pose(pose, tag_neg)
+                        if val > cap_thr:
+                            if tag_pos not in buf or val > buf[tag_pos][axis]:
+                                buf[tag_pos] = _capture_pose(pose, tag_pos)
 
-                    # Capture Blink
-                    if current_stage == RegistrationStage.BLINK:
-                        blink_vec = _capture_blink_vector(face, detector)
-                        if blink_vec:
-                            if blink_vec["blink_detected"] and not _blink_was_closed:
-                                captured["blink_closed"] = blink_vec
-                                _blink_was_closed = True
-                                _print_log(f"BLINK closed captured | EAR={blink_vec['avg_ear']:.3f}", "SUCCESS")
-                            elif not blink_vec["blink_detected"] and _blink_was_closed:
-                                captured["blink_open"] = blink_vec
-                                _blink_was_closed = False
-                                _print_log(f"BLINK open captured | EAR={blink_vec['avg_ear']:.3f}", "SUCCESS")
+                    # C. Tangkap Mata (Selalu mencari EAR Terendah dan Tertinggi)
+                    if stage == RegistrationStage.BLINK:
+                        bv = _capture_blink(face)
+                        if bv:
+                            # Tangkap mata tertutup (Cari nilai EAR paling minimal)
+                            if _blink_buf["closed"] is None or bv["avg_ear"] < _blink_buf["closed"]["avg_ear"]:
+                                _blink_buf["closed"] = bv
+                            # Tangkap mata terbuka (Cari nilai EAR paling maksimal)
+                            if _blink_buf["open"] is None or bv["avg_ear"] > _blink_buf["open"]["avg_ear"]:
+                                _blink_buf["open"] = bv
 
-                    # Draw UI
-                    status_text = "PASSED" if result.get("step") == "DONE" else "TAHAN LURUS" if result.get("step") == "WAIT" else "VALIDATING"
-                    box_color = config.COLOR_GREEN if result.get("step") == "DONE" else config.COLOR_YELLOW if result.get("step") == "WAIT" else config.COLOR_CYAN
+                    # ─── 2. UPDATE LIVENESS MANAGER ───
+                    result   = liveness.update_register(face, detector)
+                    cur_step = result["step"]
 
-                    _draw_validation_box(display, face.bbox, status_text, box_color)
-                    _draw_stage_progress_bar(display, current_stage)
+                    # ─── 3. COMMIT DATA JIKA TAHAP SELESAI ───
+                    if cur_step != "WAIT" and cur_step != _prev_step:
+                        
+                        if _prev_step in STEP_COMMIT:
+                            axis    = STEP_COMMIT[_prev_step]
+                            cap_key = POSE_CFG[STEP_TO_STAGE[_prev_step]][0]
+                            cap[cap_key] = list(_pose_buf[axis].values())
+                            _log(f"[COMMIT] {_prev_step} snapshots: {[s['tag'] for s in cap[cap_key]]}", "SUCCESS")
+                            _pose_buf[axis] = {}  
 
-                    details = f"Y:{pose.get('yaw',0):.1f} P:{pose.get('pitch',0):.1f} R:{pose.get('roll',0):.1f}"
-                    _draw_status_panel(display, current_stage, result.get("instruction", ""), result.get("progress", ""), details)
+                        if cur_step == "DONE" and _prev_step == "BLINK":
+                            cap["blink_closed"] = _blink_buf["closed"]
+                            cap["blink_open"]   = _blink_buf["open"]
+                            
+                            bc_ear = f"{cap['blink_closed']['avg_ear']:.3f}" if cap['blink_closed'] else "N/A"
+                            bo_ear = f"{cap['blink_open']['avg_ear']:.3f}" if cap['blink_open'] else "N/A"
+                            _log(f"[COMMIT] BLINK EAR: Closed={bc_ear}, Open={bo_ear}", "SUCCESS")
 
-                # Tahap Ekstraksi Embedding
-                if current_stage == RegistrationStage.EXTRACTION and not extraction_in_progress:
-                    pose = liveness.pose_estimator.estimate(face, detector)
+                        _prev_step = cur_step
+
+                    # ─── 4. RUBAH STAGE (UNTUK FRAME BERIKUTNYA) ───
+                    if cur_step != "WAIT":
+                        stage = STEP_TO_STAGE.get(cur_step, stage)
+
+                    # Tampilan Status di Layar
+                    step = result["step"]
+                    box_color   = config.COLOR_GREEN  if step == "DONE" or "DONE" in result.get("progress","") \
+                             else config.COLOR_YELLOW if step == "WAIT" else config.COLOR_CYAN
+                    status_text = "PASSED" if box_color==config.COLOR_GREEN else \
+                                  "TAHAN LURUS" if box_color==config.COLOR_YELLOW else "VALIDATING"
+                    _draw_box(display, face.bbox, status_text, box_color)
+                    _draw_progress_bar(display, stage)
+                    details = " ".join(f"{k.upper()}: {result[k]}" for k in ("yaw","pitch","roll") if k in result)
+                    _draw_panel(display, stage, result["instruction"], result.get("progress",""), details)
+
+                # ─── TAHAP 4 – EKSTRAKSI & VALIDASI KETAT SEBELUM MASUK DATABASE ───
+                if stage == RegistrationStage.EXTRACTION and not in_ext:
+                    pose             = liveness.pose_estimator.estimate(face, detector)
                     yaw, pitch, roll = pose["yaw"], pose["pitch"], pose["roll"]
 
-                    if (abs(yaw) < config.EXTRACTION_MAX_YAW and
-                        abs(pitch) < config.EXTRACTION_MAX_PITCH and
-                        abs(roll) < config.EXTRACTION_MAX_ROLL):
+                    if abs(yaw)<config.EXTRACTION_MAX_YAW and abs(pitch)<config.EXTRACTION_MAX_PITCH and abs(roll)<config.EXTRACTION_MAX_ROLL:
+                        in_ext = True
+                        
+                        valid_to_save = True
+                        missing = []
+                        
+                        if cap["facemesh_vector"] is None:
+                            valid_to_save = False; missing.append("FaceMesh")
+                        if len(cap["yaw_snapshots"]) < 2:
+                            valid_to_save = False; missing.append("Yaw (Kiri & Kanan)")
+                        if len(cap["pitch_snapshots"]) < 2:
+                            valid_to_save = False; missing.append("Pitch (Atas & Bawah)")
+                        if len(cap["roll_snapshots"]) < 2:
+                            valid_to_save = False; missing.append("Roll (Kiri & Kanan)")
+                        if cap["blink_closed"] is None or cap["blink_open"] is None:
+                            valid_to_save = False; missing.append("Blink (Mata Tutup & Buka)")
 
-                        _print_log("Posisi wajah ideal → mulai ekstraksi embedding...", "SUCCESS")
-                        extraction_in_progress = True
+                        if not valid_to_save:
+                            _log("REGISTRASI DIBATALKAN! Ada gerakan yang tidak terekam/tidak valid.", "ERROR")
+                            _log(f"Data tidak lengkap: {', '.join(missing)}", "ERROR")
+                            
+                            _draw_box(display, face.bbox, "DATA TIDAK VALID", config.COLOR_RED)
+                            cv2.rectangle(display,(0,0),(config.FRAME_WIDTH,config.FRAME_HEIGHT),config.COLOR_RED,12)
+                            _put(display,"REGISTRASI GAGAL!", config.FRAME_HEIGHT//2-50, config.COLOR_RED, (config.FRAME_WIDTH-350)//2, 1.4, 3)
+                            _put(display,"Gerakan Liveness tidak lengkap/terlewat.", config.FRAME_HEIGHT//2+10, config.COLOR_RED, (config.FRAME_WIDTH-450)//2, 0.8, 2)
+                            
+                            cv2.imshow("Register", display); cv2.waitKey(4000); break
 
-                        face_crop = model.crop_face(frame, face.bbox)
-                        embedding = model.get_embedding(face_crop)
+                        # Ekstraksi MobileFaceNet
+                        embedding = model.get_embedding(model.crop_face(frame, face.bbox))
+                        cap["mobilefacenet_embedding"] = embedding
+                        _log(f"[COMMIT] MobileFaceNet: 512-dim embedding (norm={np.linalg.norm(embedding):.4f})", "SUCCESS")
 
-                        captured["mobilefacenet_embedding"] = embedding
+                        # Print Ringkasan Akhir
+                        _log("=" * 65, "SYSTEM")
+                        _log("  DATA LIVENESS VALID! SIAP DISIMPAN KE faces.pkl", "SYSTEM")
+                        _log("=" * 65, "SYSTEM")
+                        
+                        bc, bo = cap["blink_closed"], cap["blink_open"]
+                        for label, val in [
+                            ("1. FaceMesh",        f"468 landmarks (shape={cap['facemesh_vector'].shape})"),
+                            ("2. YAW (Kiri/Kanan)",f"{len(cap['yaw_snapshots'])} snapshots {[s['tag'] for s in cap['yaw_snapshots']]}"),
+                            ("3. PITCH (Atas/Bwh)",f"{len(cap['pitch_snapshots'])} snapshots {[s['tag'] for s in cap['pitch_snapshots']]}"),
+                            ("4. ROLL (Miring)",   f"{len(cap['roll_snapshots'])} snapshots {[s['tag'] for s in cap['roll_snapshots']]}"),
+                            ("5. BLINK EAR",       f"Closed={bc['avg_ear']:.3f}, Open={bo['avg_ear']:.3f}"),
+                            ("6. MobileFaceNet",   f"Face Embedding 512-dim"),
+                        ]: _log(f"  {label:<22}: {val}", "SUCCESS")
+                        _log("=" * 65, "SYSTEM")
 
-                        # Validasi duplikat
-                        match = matcher.match(embedding)
+                        # Cek apakah wajah sudah ada di DB
+                        match   = matcher.match(embedding)
                         display = frame.copy()
 
-                        if match.get("matched", False):
-                            _draw_validation_box(display, face.bbox, "SUDAH TERDAFTAR", config.COLOR_RED)
-                            cv2.rectangle(display, (0,0), (config.FRAME_WIDTH, config.FRAME_HEIGHT), config.COLOR_RED, 12)
-                            _put(display, "REGISTRASI DITOLAK", config.FRAME_HEIGHT//2 - 40, config.COLOR_RED, 
-                                 x=config.FRAME_WIDTH//2 - 200, scale=1.5, thickness=3)
-                            _put(display, f"Wajah sudah terdaftar sebagai: {match.get('name')}", 
-                                 config.FRAME_HEIGHT//2 + 20, config.COLOR_RED, scale=0.9)
+                        if match["matched"]:
+                            _draw_box(display, face.bbox, "SUDAH TERDAFTAR", config.COLOR_RED)
+                            cv2.rectangle(display,(0,0),(config.FRAME_WIDTH,config.FRAME_HEIGHT),config.COLOR_RED,12)
+                            _put(display,"REGISTRASI DITOLAK!", config.FRAME_HEIGHT//2-50, config.COLOR_RED, (config.FRAME_WIDTH-350)//2, 1.4, 3)
+                            _put(display,f"Sudah terdaftar sebagai: {match['name']}", config.FRAME_HEIGHT//2+10, config.COLOR_RED, (config.FRAME_WIDTH-500)//2, 0.8, 2)
+                            _log(f"Ditolak – terdeteksi sebagai {match['name']}", "WARNING")
+                            cv2.imshow("Register", display); cv2.waitKey(4000); break
                         else:
-                            save_face(name, embedding, captured)
+                            save_face(name, embedding, cap)
+                            
+                            _draw_box(display, face.bbox, "BERHASIL", config.COLOR_GREEN)
+                            cv2.rectangle(display,(0,0),(config.FRAME_WIDTH,config.FRAME_HEIGHT),config.COLOR_GREEN,12)
+                            _put(display,"REGISTRASI BERHASIL!", config.FRAME_HEIGHT//2-50, config.COLOR_GREEN, (config.FRAME_WIDTH-400)//2, 1.6, 3)
+                            _put(display,f"Nama: {name}", config.FRAME_HEIGHT//2+10, config.COLOR_GREEN, (config.FRAME_WIDTH-150)//2, 1.1, 2)
+                            _put(display,"Semua data (Liveness & Embedding) valid dan tersimpan.", config.FRAME_HEIGHT//2+50, config.COLOR_WHITE, (config.FRAME_WIDTH-550)//2, 0.7)
 
-                            _draw_validation_box(display, face.bbox, "BERHASIL", config.COLOR_GREEN)
-                            cv2.rectangle(display, (0,0), (config.FRAME_WIDTH, config.FRAME_HEIGHT), config.COLOR_GREEN, 15)
-                            _put(display, "REGISTRASI BERHASIL!", config.FRAME_HEIGHT//2 - 60, config.COLOR_GREEN, 
-                                 x=config.FRAME_WIDTH//2 - 220, scale=1.8, thickness=4)
-                            _put(display, f"Nama: {name}", config.FRAME_HEIGHT//2 + 10, config.COLOR_GREEN, scale=1.2)
-
-                        current_stage = RegistrationStage.COMPLETE
-                        cv2.imshow("Register", display)
-                        cv2.waitKey(5000)
-                        break
-
+                        stage = RegistrationStage.COMPLETE
+                        cv2.imshow("Register", display); cv2.waitKey(2000); break
                     else:
-                        _draw_validation_box(display, face.bbox, "TAHAN LURUS", config.COLOR_YELLOW)
-                        _draw_status_panel(display, current_stage, 
-                                           "Tatap LURUS ke kamera", 
-                                           "Menunggu posisi stabil...",
-                                           f"Y:{yaw:.1f} P:{pitch:.1f} R:{roll:.1f}")
+                        _draw_box(display, face.bbox, "TAHAN LURUS", config.COLOR_YELLOW)
+                        _draw_progress_bar(display, stage)
+                        _draw_panel(display, stage, "Tatap LURUS ke kamera untuk MobileFaceNet",
+                                    "Menunggu wajah lurus...", f"Y:{yaw:.1f} P:{pitch:.1f} R:{roll:.1f}")
 
             cv2.imshow("Register", display)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                _print_log("Registrasi dibatalkan oleh user", "WARNING")
-                break
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                _log("Dibatalkan user", "WARNING"); break
 
     except Exception as e:
-        _print_log(f"Error selama registrasi: {e}", "ERROR")
-        import traceback
-        traceback.print_exc()
+        _log(f"Error: {e}", "ERROR")
+        import traceback; traceback.print_exc()
     finally:
-        if GPIO_AVAILABLE:
-            GPIO.cleanup()
-        cam.stop()
-        detector.close()
-        cv2.destroyAllWindows()
-        _print_log("Program registrasi selesai.", "SYSTEM")
-
+        if GPIO_AVAILABLE: GPIO.cleanup()
+        cam.stop(); detector.close(); cv2.destroyAllWindows()
+        _log("Program selesai.", "SYSTEM")
 
 if __name__ == "__main__":
-    print("=== Sistem Registrasi Wajah Smart Door ===\n")
-    name = input("Masukkan nama lengkap Anda: ").strip()
-    if name:
-        run_register(name)
-    else:
-        print("Nama tidak boleh kosong!")
+    name = input("\nMasukkan nama Anda: ").strip()
+    if name: run_register(name)
+    else:    print("Nama tidak boleh kosong!")

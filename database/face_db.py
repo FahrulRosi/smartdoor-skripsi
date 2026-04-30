@@ -1,130 +1,81 @@
 import os
-import pickle
+import time
 import numpy as np
+import firebase_admin
+from firebase_admin import credentials, db
+import traceback
 
-# PAKSA agar faces.pkl selalu berada di folder root project (smartdoor-skripsi)
-# Naik 1 level dari folder 'database' ke folder utama
-ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DB_PATH  = os.path.join(ROOT_DIR, "faces.pkl")
+class FaceDatabase:
+    def __init__(self, db_url="https://smart-door-lock-feb6b-default-rtdb.asia-southeast1.firebasedatabase.app", credentials_path="../serviceAccount.json"):
+        """Inisialisasi koneksi ke Firebase Realtime Database"""
+        # Cek agar tidak inisialisasi ulang jika dipanggil berkali-kali
+        if not firebase_admin._apps:
+            # Pastikan file serviceAccountKey.json ada di folder yang sama
+            cred = credentials.Certificate(credentials_path)
+            firebase_admin.initialize_app(cred, {
+                'databaseURL': db_url
+            })
+        
+        # Referensi utama ke tabel/node 'registered_users'
+        self.ref_users = db.reference('registered_users')
 
-
-class FaceDB:
-    def __init__(self, path=DB_PATH):
-        self.path = path
-
-    def load(self):
-        print(f"[DEBUG] Sedang mencari database di: {self.path}")
-        if not os.path.exists(self.path):
-            print("[DEBUG] File faces.pkl BELUM ADA di lokasi tersebut!")
-            return []
+    def save_face(self, name, embedding, liveness_data):
+        """Menyimpan data wajah dan parameter liveness ke Firebase"""
         try:
-            with open(self.path, "rb") as f:
-                data = pickle.load(f)
-                print(f"[DEBUG] Berhasil memuat {len(data)} wajah.")
-                return data
+            # 1. Ekstraksi Blink secara ekstrim aman
+            # Ambil data blink dari dictionary yang dikirim register.py
+            blink_c = liveness_data.get("blink_closed", {})
+            blink_o = liveness_data.get("blink_open", {})
+            
+            # Ekstrak nilai angkanya (jika dia dictionary, ambil avg_ear. Jika tidak, jadikan 0.0)
+            ear_c = blink_c.get("avg_ear", 0.0) if isinstance(blink_c, dict) else 0.0
+            ear_o = blink_o.get("avg_ear", 0.0) if isinstance(blink_o, dict) else 0.0
+
+            # 2. Ekstraksi Facemesh & Embedding secara ekstrim aman
+            fm_vector = liveness_data.get("facemesh_vector", [])
+            fm_list = fm_vector.tolist() if isinstance(fm_vector, np.ndarray) else list(fm_vector)
+            emb_list = embedding.tolist() if isinstance(embedding, np.ndarray) else list(embedding)
+
+            # 3. Susun data JSON
+            data_to_save = {
+                "name": name,
+                "embedding": emb_list,
+                "liveness_config": {
+                    "facemesh_vector": fm_list,
+                    "blink_closed": float(ear_c),
+                    "blink_open": float(ear_o)
+                },
+                "registered_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            }
+            
+            # 4. Kirim ke Firebase
+            self.ref_users.child(name).set(data_to_save)
+            print(f"[Firebase] Data wajah untuk '{name}' berhasil diunggah ke Cloud.")
+            return True
+            
         except Exception as e:
-            print(f"[FaceDB] Gagal memuat database: {e}")
-            return []
+            print(f"[Firebase ERROR] Gagal menyimpan data: {e}")
+            traceback.print_exc() # Ini akan mencetak baris ke-berapa yang error jika masih gagal
+            return False
 
-    def save(self, data):
-        try:
-            with open(self.path, "wb") as f:
-                pickle.dump(data, f)
-            print(f"[FaceDB] Database wajah berhasil disimpan ke: {self.path}")
-        except Exception as e:
-            print(f"[FaceDB] Gagal menyimpan database: {e}")
+    def check_user_exists(self, name):
+        """Mengecek apakah nama sudah terdaftar di Firebase"""
+        user = self.ref_users.child(name).get()
+        return user is not None
 
-
-# ─── SINGLETON ────────────────────────────────────────────────────────────────
-_db = FaceDB()
-
-
-# ─── PUBLIC API ───────────────────────────────────────────────────────────────
-
-def get_all_faces():
-    """Mengambil semua data wajah yang terdaftar dari file pkl."""
-    return _db.load()
-
-
-def save_face(name: str, embedding: np.ndarray, captured: dict | None = None):
-    """
-    Menyimpan data lengkap registrasi ke dalam file pkl.
-    """
-    faces = _db.load()
-
-    # Bangun record baru dari semua data yang dikumpulkan
-    record = {
-        "name":      name,
-        "embedding": embedding,   # ← tetap di key "embedding" agar FaceMatcher tidak berubah
-    }
-
-    if captured is not None:
-        # ── Tahap 1 – FaceMesh ───────────────────────────────────────────────
-        record["facemesh_vector"] = captured.get("facemesh_vector")   # np.ndarray | None
-
-        # ── Tahap 2 – Pose snapshots ─────────────────────────────────────────
-        record["yaw_snapshots"]   = captured.get("yaw_snapshots",   [])
-        record["pitch_snapshots"] = captured.get("pitch_snapshots", [])
-        record["roll_snapshots"]  = captured.get("roll_snapshots",  [])
-
-        # ── Tahap 3 – Blink ───────────────────────────────────────────────────
-        record["blink_closed"] = captured.get("blink_closed")
-        record["blink_open"]   = captured.get("blink_open")
-
-        # Embedding MobileFaceNet juga disimpan di key khusus agar mudah diakses
-        record["mobilefacenet_embedding"] = captured.get("mobilefacenet_embedding", embedding)
-
-        # ── Log ringkasan apa yang berhasil disimpan ──────────────────────────
-        _log_saved_summary(name, record)
-    else:
-        # Fallback: hanya embedding yang ada (tidak ada data tahap lain)
-        print(f"[FaceDB] WARNING: captured=None untuk {name}. Hanya embedding yang disimpan.")
-
-    # Update jika nama sudah ada, tambah jika baru
-    updated = False
-    for i, face in enumerate(faces):
-        if face["name"] == name:
-            faces[i] = record
-            updated   = True
-            print(f"[FaceDB] Data wajah '{name}' diperbarui.")
-            break
-
-    if not updated:
-        faces.append(record)
-        print(f"[FaceDB] Data wajah '{name}' ditambahkan sebagai entri baru.")
-
-    _db.save(faces)
-
-
-def _log_saved_summary(name: str, record: dict):
-    """Cetak ringkasan data yang berhasil disimpan ke database."""
-    fm  = record.get("facemesh_vector")
-    emb = record.get("embedding")
-
-    print("\n" + "─" * 60)
-    print(f"  [FaceDB] RINGKASAN DATA TERSIMPAN UNTUK: {name}")
-    print("─" * 60)
-    print(f"  Tahap 1 – FaceMesh vector   : "
-          f"{'shape=' + str(fm.shape) if fm is not None else 'TIDAK ADA'}")
-    print(f"  Tahap 2 – YAW snapshots     : "
-          f"{len(record.get('yaw_snapshots', []))} snapshot(s) "
-          f"{[s['tag'] for s in record.get('yaw_snapshots', [])]}")
-    print(f"  Tahap 2 – PITCH snapshots   : "
-          f"{len(record.get('pitch_snapshots', []))} snapshot(s) "
-          f"{[s['tag'] for s in record.get('pitch_snapshots', [])]}")
-    print(f"  Tahap 2 – ROLL snapshots    : "
-          f"{len(record.get('roll_snapshots', []))} snapshot(s) "
-          f"{[s['tag'] for s in record.get('roll_snapshots', [])]}")
-
-    bc = record.get("blink_closed")
-    bo = record.get("blink_open")
-    
-    # PERBAIKAN SINTAKS F-STRING
-    bc_str = f"{bc['avg_ear']:.4f}" if bc else "TIDAK ADA"
-    bo_str = f"{bo['avg_ear']:.4f}" if bo else "TIDAK ADA"
-    
-    print(f"  Tahap 3 – BLINK closed EAR  : {bc_str}")
-    print(f"  Tahap 3 – BLINK open EAR    : {bo_str}")
-    print(f"  Tahap 4 – MobileFaceNet emb : "
-          f"shape={emb.shape}, norm={np.linalg.norm(emb):.4f}")
-    print("─" * 60 + "\n")
+    def load_all_faces(self):
+        """Mengambil semua data wajah dari Firebase untuk proses Matching"""
+        print("[Firebase] Mengunduh data wajah dari cloud...")
+        faces = self.ref_users.get()
+        embeddings = {}
+        
+        if faces:
+            for name, data in faces.items():
+                if "embedding" in data:
+                    # Kembalikan ke format numpy array untuk kalkulasi jarak di face_matcher
+                    embeddings[name] = np.array(data["embedding"])
+            print(f"[Firebase] Berhasil memuat {len(embeddings)} wajah.")
+        else:
+            print("[Firebase] Database masih kosong.")
+            
+        return embeddings

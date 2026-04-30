@@ -13,8 +13,9 @@ from recognition.face_matcher   import FaceMatcher
 from door.door_lock             import DoorLock
 from liveness.head_pose         import HeadPoseEstimator
 from liveness.blink             import BlinkDetector
-from database.face_db           import get_all_faces
-from liveness.anti_spoofing     import SilentAntiSpoofing  # <-- Modul Anti-Spoofing dimasukkan
+# --- HAPUS IMPORT get_all_faces ---
+# from database.face_db         import get_all_faces 
+from liveness.anti_spoofing     import SilentAntiSpoofing  
 
 try:
     import RPi.GPIO as GPIO
@@ -71,15 +72,19 @@ def run_unlock():
     cam = CameraStream(config.CAMERA_INDEX, config.FRAME_WIDTH, config.FRAME_HEIGHT).start()
     detector = FaceMeshDetector(min_detection_confidence=0.5, min_tracking_confidence=0.5)
     model = MobileFaceNet()
+    
+    # --- MATCHER SEKARANG LANGSUNG MEMUAT DARI FIREBASE SAAT DIINISIALISASI ---
+    _print_log("Menghubungkan ke Firebase Database...", "SYSTEM")
     matcher = FaceMatcher(threshold=config.MATCH_THRESHOLD)
+    
     pose_estimator = HeadPoseEstimator()
     door = DoorLock(pin=config.LOCK_GPIO_PIN, unlock_duration=5)
     
-    anti_spoof = SilentAntiSpoofing() # <-- Inisialisasi Anti Spoofing
+    anti_spoof = SilentAntiSpoofing()
 
     state = ValidationState.IDLE
     last_name = ""
-    user_data = None
+    # user_data = None # Tidak lagi digunakan di versi Firebase ini
     challenge_sequence = []
     current_step_idx = 0
     blink_checker = None
@@ -111,7 +116,7 @@ def run_unlock():
                 if state != ValidationState.UNLOCKED:
                     state = ValidationState.IDLE
                     last_name = ""
-                    user_data = None
+                    # user_data = None
                 door.lock()
                 _put(display, "Menunggu Wajah...", 50, config.COLOR_YELLOW, scale=0.9)
             else:
@@ -124,7 +129,7 @@ def run_unlock():
                 if not spoof.get("real", True):
                     state = ValidationState.IDLE
                     last_name = ""
-                    user_data = None
+                    # user_data = None
                     _draw_status(display, x_f, y_f, w_f, h_f, "WAJAH PALSU / FOTO HP!", config.COLOR_RED)
                     _put(display, f"Skor Liveness: {spoof.get('score', 0):.3f}", y_f - 40, config.COLOR_RED)
                 
@@ -144,8 +149,8 @@ def run_unlock():
                         if match.get("matched", False):
                             last_name = match["name"]
                             
-                            all_faces_in_db = get_all_faces()
-                            user_data = next((f for f in all_faces_in_db if f["name"] == last_name), None)
+                            # Logika get_all_faces() dihapus karena matcher sudah
+                            # mengambil alih pengecekan embedding dari dictionary internalnya
                             
                             state = ValidationState.CHALLENGE
                             
@@ -158,7 +163,6 @@ def run_unlock():
                             _print_log(f"Wajah dikenali: {last_name} | Skor: {skor:.3f} | Challenge: {challenge_sequence}", "SUCCESS")
                         else:
                             last_name = "Tidak Dikenali"
-                            user_data = None
                             state = ValidationState.UNMATCHED
                             _print_log(f"Ditolak! Skor kemiripan: {skor:.3f} (Butuh minimal: {config.MATCH_THRESHOLD})", "WARNING")
 

@@ -9,7 +9,8 @@ from facemesh.facemesh_detector import FaceMeshDetector
 from liveness.liveness_manager  import LivenessManager
 from recognition.mobilefacenet  import MobileFaceNet
 from recognition.face_matcher   import FaceMatcher
-from database.face_db           import save_face
+# --- UBAH IMPORT KE KELAS FIREBASE ---
+from database.face_db           import FaceDatabase
 from liveness.anti_spoofing     import SilentAntiSpoofing
 
 try:
@@ -23,7 +24,7 @@ class RegistrationStage(Enum):
     IDLE=0; FACEMESH=1; YAW=2; PITCH=3; ROLL=4; BLINK=5; EXTRACTION=6; COMPLETE=7
 
 STAGE_NAMES = {
-    RegistrationStage.FACEMESH:   "1. FaceMesh (Deteksi Struktur)",
+    RegistrationStage.FACEMESH:   "1. FaceMesh (Deteksi Struktur 3D)",
     RegistrationStage.YAW:        "2a. Liveness (Toleh Kiri & Kanan)",
     RegistrationStage.PITCH:      "2b. Liveness (Ngangguk Atas & Bawah)",
     RegistrationStage.ROLL:       "2c. Liveness (Miring Kiri & Kanan)",
@@ -43,23 +44,25 @@ _RIGHT_EYE = [362, 385, 387, 263, 373, 380]
 
 # ─── CAPTURE HELPERS ──────────────────────────────────────────────────────────
 def _capture_facemesh(face):
+    """
+    Diperbarui untuk mengambil sumbu Z agar struktur kedalaman wajah 
+    (3D structure) bisa terdeteksi dengan akurat.
+    """
     try:
         lm = face.landmarks
         if lm is None or len(lm) == 0:
             return None
         
-        # Menggunakan .x dan .y dari NormalizedLandmark
-        points = np.array([[landmark.x, landmark.y] for landmark in lm], 
+        # Menggunakan .x, .y, dan .z dari NormalizedLandmark
+        points = np.array([[landmark.x, landmark.y, landmark.z] for landmark in lm], 
                          dtype=np.float32)
-        return points.flatten()  # 936 dimensi (468 * 2)
+        return points.flatten()  # 1404 dimensi (468 * 3)
     except Exception as e:
         _log(f"Gagal capture facemesh: {e}", "WARNING")
         return None
 
-
 def _capture_pose(pose, tag):
     return {k: float(pose.get(k, 0.0)) for k in ("yaw", "pitch", "roll")} | {"tag": tag}
-
 
 def _capture_blink(face):
     try:
@@ -68,11 +71,9 @@ def _capture_blink(face):
             return None
 
         def ear(eye_indices):
-            # Mengambil koordinat dengan benar dari NormalizedLandmark
             points = np.array([[lm[i].x, lm[i].y] for i in eye_indices], 
                             dtype=np.float32)
             
-            # Eye Aspect Ratio (EAR)
             vertical1 = np.linalg.norm(points[1] - points[5])
             vertical2 = np.linalg.norm(points[2] - points[4])
             horizontal = np.linalg.norm(points[0] - points[3])
@@ -97,7 +98,6 @@ def _capture_blink(face):
 def _put(frame, text, y, color=config.COLOR_WHITE, x=10, scale=0.6, thickness=1):
     cv2.putText(frame, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale, color, thickness)
 
-
 def _draw_progress_bar(frame, stage, total=6):
     W, bw, bh = config.FRAME_WIDTH, 350, 25
     x, y = (W - bw) // 2, 15
@@ -112,7 +112,6 @@ def _draw_progress_bar(frame, stage, total=6):
     cv2.putText(frame, txt, (x+(bw-ts[0])//2, y+(bh+ts[1])//2), 
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,255,255), 1)
 
-
 def _draw_panel(frame, stage, instruction, progress="", details=""):
     cv2.rectangle(frame, (0,50), (config.FRAME_WIDTH, 150), (20,20,20), -1)
     cv2.rectangle(frame, (0,50), (config.FRAME_WIDTH, 150), config.COLOR_CYAN, 2)
@@ -120,7 +119,6 @@ def _draw_panel(frame, stage, instruction, progress="", details=""):
     _put(frame, instruction,                        105, config.COLOR_YELLOW, 20, 0.65, 2)
     if progress: _put(frame, f"Status: {progress}", 125, config.COLOR_CYAN,  20, 0.6)
     if details:  _put(frame, details,               145, config.COLOR_WHITE, 20, 0.55)
-
 
 def _draw_box(frame, bbox, status, color):
     x, y, w, h = bbox
@@ -131,7 +129,6 @@ def _draw_box(frame, bbox, status, color):
     cv2.rectangle(frame, (x,y-35), (x+180,y-5), color, -1)
     cv2.putText(frame, status, (x+5,y-12), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255,255,255), 2)
 
-
 def _log(msg, level="INFO"):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] [{level}] {msg}")
 
@@ -139,6 +136,23 @@ def _log(msg, level="INFO"):
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 def run_register(name):
     _log(f"Memulai registrasi: {name}", "SYSTEM")
+
+    # ─── INISIALISASI DATABASE FIREBASE ───
+    db_url = "https://smart-door-lock-feb6b-default-rtdb.asia-southeast1.firebasedatabase.app/"
+    credentials_path = "serviceAccount.json"
+    try:
+        _log("Menghubungkan ke Firebase...", "SYSTEM")
+        face_db = FaceDatabase(db_url, credentials_path)
+        
+        # Cek nama di Firebase sebelum menyalakan kamera
+        if face_db.check_user_exists(name):
+            _log(f"Registrasi Dibatalkan: Nama '{name}' sudah terdaftar di Database!", "ERROR")
+            print("Silakan gunakan nama lain.")
+            return
+    except Exception as e:
+        _log(f"Gagal koneksi ke Firebase: {e}", "ERROR")
+        return
+    # ─────────────────────────────────────────
 
     if GPIO_AVAILABLE:
         try:
@@ -216,8 +230,6 @@ def run_register(name):
                     pose = liveness.pose_estimator.estimate(face, detector)
 
                     # ─── 1. CAPTURE DATA DULU ───
-                    
-                    # A. Tangkap FaceMesh
                     if stage == RegistrationStage.FACEMESH:
                         if cap["facemesh_vector"] is None:
                             fm = _capture_facemesh(face)
@@ -225,7 +237,6 @@ def run_register(name):
                                 cap["facemesh_vector"] = fm
                                 _log(f"[COMMIT] FaceMesh: {len(fm)} dimensi", "SUCCESS")
 
-                    # B. Tangkap Snapshot Kemiringan Wajah
                     if stage in POSE_CFG:
                         _, tag_neg, tag_pos, axis, thr = POSE_CFG[stage]
                         val = pose.get(axis, 0.0)
@@ -239,7 +250,6 @@ def run_register(name):
                             if tag_pos not in buf or val > buf[tag_pos][axis]:
                                 buf[tag_pos] = _capture_pose(pose, tag_pos)
 
-                    # C. Tangkap Blink (Mata Tertutup & Terbuka)
                     if stage == RegistrationStage.BLINK:
                         bv = _capture_blink(face)
                         if bv:
@@ -298,7 +308,6 @@ def run_register(name):
                         
                         in_ext = True
                         
-                        # Fallback: Capture FaceMesh jika belum berhasil di tahap awal
                         if cap["facemesh_vector"] is None:
                             fm = _capture_facemesh(face)
                             if fm is not None:
@@ -344,9 +353,8 @@ def run_register(name):
                         cap["mobilefacenet_embedding"] = embedding
                         _log(f"[COMMIT] MobileFaceNet: 512-dim embedding", "SUCCESS")
 
-                        # Ringkasan
                         _log("=" * 70, "SYSTEM")
-                        _log("  DATA LIVENESS VALID! SIAP DISIMPAN", "SYSTEM")
+                        _log("  DATA LIVENESS VALID! SIAP DISIMPAN KE FIREBASE", "SYSTEM")
                         _log("=" * 70, "SYSTEM")
                         
                         bc, bo = cap["blink_closed"], cap["blink_open"]
@@ -361,8 +369,10 @@ def run_register(name):
                             _log(f"  {label:<20}: {val}", "SUCCESS")
                         _log("=" * 70, "SYSTEM")
 
-                        # Cek duplikat
                         match = matcher.match(embedding)
+                        skor = match.get("score", 0.0) 
+                        _log(f"Cek Duplikat -> Cocok: {match['matched']} | Terdeteksi sbg: {match.get('name')} | Skor: {skor:.3f}", "INFO")
+
                         display = frame.copy()
 
                         if match["matched"]:
@@ -376,14 +386,22 @@ def run_register(name):
                             cv2.waitKey(4000)
                             break
                         else:
-                            save_face(name, embedding, cap)
+                            # ─── MENYIMPAN KE FIREBASE ───
+                            _log(f"Mengirim data wajah '{name}' ke Cloud...", "SYSTEM")
+                            save_success = face_db.save_face(name, embedding, cap)
                             
-                            _draw_box(display, face.bbox, "BERHASIL", config.COLOR_GREEN)
-                            cv2.rectangle(display,(0,0),(config.FRAME_WIDTH,config.FRAME_HEIGHT),config.COLOR_GREEN,12)
-                            _put(display,"REGISTRASI BERHASIL!", config.FRAME_HEIGHT//2-50, config.COLOR_GREEN, 
-                                 (config.FRAME_WIDTH-400)//2, 1.6, 3)
-                            _put(display,f"Nama: {name}", config.FRAME_HEIGHT//2+10, config.COLOR_GREEN, 
-                                 (config.FRAME_WIDTH-150)//2, 1.1, 2)
+                            if save_success:
+                                _draw_box(display, face.bbox, "BERHASIL", config.COLOR_GREEN)
+                                cv2.rectangle(display,(0,0),(config.FRAME_WIDTH,config.FRAME_HEIGHT),config.COLOR_GREEN,12)
+                                _put(display,"REGISTRASI BERHASIL!", config.FRAME_HEIGHT//2-50, config.COLOR_GREEN, 
+                                     (config.FRAME_WIDTH-400)//2, 1.6, 3)
+                                _put(display,f"Nama: {name}", config.FRAME_HEIGHT//2+10, config.COLOR_GREEN, 
+                                     (config.FRAME_WIDTH-150)//2, 1.1, 2)
+                            else:
+                                _draw_box(display, face.bbox, "GAGAL SIMPAN", config.COLOR_RED)
+                                cv2.rectangle(display,(0,0),(config.FRAME_WIDTH,config.FRAME_HEIGHT),config.COLOR_RED,12)
+                                _put(display,"GAGAL KONEKSI DATABASE!", config.FRAME_HEIGHT//2-50, config.COLOR_RED, 
+                                     (config.FRAME_WIDTH-450)//2, 1.6, 3)
 
                         stage = RegistrationStage.COMPLETE
                         cv2.imshow("Register", display)
@@ -417,5 +435,19 @@ if __name__ == "__main__":
     name = input("\nMasukkan nama Anda: ").strip()
     if name:
         run_register(name)
+        
+        try:
+            lanjut = input("\n[SISTEM] Registrasi selesai. Ingin langsung menjalankan Smart Door Lock? (y/n): ").strip().lower()
+            if lanjut == 'y':
+                from main import run_unlock
+                print("\nMemulai sistem utama...\n")
+                run_unlock()
+            else:
+                print("\nKembali ke terminal.")
+        except ImportError:
+            print("\n[Peringatan] Gagal memuat main.py.")
+            print("Pastikan kode utama di main.py Anda sudah terbungkus dalam fungsi bernama 'run_unlock()'.")
+        except Exception as e:
+            print(f"\nTerjadi kesalahan saat menjalankan main: {e}")
     else:
         print("Nama tidak boleh kosong!")

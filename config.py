@@ -4,6 +4,11 @@ FRAME_WIDTH     = 640
 FRAME_HEIGHT    = 480
 IR_CUT_PIN      = 12
 
+# ── Database Firebase (BARU) ──────────────────────────────────────────────────
+# GANTI LINK DI BAWAH INI DENGAN URL REALTIME DATABASE ANDA
+FIREBASE_URL         = "https://smart-door-lock-feb6b-default-rtdb.asia-southeast1.firebasedatabase.app"
+FIREBASE_CREDENTIALS = "serviceAccountKey.json"
+
 # ── FaceMesh ─────────────────────────────────────────────────────────────────
 MIN_DETECTION_CONFIDENCE = 0.5
 MIN_TRACKING_CONFIDENCE  = 0.5
@@ -39,7 +44,7 @@ ANTI_SPOOFING_THRESHOLD = 0.85
 
 # Threshold kemiripan wajah (Cosine Similarity). 
 # Jika masih sering "Wajah Tidak Dikenali", turunkan angka ini (misal ke 0.50 atau 0.45)
-MATCH_THRESHOLD         = 0.50 
+MATCH_THRESHOLD         = 0.75
 MOBILEFACENET_PATH      = "recognition/mobilefacenet.onnx"
 
 # ── Door Lock & UI ───────────────────────────────────────────────────────────

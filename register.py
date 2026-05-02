@@ -362,16 +362,6 @@ if __name__ == "__main__":
     if name:
         app = FaceRegistrationApp(name)
         app.run()
-        
-        try:
-            lanjut = input("\n[SISTEM] Registrasi selesai. Ingin langsung menjalankan Smart Door Lock? (y/n): ").strip().lower()
-            if lanjut == 'y':
-                from main import run_unlock
-                print("\nMemulai sistem utama...\n")
-                run_unlock()
-            else:
-                print("\nKembali ke terminal.")
-        except ImportError:
-            print("\n[Peringatan] Gagal memuat main.py. Pastikan kode utama di main.py terbungkus dalam fungsi 'run_unlock()'.")
+        print("\n[SISTEM] Registrasi selesai. Kembali ke terminal.")
     else:
         print("Nama tidak boleh kosong!")

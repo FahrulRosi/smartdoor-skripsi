@@ -21,14 +21,12 @@ try:
 except ImportError:
     GPIO_AVAILABLE = False
 
-
 class ValidationState(Enum):
     IDLE        = 0
     RECOGNIZING = 1
     CHALLENGE   = 2
     UNMATCHED   = 3
     UNLOCKED    = 4
-
 
 class UIManager:
     """Kelas khusus untuk menangani semua antarmuka visual (HUD) pada frame."""
@@ -70,7 +68,6 @@ class UIManager:
         status_text = "TERKUNCI" if is_locked else "TERBUKA"
         color = config.COLOR_RED if is_locked else config.COLOR_GREEN
         UIManager.put_text(frame, f"PINTU: {status_text}", config.FRAME_HEIGHT - 30, color, scale=0.75)
-
 
 class SmartDoorApp:
     """Kelas utama yang mengatur logika dan state mesin dari Smart Door Lock."""

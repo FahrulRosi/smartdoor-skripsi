@@ -4,10 +4,14 @@ FRAME_WIDTH     = 640
 FRAME_HEIGHT    = 480
 IR_CUT_PIN      = 12
 
-# ── Database Firebase (BARU) ──────────────────────────────────────────────────
-# GANTI LINK DI BAWAH INI DENGAN URL REALTIME DATABASE ANDA
+# ── Peningkatan Gambar (Low-Light & Backlight) ───────────────────────────────
+ENABLE_CLAHE_ENHANCEMENT = True
+CLAHE_CLIP_LIMIT         = 2.5
+CLAHE_TILE_GRID_SIZE     = (8, 8)
+
+# ── Database Firebase ────────────────────────────────────────────────────────
 FIREBASE_URL         = "https://smart-door-lock-feb6b-default-rtdb.asia-southeast1.firebasedatabase.app"
-FIREBASE_CREDENTIALS = "serviceAccountKey.json"
+FIREBASE_CREDENTIALS = "serviceAccount.json"
 
 # ── FaceMesh ─────────────────────────────────────────────────────────────────
 MIN_DETECTION_CONFIDENCE = 0.5
@@ -34,7 +38,7 @@ YAW_THRESHOLD   = CHALLENGE_YAW
 PITCH_THRESHOLD = CHALLENGE_PITCH
 ROLL_THRESHOLD  = CHALLENGE_ROLL
 
-# Threshold kedipan mata (Eye Aspect Ratio). Diturunkan ke 0.16 agar tidak mudah salah deteksi
+# Threshold kedipan mata (Eye Aspect Ratio)
 BLINK_EAR_THRESHOLD  = 0.21 
 REGISTER_BLINK_COUNT = 2
 
@@ -42,9 +46,10 @@ REGISTER_BLINK_COUNT = 2
 ANTI_SPOOFING_MODEL     = "liveness/antispoofing.onnx"
 ANTI_SPOOFING_THRESHOLD = 0.85 
 
-# Threshold kemiripan wajah (Cosine Similarity). 
-# Jika masih sering "Wajah Tidak Dikenali", turunkan angka ini (misal ke 0.50 atau 0.45)
-MATCH_THRESHOLD         = 0.75
+# Threshold kemiripan wajah (Cosine Similarity).
+# Diturunkan dari 0.75 menjadi 0.60 untuk mencegah pendaftaran wajah ganda (duplikasi)
+# dan meningkatkan akurasi pengenalan saat kondisi wajah sedikit berbeda.
+MATCH_THRESHOLD         = 0.60
 MOBILEFACENET_PATH      = "recognition/mobilefacenet.onnx"
 
 # ── Door Lock & UI ───────────────────────────────────────────────────────────

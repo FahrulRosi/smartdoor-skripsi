@@ -3,6 +3,7 @@ import numpy as np
 import mediapipe as mp
 from dataclasses import dataclass
 
+import config # <-- TAMBAHAN: Mengimpor file konfigurasi utama
 
 # ─── Landmark index groups ────────────────────────────────────────────────────
 LEFT_EYE_INDICES  = [33, 160, 158, 133, 153, 144]
@@ -29,8 +30,9 @@ class FaceMeshDetector:
         self,
         max_faces: int = 1,
         refine_landmarks: bool = True,
-        min_detection_confidence: float = 0.7,
-        min_tracking_confidence: float = 0.7,
+        # --- PERBAIKAN: Mengambil nilai confidence dari config.py agar lebih sensitif di cahaya rendah ---
+        min_detection_confidence: float = getattr(config, "MIN_DETECTION_CONFIDENCE", 0.5),
+        min_tracking_confidence: float = getattr(config, "MIN_TRACKING_CONFIDENCE", 0.5),
     ):
         self.mp_face_mesh = mp.solutions.face_mesh
         self.face_mesh = self.mp_face_mesh.FaceMesh(

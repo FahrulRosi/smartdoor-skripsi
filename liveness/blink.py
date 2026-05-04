@@ -1,9 +1,12 @@
 import numpy as np
+import config  # <-- TAMBAHAN: Mengimpor file konfigurasi
 from facemesh.facemesh_detector import FaceResult, FaceMeshDetector
 
 # --- PENGATURAN SENSITIVITAS KEDIPAN ---
-EAR_THRESHOLD = 0.16   # Jika EAR di bawah ini, mata dianggap tertutup (sebelumnya 0.22)
-CONSEC_FRAMES = 4      # Jumlah frame berturut-turut mata harus tertutup agar dihitung 1 kedipan (sebelumnya 2)
+# Mengambil nilai EAR dari config.py agar konsisten dengan seluruh sistem.
+# Jika di config tidak ada, gunakan 0.21 sebagai fallback.
+EAR_THRESHOLD = getattr(config, "BLINK_EAR_THRESHOLD", 0.21)   
+CONSEC_FRAMES = 4      # Jumlah frame berturut-turut mata harus tertutup agar dihitung 1 kedipan
 
 
 def _ear(eye_pts: np.ndarray) -> float:

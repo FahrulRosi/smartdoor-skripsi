@@ -1,6 +1,4 @@
 import numpy as np
-# 1. Sesuaikan import dengan struktur Firebase yang baru
-from database.face_db import FaceDatabase
 import config 
 
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
@@ -21,31 +19,24 @@ class FaceMatcher:
         """Inisialisasi Face Matcher dengan Threshold Cosine Similarity"""
         self.threshold = threshold
         
-        # 2. Inisialisasi Database Firebase di dalam Class Matcher
-        # GANTI URL DI BAWAH dengan URL Firebase Realtime Database Anda
-        # (Lebih baik jika URL ini disimpan di config.py)
-        db_url = "https://smart-door-lock-feb6b-default-rtdb.asia-southeast1.firebasedatabase.app"
-        credentials_path = 'serviceAccount.json'  # Pastikan file ini ada di folder yang sama
-        self.db = FaceDatabase(db_url, credentials_path)
-        
-        # 3. Muat semua wajah saat sistem (matcher) dinyalakan
-        # Ini menghindari pengambilan data (download) dari Firebase setiap frame kamera
-        self.known_faces = self.db.load_all_faces()
+        # Wadah memori untuk menyimpan data wajah.
+        # DIKOSONGKAN saat inisialisasi. Data akan disuntikkan dari luar (main.py / register.py)
+        self.known_faces = {}
 
-    def update_database(self):
+    def load_faces(self, faces_dict: dict):
         """
-        Fungsi opsional: Panggil ini jika Anda ingin sistem menyegarkan 
-        (refresh) database tanpa harus merestart program utama.
+        Fungsi untuk memuat data wajah dari luar (yang sudah di-download oleh FaceDatabase)
+        ke dalam memori FaceMatcher ini.
         """
-        self.known_faces = self.db.load_all_faces()
+        if faces_dict:
+            self.known_faces = faces_dict
 
     def match(self, embedding: np.ndarray) -> dict:
         """
         Membandingkan `embedding` wajah dari kamera dengan setiap wajah 
-        yang tersimpan di memori (hasil unduhan dari Firebase).
-        Mengembalikan data wajah terbaik (jika similarity >= threshold)[cite: 6].
+        yang tersimpan di memori (self.known_faces).
+        Mengembalikan data wajah terbaik (jika similarity >= threshold).
         """
-        # Cek dari dictionary self.known_faces, BUKAN get_all_faces() lagi
         if not self.known_faces:
             return {"matched": False, "name": "No_DB", "score": 0.0, "reason": "Belum ada wajah di DB"}
 
@@ -64,7 +55,7 @@ class FaceMatcher:
         return {
             "matched": matched,
             # Tetap kembalikan nama terdekat agar saat tidak match, 
-            # main.py bisa menampilkan "Wajah terdekat: Nama (Score)" di layar HUD[cite: 6]
+            # main.py bisa menampilkan "Wajah terdekat: Nama (Score)" di layar HUD untuk debugging
             "name":    best_name, 
             "score":   round(best_score, 4),
             "reason":  "OK" if matched else f"Score {best_score:.4f} < threshold {self.threshold}",

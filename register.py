@@ -23,7 +23,6 @@ except ImportError:
 class RegistrationStage(Enum):
     IDLE=0; FACEMESH=1; YAW=2; PITCH=3; ROLL=4; BLINK=5; EXTRACTION=6; COMPLETE=7
 
-
 STAGE_NAMES = {
     RegistrationStage.FACEMESH:   "1. FaceMesh (Deteksi Struktur 3D)",
     RegistrationStage.YAW:        "2a. Liveness (Toleh Kiri & Kanan)",
@@ -146,8 +145,8 @@ class FaceRegistrationApp:
 
     def __init__(self, name):
         self.name = name
-        self.db_url = "https://smart-door-lock-feb6b-default-rtdb.asia-southeast1.firebasedatabase.app/"
-        self.credentials_path = "serviceAccount.json"
+        self.db_url = config.FIREBASE_URL
+        self.credentials_path = config.FIREBASE_CREDENTIALS
         
         self.stage = RegistrationStage.FACEMESH
         self.in_ext = False
@@ -178,26 +177,37 @@ class FaceRegistrationApp:
             except Exception as e:
                 _log(f"Gagal IR-CUT: {e}", "WARNING")
 
-        self.cam = CameraStream(config.CAMERA_INDEX, config.FRAME_WIDTH, config.FRAME_HEIGHT).start()
+        self.cam = CameraStream(config.CAMERA_INDEX, config.FRAME_WIDTH, config.FRAME_HEIGHT, apply_enhancement=config.ENABLE_CLAHE_ENHANCEMENT).start()
         self.detector = FaceMeshDetector(min_detection_confidence=config.MIN_DETECTION_CONFIDENCE, min_tracking_confidence=config.MIN_TRACKING_CONFIDENCE)
         self.liveness = LivenessManager()
         self.model = MobileFaceNet()
         self.matcher = FaceMatcher(threshold=config.MATCH_THRESHOLD)
         self.anti_spoof = SilentAntiSpoofing()
+        
+        # --- PERBAIKAN BUG DUPLIKASI WAJAH ---
+        # Tarik data dari Firebase lalu masukkan HANYA JIKA ADA DATA ke dalam atribut `known_faces`
+        try:
+            faces_data = self.face_db.load_all_faces()
+            if faces_data:
+                self.matcher.known_faces = faces_data
+                _log(f"Berhasil memuat {len(faces_data)} profil wajah ke dalam FaceMatcher.", "SUCCESS")
+            else:
+                _log("Database wajah masih kosong, belum ada pengguna yang terdaftar.", "INFO")
+        except Exception as e:
+            _log(f"Gagal memuat data wajah dari Firebase: {e}", "ERROR")
+        # ---------------------------------------
+
         self.liveness.start_register()
         
         return True
 
     def _record_data_buffers(self, face, pose):
-        """Menangkap dan menyimpan data sementara berdasarkan stage saat ini."""
-        # 1. FaceMesh
         if self.stage == RegistrationStage.FACEMESH and self.captured_data["facemesh_vector"] is None:
             fm = DataExtractor.capture_facemesh(face)
             if fm is not None:
                 self.captured_data["facemesh_vector"] = fm
                 _log(f"[COMMIT] FaceMesh: {len(fm)} dimensi", "SUCCESS")
 
-        # 2. Head Pose
         if self.stage in self.POSE_CFG:
             _, tag_neg, tag_pos, axis, thr = self.POSE_CFG[self.stage]
             val, buf, cap_thr = pose.get(axis, 0.0), self._pose_buf[axis], thr * 0.7  
@@ -207,7 +217,6 @@ class FaceRegistrationApp:
             if val > cap_thr and (tag_pos not in buf or val > buf[tag_pos][axis]):
                 buf[tag_pos] = DataExtractor.capture_pose(pose, tag_pos)
 
-        # 3. Blink
         if self.stage == RegistrationStage.BLINK:
             bv = DataExtractor.capture_blink(face)
             if bv:
@@ -217,7 +226,6 @@ class FaceRegistrationApp:
                     self._blink_buf["open"] = bv
 
     def _commit_stage_data(self, cur_step):
-        """Memindahkan data dari buffer sementara ke tempat penyimpanan utama setelah tahap liveness selesai."""
         if cur_step == "WAIT" or cur_step == self._prev_step:
             return
 
@@ -237,7 +245,6 @@ class FaceRegistrationApp:
         self.stage = STEP_TO_STAGE.get(cur_step, self.stage)
 
     def _get_missing_data(self):
-        """Validasi akhir kelengkapan data liveness."""
         missing = []
         if self.captured_data["facemesh_vector"] is None: missing.append("FaceMesh")
         if len(self.captured_data["yaw_snapshots"]) < 2: missing.append("Yaw")
@@ -247,7 +254,6 @@ class FaceRegistrationApp:
         return missing
 
     def _process_extraction_stage(self, frame, face, display):
-        """Menangani tahap akhir ekstraksi embedding dan penyimpanan ke Firebase."""
         pose = self.liveness.pose_estimator.estimate(face, self.detector)
         yaw, pitch, roll = pose["yaw"], pose["pitch"], pose["roll"]
 
@@ -274,8 +280,16 @@ class FaceRegistrationApp:
         
         # Validasi Duplikasi
         match = self.matcher.match(embedding)
-        if match["matched"]:
-            RegistrationUI.show_full_screen_message(display, "REGISTRASI DITOLAK!", f"Sudah terdaftar sebagai: {match['name']}", config.COLOR_RED)
+
+        # --- DEBUGGING LOG ---
+        skor = match.get("score", 0.0)
+        nama_terdekat = match.get("name", "Unknown")
+        _log(f"[DEBUG DUPLIKASI] Wajah paling mirip di DB: '{nama_terdekat}'", "SYSTEM")
+        _log(f"[DEBUG DUPLIKASI] Skor Kemiripan: {skor:.4f} | Syarat Threshold: {config.MATCH_THRESHOLD}", "SYSTEM")
+        # ----------------------
+
+        if match.get("matched", False):
+            RegistrationUI.show_full_screen_message(display, "REGISTRASI DITOLAK!", f"Sudah terdaftar sbg: {match['name']}", config.COLOR_RED)
             cv2.imshow("Register", display)
             cv2.waitKey(4000)
             self.stage = RegistrationStage.COMPLETE
@@ -304,6 +318,11 @@ class FaceRegistrationApp:
                 display = frame.copy()
                 faces = self.detector.detect(frame)
 
+                # Menampilkan status CLAHE di layar
+                enhancement_status = "ON" if getattr(self.cam, 'apply_enhancement', False) else "OFF"
+                color_enh = config.COLOR_GREEN if enhancement_status == "ON" else config.COLOR_RED
+                RegistrationUI.put_text(display, f"CLAHE: {enhancement_status}", 20, color_enh, x=config.FRAME_WIDTH - 120, scale=0.5)
+
                 if not faces:
                     RegistrationUI.draw_panel(display, self.stage, "Wajah tidak terdeteksi", "Hadapkan wajah ke kamera")
                 else:
@@ -316,7 +335,13 @@ class FaceRegistrationApp:
                         RegistrationUI.draw_box(display, face.bbox, "WAJAH PALSU!", config.COLOR_RED)
                         RegistrationUI.draw_panel(display, self.stage, "Terdeteksi Foto/Video!", f"Skor: {spoof['score']}", "Gunakan wajah asli!")
                         cv2.imshow("Register", display)
-                        if cv2.waitKey(1) & 0xFF == ord("q"): break
+                        
+                        # Tekan 'e' untuk toggle CLAHE, 'q' untuk keluar
+                        key = cv2.waitKey(1) & 0xFF
+                        if key == ord("q"): break
+                        elif key == ord("e"):
+                            if hasattr(self.cam, 'apply_enhancement'):
+                                self.cam.apply_enhancement = not self.cam.apply_enhancement
                         continue
 
                     # 2. Proses Tahapan Registrasi
@@ -341,9 +366,16 @@ class FaceRegistrationApp:
                         self._process_extraction_stage(frame, face, display)
 
                 cv2.imshow("Register", display)
-                if cv2.waitKey(1) & 0xFF == ord("q"):
+                
+                # Tekan 'e' untuk toggle CLAHE, 'q' untuk keluar
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord("q"):
                     _log("Dibatalkan oleh user", "WARNING")
                     break
+                elif key == ord("e"):
+                    if hasattr(self.cam, 'apply_enhancement'):
+                        self.cam.apply_enhancement = not self.cam.apply_enhancement
+                        _log(f"CLAHE Enhancement diset ke: {self.cam.apply_enhancement}", "SYSTEM")
 
         except Exception as e:
             _log(f"Error: {e}", "ERROR")

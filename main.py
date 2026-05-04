@@ -87,8 +87,8 @@ class SmartDoorApp:
         UIManager.print_log("Sistem Smart Door Lock diaktifkan", "SYSTEM")
         UIManager.print_log("Menghubungkan ke Firebase Database...", "SYSTEM")
         
-        # Inisialisasi Modul
-        self.cam = CameraStream(config.CAMERA_INDEX, config.FRAME_WIDTH, config.FRAME_HEIGHT)
+        # --- BARU: Tambahkan apply_enhancement=True pada pemanggilan CameraStream ---
+        self.cam = CameraStream(config.CAMERA_INDEX, config.FRAME_WIDTH, config.FRAME_HEIGHT, apply_enhancement=True)
         self.detector = FaceMeshDetector(min_detection_confidence=0.5, min_tracking_confidence=0.5)
         self.model = MobileFaceNet()
         self.matcher = FaceMatcher(threshold=config.MATCH_THRESHOLD)
@@ -180,9 +180,14 @@ class SmartDoorApp:
                 display = frame.copy()
                 faces = self.detector.detect(frame)
 
+                # --- BARU: Menampilkan status CLAHE di layar ---
+                enhancement_status = "ON" if getattr(self.cam, 'apply_enhancement', False) else "OFF"
+                color_enh = config.COLOR_GREEN if enhancement_status == "ON" else config.COLOR_RED
+                UIManager.put_text(display, f"CLAHE (Low-Light): {enhancement_status}", 30, color_enh, scale=0.6)
+
                 if not faces:
                     self._reset_state()
-                    UIManager.put_text(display, "Menunggu Wajah...", 50, config.COLOR_YELLOW, scale=0.9)
+                    UIManager.put_text(display, "Menunggu Wajah...", 60, config.COLOR_YELLOW, scale=0.9)
                 else:
                     face = faces[0]
                     spoof = self.anti_spoof.is_real(frame, face.bbox)
@@ -214,8 +219,15 @@ class SmartDoorApp:
                 UIManager.draw_door_status(display, self.door.locked)
 
                 cv2.imshow("Smart Door Lock", display)
-                if cv2.waitKey(1) & 0xFF == ord("q"):
+                
+                # --- BARU: Tambahkan deteksi tombol 'e' untuk toggle Enhancement ---
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord("q"):
                     break
+                elif key == ord("e"):
+                    if hasattr(self.cam, 'apply_enhancement'):
+                        self.cam.apply_enhancement = not self.cam.apply_enhancement
+                        UIManager.print_log(f"CLAHE Enhancement diset ke: {self.cam.apply_enhancement}", "SYSTEM")
 
         except Exception as e:
             UIManager.print_log(f"Error utama: {e}", "ERROR")

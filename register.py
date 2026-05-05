@@ -145,8 +145,8 @@ class FaceRegistrationApp:
 
     def __init__(self, name):
         self.name = name
-        self.db_url = config.FIREBASE_URL
-        self.credentials_path = config.FIREBASE_CREDENTIALS
+        self.db_url = getattr(config, "FIREBASE_URL", "")
+        self.credentials_path = getattr(config, "FIREBASE_CREDENTIALS", "serviceAccount.json")
         
         self.stage = RegistrationStage.FACEMESH
         self.in_ext = False
@@ -177,22 +177,38 @@ class FaceRegistrationApp:
             except Exception as e:
                 _log(f"Gagal IR-CUT: {e}", "WARNING")
 
-        self.cam = CameraStream(config.CAMERA_INDEX, config.FRAME_WIDTH, config.FRAME_HEIGHT, apply_enhancement=config.ENABLE_CLAHE_ENHANCEMENT).start()
+        self.cam = CameraStream(config.CAMERA_INDEX, config.FRAME_WIDTH, config.FRAME_HEIGHT, apply_enhancement=getattr(config, 'ENABLE_CLAHE_ENHANCEMENT', False)).start()
         self.detector = FaceMeshDetector(min_detection_confidence=config.MIN_DETECTION_CONFIDENCE, min_tracking_confidence=config.MIN_TRACKING_CONFIDENCE)
         self.liveness = LivenessManager()
         self.model = MobileFaceNet()
         self.matcher = FaceMatcher(threshold=config.MATCH_THRESHOLD)
         self.anti_spoof = SilentAntiSpoofing()
         
-        # --- PERBAIKAN BUG DUPLIKASI WAJAH ---
-        # Tarik data dari Firebase lalu masukkan HANYA JIKA ADA DATA ke dalam atribut `known_faces`
+        # --- PERBAIKAN FORMAT DATA FIREBASE ---
         try:
-            faces_data = self.face_db.load_all_faces()
-            if faces_data:
-                self.matcher.known_faces = faces_data
-                _log(f"Berhasil memuat {len(faces_data)} profil wajah ke dalam FaceMatcher.", "SUCCESS")
+            raw_faces = self.face_db.load_all_faces()
+            if raw_faces:
+                processed_faces = {}
+                for user_name, user_data in raw_faces.items():
+                    # Jika data turun sebagai List/Array murni
+                    if isinstance(user_data, (list, np.ndarray)):
+                        processed_faces[user_name] = np.array(user_data, dtype=np.float32)
+                    # Jika data turun sebagai Nested Dictionary (Struktur JSON Firebase)
+                    elif isinstance(user_data, dict):
+                        if 'embedding' in user_data:
+                            processed_faces[user_name] = np.array(user_data['embedding'], dtype=np.float32)
+                        elif 'mobilefacenet_embedding' in user_data:
+                            processed_faces[user_name] = np.array(user_data['mobilefacenet_embedding'], dtype=np.float32)
+                
+                # Memastikan data disuntikkan dengan benar ke FaceMatcher
+                if hasattr(self.matcher, 'load_faces'):
+                    self.matcher.load_faces(processed_faces)
+                else:
+                    self.matcher.known_faces = processed_faces
+                    
+                _log(f"Berhasil memuat dan memformat {len(processed_faces)} profil wajah ke memori.", "SUCCESS")
             else:
-                _log("Database wajah masih kosong, belum ada pengguna yang terdaftar.", "INFO")
+                _log("Database wajah masih kosong.", "INFO")
         except Exception as e:
             _log(f"Gagal memuat data wajah dari Firebase: {e}", "ERROR")
         # ---------------------------------------
@@ -278,22 +294,23 @@ class FaceRegistrationApp:
         embedding = self.model.get_embedding(self.model.crop_face(frame, face.bbox))
         self.captured_data["mobilefacenet_embedding"] = embedding
         
-        # Validasi Duplikasi
+        # --- PERBAIKAN LOGIKA ANTI-DUPLIKASI WAJAH ---
+        # Menurunkan threshold secara paksa agar lebih mudah mendeteksi kesamaan
+        # Meskipun posenya agak berbeda, jika mirip > 50% akan diblokir
+        self.matcher.threshold = 0.50 
         match = self.matcher.match(embedding)
 
-        # --- DEBUGGING LOG ---
         skor = match.get("score", 0.0)
         nama_terdekat = match.get("name", "Unknown")
-        _log(f"[DEBUG DUPLIKASI] Wajah paling mirip di DB: '{nama_terdekat}'", "SYSTEM")
-        _log(f"[DEBUG DUPLIKASI] Skor Kemiripan: {skor:.4f} | Syarat Threshold: {config.MATCH_THRESHOLD}", "SYSTEM")
-        # ----------------------
+        _log(f"[DUPLIKASI CHECK] Wajah terdeteksi mirip dengan: '{nama_terdekat}' (Skor: {skor:.4f})", "SYSTEM")
 
         if match.get("matched", False):
-            RegistrationUI.show_full_screen_message(display, "REGISTRASI DITOLAK!", f"Sudah terdaftar sbg: {match['name']}", config.COLOR_RED)
+            RegistrationUI.show_full_screen_message(display, "REGISTRASI DITOLAK!", f"Muka ini adalah milik: {nama_terdekat}", config.COLOR_RED)
             cv2.imshow("Register", display)
             cv2.waitKey(4000)
             self.stage = RegistrationStage.COMPLETE
             return
+        # ---------------------------------------------
 
         # Simpan ke Firebase
         _log(f"Mengirim data wajah '{self.name}' ke Cloud...", "SYSTEM")
@@ -318,7 +335,6 @@ class FaceRegistrationApp:
                 display = frame.copy()
                 faces = self.detector.detect(frame)
 
-                # Menampilkan status CLAHE di layar
                 enhancement_status = "ON" if getattr(self.cam, 'apply_enhancement', False) else "OFF"
                 color_enh = config.COLOR_GREEN if enhancement_status == "ON" else config.COLOR_RED
                 RegistrationUI.put_text(display, f"CLAHE: {enhancement_status}", 20, color_enh, x=config.FRAME_WIDTH - 120, scale=0.5)
@@ -336,7 +352,6 @@ class FaceRegistrationApp:
                         RegistrationUI.draw_panel(display, self.stage, "Terdeteksi Foto/Video!", f"Skor: {spoof['score']}", "Gunakan wajah asli!")
                         cv2.imshow("Register", display)
                         
-                        # Tekan 'e' untuk toggle CLAHE, 'q' untuk keluar
                         key = cv2.waitKey(1) & 0xFF
                         if key == ord("q"): break
                         elif key == ord("e"):
@@ -352,7 +367,6 @@ class FaceRegistrationApp:
                         result = self.liveness.update_register(face, self.detector)
                         self._commit_stage_data(result["step"])
 
-                        # Update UI
                         box_color = config.COLOR_GREEN if result["step"] == "DONE" or "DONE" in result.get("progress","") else \
                                     config.COLOR_YELLOW if result["step"] == "WAIT" else config.COLOR_CYAN
                         status_text = "PASSED" if box_color==config.COLOR_GREEN else "TAHAN LURUS" if box_color==config.COLOR_YELLOW else "VALIDATING"
@@ -367,7 +381,6 @@ class FaceRegistrationApp:
 
                 cv2.imshow("Register", display)
                 
-                # Tekan 'e' untuk toggle CLAHE, 'q' untuk keluar
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord("q"):
                     _log("Dibatalkan oleh user", "WARNING")

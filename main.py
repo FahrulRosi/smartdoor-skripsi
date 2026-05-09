@@ -83,38 +83,45 @@ class SmartDoorApp:
             UIManager.log(f"Gagal memuat memori: {e}", "WARNING")
 
     def _reset_state(self):
-        self.state, self.last_name = ValidationState.IDLE, ""
+        self.state, self.last_name, self.match_score = ValidationState.IDLE, "", 0.0
         self.door.lock()
         self.challenge_sequence, self.current_step_idx, self.pose_hold_frames, self.fake_frames = [], 0, 0, 0
         self.blink_checker, self.reg_headpose = None, [0.0, 0.0, 0.0]
+        self.print_counter = 0
 
     def _check_action_passed(self, action, face):
+        """Mengecek aksi dan mengembalikan status lulus, nilai saat ini, dan nilai target untuk log terminal"""
         if action == "BLINK": 
-            return self.blink_checker.update(face, self.detector).get("complete", False) if self.blink_checker else False
+            passed = self.blink_checker.update(face, self.detector).get("complete", False) if self.blink_checker else False
+            ear = 0.0
+            if face.landmarks and len(face.landmarks) >= 400:
+                pts = np.array([[face.landmarks[i].x, face.landmarks[i].y] for i in [33,160,158,133,153,144,362,385,387,263,373,380]])
+                ear = ((np.linalg.norm(pts[1]-pts[5]) + np.linalg.norm(pts[2]-pts[4])) / (2.0 * np.linalg.norm(pts[0]-pts[3]) + 1e-6) + 
+                       (np.linalg.norm(pts[7]-pts[11]) + np.linalg.norm(pts[8]-pts[10])) / (2.0 * np.linalg.norm(pts[6]-pts[9]) + 1e-6)) / 2.0
+            return passed, ear, getattr(config, 'BLINK_EAR_THRESHOLD', 0.21)
         
         p, ref = self.pose_estimator.estimate(face, self.detector), self.reg_headpose
         dy, dp, dr = p.get("yaw",0) - ref[0], p.get("pitch",0) - ref[1], p.get("roll",0) - ref[2]
         
-        passed = {
-            "KANAN": dy > getattr(config, 'CHALLENGE_YAW', 20), "KIRI": dy < -getattr(config, 'CHALLENGE_YAW', 20),
-            "ATAS": dp < -getattr(config, 'CHALLENGE_PITCH', 15), "BAWAH": dp > getattr(config, 'CHALLENGE_PITCH', 15),
-            "MIRING_KANAN": dr > getattr(config, 'CHALLENGE_ROLL', 15), "MIRING_KIRI": dr < -getattr(config, 'CHALLENGE_ROLL', 15),
-        }.get(action, False)
+        cfg = {
+            "KANAN": (dy, getattr(config, 'CHALLENGE_YAW', 20), dy > getattr(config, 'CHALLENGE_YAW', 20)),
+            "KIRI": (-dy, getattr(config, 'CHALLENGE_YAW', 20), dy < -getattr(config, 'CHALLENGE_YAW', 20)),
+            "ATAS": (-dp, getattr(config, 'CHALLENGE_PITCH', 15), dp < -getattr(config, 'CHALLENGE_PITCH', 15)),
+            "BAWAH": (dp, getattr(config, 'CHALLENGE_PITCH', 15), dp > getattr(config, 'CHALLENGE_PITCH', 15)),
+            "MIRING_KANAN": (dr, getattr(config, 'CHALLENGE_ROLL', 15), dr > getattr(config, 'CHALLENGE_ROLL', 15)),
+            "MIRING_KIRI": (-dr, getattr(config, 'CHALLENGE_ROLL', 15), dr < -getattr(config, 'CHALLENGE_ROLL', 15)),
+        }.get(action, (0, 1, False))
         
+        val, target, passed = cfg
         self.pose_hold_frames = (self.pose_hold_frames + 1) if passed else 0
-        return self.pose_hold_frames >= 5
+        return self.pose_hold_frames >= 5, val, target
 
     def _process_face(self, frame, display, face):
         # 1. Cek Anti Spoofing
         spoof = self.anti_spoof.is_real(frame, face.bbox)
         if not spoof.get("real", True):
             self.fake_frames += 1
-            
-            # --- KETERANGAN UMUM SPOOFING ---
-            status_text = "TERDETEKSI SPOOFING"
-            
-            UIManager.draw_status(display, face.bbox, status_text, config.COLOR_RED)
-            
+            UIManager.draw_status(display, face.bbox, "TERDETEKSI SPOOFING", config.COLOR_RED)
             if self.fake_frames >= 7: self._reset_state()
             return
 
@@ -130,8 +137,9 @@ class SmartDoorApp:
             
             if match.get("matched", False):
                 self.last_name = match["name"]
-                cfg = self.user_profiles.get(self.last_name, {})
+                self.match_score = match.get("score", 0.0) # Menyimpan Skor Keberhasilan Pengenalan Wajah (Match Score)
                 
+                cfg = self.user_profiles.get(self.last_name, {})
                 self.reg_headpose = cfg.get("headpose_vector", [0.0, 0.0, 0.0])
                 ear = cfg.get("blink_closed", getattr(config, 'BLINK_EAR_THRESHOLD', 0.2))
                 ear = ear.get("avg_ear", 0.2) if isinstance(ear, dict) else (0.2 if float(ear) == 0.0 else float(ear))
@@ -139,21 +147,46 @@ class SmartDoorApp:
                 self.blink_checker = BlinkDetector(ear_threshold=ear + 0.01, target_blinks=1)
                 self.challenge_sequence = [random.choice([k for k in self.CHALLENGES.keys() if k != "BLINK"]), "BLINK"]
                 self.state, self.current_step_idx = ValidationState.CHALLENGE, 0
-                UIManager.log(f"Wajah dikenali: {self.last_name}", "SUCCESS")
+                
+                UIManager.log(f"Wajah dikenali: {self.last_name}. Memulai Tantangan Liveness...", "SUCCESS")
             else: 
                 UIManager.draw_status(display, face.bbox, "TIDAK DIKENAL", config.COLOR_RED)
 
         # 3. Tantangan Liveness Aktif
         elif self.state == ValidationState.CHALLENGE:
             action = self.challenge_sequence[self.current_step_idx]
+            
+            # Tampilan UI seperti asli (Teks kuning di pojok kiri atas)
             UIManager.draw_status(display, face.bbox, f"User: {self.last_name}", config.COLOR_CYAN)
             cv2.putText(display, f"Tahap {self.current_step_idx+1}/{len(self.challenge_sequence)}: {self.CHALLENGES[action]}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, config.COLOR_YELLOW, 2)
             
-            if self._check_action_passed(action, face):
+            passed, current_val, target_val = self._check_action_passed(action, face)
+            
+            # Terminal Log: Menampilkan nilai Real-time (Keberhasilan Challenge)
+            self.print_counter += 1
+            if self.print_counter % 3 == 0:
+                if action == "BLINK":
+                    print(f"\r[{self.CHALLENGES[action]}] Nilai EAR Mata: {current_val:.2f} / Target: < {target_val:.2f}          ", end="", flush=True)
+                else:
+                    print(f"\r[{self.CHALLENGES[action]}] Sudut Kepala: {current_val:.1f}° / Target: {target_val}°          ", end="", flush=True)
+
+            # Jika berhasil melewati challenge saat ini
+            if passed:
+                print() # Break baris agar tertulis permanen
+                UIManager.log(f"✅ {self.CHALLENGES[action]} SELESAI -> Nilai Tercapai: {current_val:.2f}", "SUCCESS")
+                
                 self.current_step_idx += 1
+                
+                # Jika SEMUA tantangan selesai (Buka Pintu)
                 if self.current_step_idx >= len(self.challenge_sequence):
                     self.state = ValidationState.UNLOCKED
                     self.door.unlock()
+                    
+                    # LOG TERMINAL: Menampilkan Keberhasilan Buka Pintu (Persentase Kecocokan Wajah)
+                    persentase_wajah = self.match_score * 100
+                    UIManager.log(f"🔓 AKSES DIBERIKAN: Pintu terbuka untuk '{self.last_name}'", "SUCCESS")
+                    UIManager.log(f"📊 Persentase Keberhasilan (Akurasi Wajah): {persentase_wajah:.1f}%", "SUCCESS")
+                    
                     if hasattr(self.db, 'push_access_log_async'): 
                         self.db.push_access_log_async(self.last_name, "UNLOCKED")
 

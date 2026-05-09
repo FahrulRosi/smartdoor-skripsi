@@ -9,9 +9,9 @@ ENABLE_CLAHE_ENHANCEMENT = True
 CLAHE_CLIP_LIMIT         = 2.5
 CLAHE_TILE_GRID_SIZE     = (8, 8)
 
-# ── Database Firebase ────────────────────────────────────────────────────────
-FIREBASE_URL         = "https://smart-door-lock-feb6b-default-rtdb.asia-southeast1.firebasedatabase.app"
-FIREBASE_CREDENTIALS = "serviceAccount.json"
+# ── Database Supabase ────────────────────────────────────────────────────────
+SUPABASE_URL = "https://gwwxebdmavlmxxcdrlge.supabase.co"
+SUPABASE_KEY = "sb_publishable_tUsmI6J1BubOlRf9YhtNPQ_F9dWIyOv"
 
 # ── FaceMesh ─────────────────────────────────────────────────────────────────
 MIN_DETECTION_CONFIDENCE = 0.5
@@ -29,9 +29,9 @@ EXTRACTION_MAX_PITCH = 12.0
 EXTRACTION_MAX_ROLL  = 12.0
 
 # Syarat derajat minimum agar gerakan "Menoleh / Mengangguk / Miring" dianggap valid 
-CHALLENGE_YAW   = 25.0  # Toleh Kanan/Kiri minimal 25 derajat
-CHALLENGE_PITCH = 20.0  # Angguk Atas/Bawah minimal 20 derajat
-CHALLENGE_ROLL  = 25.0  # Miring Kanan/Kiri minimal 25 derajat
+CHALLENGE_YAW   = 25.0  
+CHALLENGE_PITCH = 20.0  
+CHALLENGE_ROLL  = 25.0  
 
 # Mapping agar register.py bisa langsung membaca threshold tantangan
 YAW_THRESHOLD   = CHALLENGE_YAW
@@ -44,12 +44,10 @@ REGISTER_BLINK_COUNT = 2
 
 # ── Anti-Spoofing & Recognition ──────────────────────────────────────────────
 ANTI_SPOOFING_MODEL     = "liveness/antispoofing.onnx"
-ANTI_SPOOFING_THRESHOLD = 0.85 
+ANTI_SPOOFING_THRESHOLD = 0.95 
 
 # Threshold kemiripan wajah (Cosine Similarity).
-# Diturunkan dari 0.75 menjadi 0.60 untuk mencegah pendaftaran wajah ganda (duplikasi)
-# dan meningkatkan akurasi pengenalan saat kondisi wajah sedikit berbeda.
-MATCH_THRESHOLD         = 0.60
+MATCH_THRESHOLD         = 0.55
 MOBILEFACENET_PATH      = "recognition/mobilefacenet.onnx"
 
 # ── Door Lock & UI ───────────────────────────────────────────────────────────

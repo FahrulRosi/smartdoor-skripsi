@@ -5,6 +5,7 @@ import numpy as np
 
 # Konfigurasi dan Modul Internal
 import config
+from facemesh.facemesh_detector import FaceMeshDetector
 from liveness.head_pose import HeadPoseEstimator
 from liveness.blink import BlinkDetector
 
@@ -62,7 +63,7 @@ class SilentAntiSpoofing:
         """
         if not self._session:
             # Mengembalikan status asli (bypass) jika model gagal dimuat
-            return {"real": True, "score": 1.0}
+            return {"real": True, "score": 1.0, "label_name": "Asli"}
 
         src_h, src_w = frame.shape[:2]
         
@@ -71,12 +72,12 @@ class SilentAntiSpoofing:
         face_crop = frame[y1:y2+1, x1:x2+1]
 
         if face_crop.size == 0:
-            return {"real": False, "score": 0.0}
+            return {"real": False, "score": 0.0, "label_name": "Tidak Diketahui"}
 
         # 2. Prapemrosesan: Ubah ukuran ke 80x80 sesuai model
         face_resized = cv2.resize(face_crop, (80, 80))
         
-        # Konversi warna ke RGB (Ubah menjadi komentar '#' jika modelmu butuh format mentah BGR dari OpenCV)
+        # Konversi warna ke RGB
         face_rgb = cv2.cvtColor(face_resized, cv2.COLOR_BGR2RGB)
         
         # 3. Format tensor ke CHW (Channels, Height, Width) untuk ONNX
@@ -93,17 +94,37 @@ class SilentAntiSpoofing:
         preds = softmax_output[0]
 
         # [DEBUG] Tampilkan probabilitas tiap kelas di terminal
-        print(f"[DEBUG] Anti-Spoofing Output: {preds}")
+        # print(f"[DEBUG] Anti-Spoofing Output: {preds}")
 
-        # 6. Pemilihan Nilai Skor Berdasarkan Arsitektur Model
-        if len(preds) == 3:
-            # Index 1 adalah nilai probabilitas untuk Asli (Real Face)
-            score_real = float(preds[1])
+        # 6. Pemilihan Nilai Skor Berdasarkan Arsitektur Model (Perbaikan FOTO/VIDEO)
+        if len(preds) >= 3:
+            score_photo = float(preds[0]) # Probabilitas Foto Cetak
+            score_real  = float(preds[1]) # Probabilitas Asli
+            score_video = float(preds[2]) # Probabilitas Layar/Video
         else:
-            score_real = float(preds[1])
+            score_real = float(preds[1]) if len(preds) > 1 else 0.0
+            score_photo = 1.0 - score_real
+            score_video = 0.0
 
         is_valid = score_real >= self.threshold
-        return {"real": is_valid, "score": round(score_real, 4)}
+
+        if is_valid:
+            label_name = "Asli"
+            score_display = score_real
+        else:
+            # Jika ditolak, bandingkan apakah lebih condong ke Foto atau Video
+            if len(preds) >= 3:
+                if score_photo > score_video:
+                    label_name = "Spoofing (Foto Cetak)"
+                    score_display = score_photo
+                else:
+                    label_name = "Spoofing (Layar/Video)"
+                    score_display = score_video
+            else:
+                label_name = "Spoofing (Foto/Video)"
+                score_display = 1.0 - score_real
+
+        return {"real": is_valid, "score": round(score_display, 4), "label_name": label_name}
 
 
 class ActiveChallengeManager:

@@ -1,6 +1,8 @@
 import cv2
 import os
 import numpy as np
+import time
+import threading
 from enum import Enum
 from datetime import datetime
 
@@ -106,7 +108,12 @@ class FaceRegistrationApp:
         self.name = name
         self.stage = RegistrationStage.FACEMESH
         self.in_ext, self.hold_frames, self.print_counter = False, 0, 0
-        self.last_match_score = 0.0 # VARIABEL BARU: Untuk menyimpan skor MobileFaceNet
+        self.last_match_score = 0.0 
+        
+        # Variabel untuk Threading
+        self.is_running = True
+        self.display_frame = None
+        self.frame_lock = threading.Lock()
         
         self.captured_data = {"facemesh_vector": None, "yaw_snapshots": [], "pitch_snapshots": [], "roll_snapshots": [], "blink_closed": None, "blink_open": None, "headpose_vector": None}
         self._pose_buf, self._blink_buf, self._prev_step = {"yaw": {}, "pitch": {}, "roll": {}}, {"closed": None, "open": None}, "FACEMESH"
@@ -185,19 +192,21 @@ class FaceRegistrationApp:
         self._prev_step = cur_step
         self.stage = STEP_TO_STAGE.get(cur_step, self.stage)
 
-    def run(self):
-        if self.stage == RegistrationStage.COMPLETE: return
-        _log(f"🎬 Memulai registrasi: {self.name}", "SYSTEM")
+    def _process_thread(self):
+        """Worker thread untuk menangani deteksi dan pemrosesan utama"""
         try:
-            while self.stage != RegistrationStage.COMPLETE:
+            while self.is_running and self.stage != RegistrationStage.COMPLETE:
                 ret, frame = self.cam.read()
-                if not ret: continue
+                if not ret: 
+                    time.sleep(0.01)
+                    continue
+                
                 display, faces = frame.copy(), self.detector.detect(frame)
 
                 if not faces:
                     RegistrationUI.draw_hud(display, self.stage, "Wajah tidak terdeteksi", "Hadapkan wajah ke kamera", "", "NO FACE", None, config.COLOR_RED)
-                    cv2.imshow("Register", display)
-                    if cv2.waitKey(1) & 0xFF == ord("q"): break
+                    with self.frame_lock:
+                        self.display_frame = display
                     continue
 
                 face = faces[0]
@@ -218,8 +227,8 @@ class FaceRegistrationApp:
                     current_instruction = "❌ SPOOFING DETECTED"
                     RegistrationUI.draw_hud(display, self.stage, "❌ TERDETEKSI SPOOFING!", f"Skor Palsu: {sp_score:.2f}", score_txt, "SPOOFING", face.bbox, config.COLOR_RED)
                     print(f"\r[{current_instruction}] {score_txt}          ", end="", flush=True)
-                    cv2.imshow("Register", display)
-                    if cv2.waitKey(1) & 0xFF == ord("q"): break
+                    with self.frame_lock:
+                        self.display_frame = display
                     continue 
 
                 if self.stage != RegistrationStage.EXTRACTION and not self.in_ext:
@@ -242,7 +251,6 @@ class FaceRegistrationApp:
                     if self.print_counter % 3 == 0:
                         print(f"\r[{current_instruction}] {score_txt}          ", end="", flush=True)
 
-                # --- PENYESUAIAN LOG FINAL ---
                 if old_stage != self.stage:
                     print() 
                     if old_stage == RegistrationStage.FACEMESH:
@@ -267,17 +275,46 @@ class FaceRegistrationApp:
                         o = self.captured_data.get("blink_open", {}).get("avg_ear", 0)
                         _log(f"✅ BLINK Selesai -> Mata Terbuka (Max EAR): {o:.2f} | Mata Tertutup (Min EAR): {c:.2f}", "SUCCESS")
                     elif old_stage == RegistrationStage.EXTRACTION:
-                        # LOG BARU: Menampilkan Skor Unik MobileFaceNet
                         _log(f"✅ Ekstraksi MobileFaceNet Selesai -> Skor Kemiripan Database: {self.last_match_score:.4f}", "SUCCESS")
                         if self.last_match_score < 0.50:
                             _log(f"ℹ️  Info: Wajah sangat unik dan aman (belum ada yang mirip).", "INFO")
 
-                cv2.imshow("Register", display)
-                if cv2.waitKey(1) & 0xFF == ord("q"): break
+                # Update frame untuk ditampilkan oleh main thread
+                with self.frame_lock:
+                    self.display_frame = display
+
         except Exception as e:
-            _log(f"❌ Terjadi Crash: {e}", "ERROR")
+            _log(f"❌ Terjadi Crash di Thread: {e}", "ERROR")
+        finally:
+            self.is_running = False
+
+    def run(self):
+        if self.stage == RegistrationStage.COMPLETE: return
+        _log(f"🎬 Memulai registrasi: {self.name}", "SYSTEM")
+        
+        # Memulai Worker Thread
+        processing_thread = threading.Thread(target=self._process_thread, daemon=True)
+        processing_thread.start()
+
+        try:
+            # Main Thread UI Loop
+            while self.is_running and self.stage != RegistrationStage.COMPLETE:
+                frame_to_show = None
+                with self.frame_lock:
+                    if self.display_frame is not None:
+                        frame_to_show = self.display_frame.copy()
+                
+                if frame_to_show is not None:
+                    cv2.imshow("Register", frame_to_show)
+                
+                # Menangani input keyboard di main thread
+                if cv2.waitKey(1) & 0xFF == ord("q"): 
+                    self.is_running = False
+                    break
         finally:
             print() 
+            self.is_running = False
+            processing_thread.join(timeout=1.0) # Tunggu thread tertutup aman
             if GPIO_AVAILABLE: GPIO.cleanup()
             self.cam.stop(); self.detector.close(); cv2.destroyAllWindows()
 
@@ -299,25 +336,33 @@ class FaceRegistrationApp:
         
         if missing:
             RegistrationUI.show_msg(display, "❌ GAGAL!", f"Data Kurang: {', '.join(missing)}", config.COLOR_RED)
-            cv2.imshow("Register", display); cv2.waitKey(4000); self.stage = RegistrationStage.COMPLETE; return
+            with self.frame_lock: self.display_frame = display.copy()
+            time.sleep(4) # Mengganti cv2.waitKey(4000)
+            self.stage = RegistrationStage.COMPLETE
+            return
 
         emb = self.model.get_embedding(self.model.crop_face(frame, face.bbox))
         self.captured_data["headpose_vector"] = [float(yaw), float(pitch), float(roll)]
         
         match = self.matcher.match(emb)
-        self.last_match_score = match.get("score", 0.0) # MENYIMPAN SKOR MATCHING
+        self.last_match_score = match.get("score", 0.0) 
         
         if match["matched"] and os.getenv("REGISTER_ALLOW_DUPLICATE", "false").lower() != "true":
             _log(f"⚠️ WAJAH DUPLIKASI: Score: {match['score']:.4f}", "WARNING")
             RegistrationUI.show_msg(display, "❌ SUDAH TERDAFTAR!", f"Mirip dengan {match['name']} ({match['score']:.2f})", config.COLOR_RED)
-            cv2.imshow("Register", display); cv2.waitKey(4000); self.stage = RegistrationStage.COMPLETE; return
+            with self.frame_lock: self.display_frame = display.copy()
+            time.sleep(4) # Mengganti cv2.waitKey(4000)
+            self.stage = RegistrationStage.COMPLETE
+            return
 
         if self.db.save_face(self.name, emb, self.captured_data):
             RegistrationUI.show_msg(display, "✅ BERHASIL!", f"Nama: {self.name}", config.COLOR_GREEN)
             _log(f"✅ Registrasi BERHASIL: {self.name}", "SUCCESS")
         else: RegistrationUI.show_msg(display, "❌ GAGAL!", "Database Error", config.COLOR_RED)
         
-        cv2.imshow("Register", display); cv2.waitKey(3000); self.stage = RegistrationStage.COMPLETE
+        with self.frame_lock: self.display_frame = display.copy()
+        time.sleep(3) # Mengganti cv2.waitKey(3000)
+        self.stage = RegistrationStage.COMPLETE
 
 if __name__ == "__main__":
     name = input("\nMasukkan Nama Panggilan: ").strip()

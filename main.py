@@ -3,12 +3,6 @@ from datetime import datetime
 from enum import Enum
 
 import config
-
-# --- SOLUSI OTOMATIS PATH IMPORT ---
-import sys, os
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-# -----------------------------------
-
 from camera.camera_stream       import CameraStream
 from facemesh.facemesh_detector import FaceMeshDetector
 from recognition.mobilefacenet  import MobileFaceNet

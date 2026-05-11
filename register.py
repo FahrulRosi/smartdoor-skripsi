@@ -1,8 +1,4 @@
-import cv2
-import os
-import numpy as np
-import time
-import threading
+import cv2, os, time, threading, numpy as np
 from enum import Enum
 from datetime import datetime
 
@@ -35,16 +31,25 @@ STEP_TO_STAGE = {
 
 def _log(msg, level="INFO"): print(f"[{datetime.now().strftime('%H:%M:%S')}] [{level}] {msg}")
 
+class IlluminationEnhancer:
+    @staticmethod
+    def enhance(frame):
+        if not getattr(config, 'ENABLE_CLAHE_ENHANCEMENT', True): 
+            return frame
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        if np.mean(gray) > 85.0: 
+            return frame
+        lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=getattr(config, 'CLAHE_CLIP_LIMIT', 2.5), tileGridSize=getattr(config, 'CLAHE_TILE_GRID_SIZE', (8, 8)))
+        return cv2.cvtColor(cv2.merge((clahe.apply(l), a, b)), cv2.COLOR_LAB2BGR)
+
 class DataExtractor:
-    _LEFT_EYE = [33, 160, 158, 133, 153, 144]
-    _RIGHT_EYE = [362, 385, 387, 263, 373, 380]
+    _LEFT_EYE, _RIGHT_EYE = [33, 160, 158, 133, 153, 144], [362, 385, 387, 263, 373, 380]
     
     @staticmethod
     def capture_facemesh(face): 
-        try:
-            if not face.landmarks: return None
-            return np.array([[l.x, l.y, l.z] for l in face.landmarks], dtype=np.float32).flatten()
-        except Exception: return None
+        return np.array([[l.x, l.y, l.z] for l in face.landmarks], dtype=np.float32).flatten() if getattr(face, 'landmarks', None) else None
     
     @staticmethod
     def capture_pose(pose, tag): 
@@ -53,7 +58,7 @@ class DataExtractor:
     @classmethod
     def capture_blink(cls, face):
         try:
-            if not face.landmarks or len(face.landmarks) < 400: return None
+            if not getattr(face, 'landmarks', None) or len(face.landmarks) < 400: return None
             def ear(idx):
                 pts = np.array([[face.landmarks[i].x, face.landmarks[i].y] for i in idx], dtype=np.float32)
                 return (np.linalg.norm(pts[1]-pts[5]) + np.linalg.norm(pts[2]-pts[4])) / (2.0 * np.linalg.norm(pts[0]-pts[3]) + 1e-6)
@@ -65,7 +70,6 @@ class RegistrationUI:
     @staticmethod
     def draw_hud(frame, stage, instruction, progress, score_txt, status, bbox, box_color):
         x, y, w, h = bbox if bbox else (0,0,0,0)
-        
         if bbox:
             cv2.rectangle(frame, (x, y), (x+w, y+h), box_color, 3)
             cv2.rectangle(frame, (x, y-35), (x+180, y-5), box_color, -1)
@@ -109,8 +113,8 @@ class FaceRegistrationApp:
         self.stage = RegistrationStage.FACEMESH
         self.in_ext, self.hold_frames, self.print_counter = False, 0, 0
         self.last_match_score = 0.0 
+        self.fake_frames = 0  
         
-        # Variabel untuk Threading
         self.is_running = True
         self.display_frame = None
         self.frame_lock = threading.Lock()
@@ -121,17 +125,13 @@ class FaceRegistrationApp:
         self.db = FaceDatabase()
         if self.db.check_user_exists(self.name):
             _log(f"❌ Registrasi Dibatalkan: '{self.name}' sudah terdaftar!", "ERROR")
-            self.stage = RegistrationStage.COMPLETE
-            return
+            self.stage = RegistrationStage.COMPLETE; return
 
         self.cam = CameraStream(config.CAMERA_INDEX, config.FRAME_WIDTH, config.FRAME_HEIGHT).start()
-        
-        self.detector = FaceMeshDetector(
-            min_detection_confidence=getattr(config, 'MIN_DETECTION_CONFIDENCE', 0.5), 
-            min_tracking_confidence=getattr(config, 'MIN_TRACKING_CONFIDENCE', 0.5)
-        )
-        
-        self.liveness, self.model, self.anti_spoof = LivenessManager(), MobileFaceNet(), SilentAntiSpoofing()
+        self.detector = FaceMeshDetector(min_detection_confidence=getattr(config, 'MIN_DETECTION_CONFIDENCE', 0.5), min_tracking_confidence=getattr(config, 'MIN_TRACKING_CONFIDENCE', 0.5))
+        self.liveness = LivenessManager()
+        self.model = MobileFaceNet()
+        self.anti_spoof = SilentAntiSpoofing(model_path=getattr(config, 'ANTI_SPOOFING_MODEL', "liveness/antispoofing.onnx"), threshold=getattr(config, 'ANTI_SPOOFING_THRESHOLD', 0.85))
         
         self.matcher = FaceMatcher(threshold=0.60)
         try: self.matcher.known_faces = self.db.load_all_faces()
@@ -145,9 +145,7 @@ class FaceRegistrationApp:
             fm = DataExtractor.capture_facemesh(face)
             if fm is not None:
                 self.hold_frames += 1
-                if self.hold_frames >= 10:
-                    self.captured_data["facemesh_vector"] = fm
-                    self.hold_frames = 0
+                if self.hold_frames >= 10: self.captured_data["facemesh_vector"], self.hold_frames = fm, 0
 
         if self.stage in self.POSE_CFG:
             _, tag_neg, tag_pos, axis, thr = self.POSE_CFG[self.stage]
@@ -155,26 +153,20 @@ class FaceRegistrationApp:
             
             if val < -cap_thr:
                 self.hold_frames += 1
-                if self.hold_frames >= 3 and (tag_neg not in buf or val < buf[tag_neg][axis]):
-                    buf[tag_neg] = DataExtractor.capture_pose(pose, tag_neg)
+                if self.hold_frames >= 3 and (tag_neg not in buf or val < buf[tag_neg][axis]): buf[tag_neg] = DataExtractor.capture_pose(pose, tag_neg)
             elif val > cap_thr:
                 self.hold_frames += 1
-                if self.hold_frames >= 3 and (tag_pos not in buf or val > buf[tag_pos][axis]):
-                    buf[tag_pos] = DataExtractor.capture_pose(pose, tag_pos)
-            else:
-                self.hold_frames = 0
+                if self.hold_frames >= 3 and (tag_pos not in buf or val > buf[tag_pos][axis]): buf[tag_pos] = DataExtractor.capture_pose(pose, tag_pos)
+            else: self.hold_frames = 0
 
         if self.stage == RegistrationStage.BLINK:
             bv = DataExtractor.capture_blink(face)
             if bv:
-                if not self._blink_buf["closed"] or bv["avg_ear"] < self._blink_buf["closed"]["avg_ear"]: 
-                    self._blink_buf["closed"] = bv
-                if not self._blink_buf["open"] or bv["avg_ear"] > self._blink_buf["open"]["avg_ear"]: 
-                    self._blink_buf["open"] = bv
+                if not self._blink_buf["closed"] or bv["avg_ear"] < self._blink_buf["closed"]["avg_ear"]: self._blink_buf["closed"] = bv
+                if not self._blink_buf["open"] or bv["avg_ear"] > self._blink_buf["open"]["avg_ear"]: self._blink_buf["open"] = bv
 
     def _commit_stage_data(self, cur_step):
         if cur_step in ("WAIT", self._prev_step): return
-        
         if self._prev_step in self.STEP_COMMIT:
             axis = self.STEP_COMMIT[self._prev_step]
             if len(self._pose_buf[axis]) < 2:
@@ -193,128 +185,113 @@ class FaceRegistrationApp:
         self.stage = STEP_TO_STAGE.get(cur_step, self.stage)
 
     def _process_thread(self):
-        """Worker thread untuk menangani deteksi dan pemrosesan utama"""
         try:
             while self.is_running and self.stage != RegistrationStage.COMPLETE:
                 ret, frame = self.cam.read()
-                if not ret: 
-                    time.sleep(0.01)
-                    continue
+                if not ret: time.sleep(0.01); continue
                 
-                display, faces = frame.copy(), self.detector.detect(frame)
-
+                raw_frame = frame.copy()
+                enhanced_frame = IlluminationEnhancer.enhance(raw_frame)
+                display, faces = enhanced_frame.copy(), self.detector.detect(enhanced_frame)
+                
                 if not faces:
                     RegistrationUI.draw_hud(display, self.stage, "Wajah tidak terdeteksi", "Hadapkan wajah ke kamera", "", "NO FACE", None, config.COLOR_RED)
-                    with self.frame_lock:
-                        self.display_frame = display
+                    with self.frame_lock: self.display_frame = display
                     continue
 
                 face = faces[0]
                 display = self.detector.draw(display, face)
                 
+                if face.bbox[3] > int(config.FRAME_HEIGHT * 0.50):
+                    RegistrationUI.draw_hud(display, self.stage, "Wajah Terlalu Dekat!", "Silakan mundur sedikit dari kamera", "", "TOO CLOSE", face.bbox, config.COLOR_YELLOW)
+                    with self.frame_lock: self.display_frame = display
+                    continue
+                
                 pose = self.liveness.pose_estimator.estimate(face, self.detector)
-                spoof = self.anti_spoof.is_real(frame, face.bbox)
                 ear_data = DataExtractor.capture_blink(face)
-                
-                sp_score = spoof.get("score", 0.0)
                 ear_val = ear_data["avg_ear"] if ear_data else 0.0
-                score_txt = f"Real:{sp_score:.2f} | Y:{pose.get('yaw',0):.1f} P:{pose.get('pitch',0):.1f} R:{pose.get('roll',0):.1f} | EAR:{ear_val:.2f}"
-                
-                old_stage = self.stage
-                current_instruction = self.stage.name 
 
-                if not spoof.get("real", True):
-                    current_instruction = "❌ SPOOFING DETECTED"
-                    RegistrationUI.draw_hud(display, self.stage, "❌ TERDETEKSI SPOOFING!", f"Skor Palsu: {sp_score:.2f}", score_txt, "SPOOFING", face.bbox, config.COLOR_RED)
-                    print(f"\r[{current_instruction}] {score_txt}          ", end="", flush=True)
-                    with self.frame_lock:
-                        self.display_frame = display
-                    continue 
+                # --- SOLUSI KUNCI: SUSPEND ANTI-SPOOFING SAAT TAHAP GERAKAN AKTIF ---
+                # Pengecekan tekstur statis hanya valid saat wajah diam/lurus (FACEMESH, BLINK, EXTRACTION).
+                # Saat tahap YAW/PITCH/ROLL, gerakan kepala menghasilkan blur dan profil samping
+                # yang secara alami selalu memicu false spoofing pada MiniFASNet.
+                check_spoofing = self.stage in (RegistrationStage.FACEMESH, RegistrationStage.BLINK, RegistrationStage.EXTRACTION)
+                
+                sp_score = 1.0
+                if check_spoofing:
+                    spoof = self.anti_spoof.is_real(raw_frame, face.bbox)
+                    sp_score = spoof.get("score", 0.0)
+                    if not spoof.get("real", True):
+                        self.fake_frames += 1
+                        if self.fake_frames >= 3:
+                            score_txt = f"Real:{sp_score:.2f} | Y:{pose.get('yaw',0):.1f} P:{pose.get('pitch',0):.1f} R:{pose.get('roll',0):.1f} | EAR:{ear_val:.2f}"
+                            RegistrationUI.draw_hud(display, self.stage, "❌ TERDETEKSI SPOOFING!", f"Skor Palsu: {sp_score:.2f}", score_txt, "SPOOFING", face.bbox, config.COLOR_RED)
+                            print(f"\r[❌ SPOOFING DETECTED] {score_txt}          ", end="", flush=True)
+                            with self.frame_lock: self.display_frame = display
+                            continue 
+                    else:
+                        self.fake_frames = 0
+                else:
+                    # Suspend/bypass penghitung spoofing saat sedang berputar/bergerak aktif
+                    self.fake_frames = 0
+                # --------------------------------------------------------------------
+
+                score_txt = f"Real:{sp_score:.2f} | Y:{pose.get('yaw',0):.1f} P:{pose.get('pitch',0):.1f} R:{pose.get('roll',0):.1f} | EAR:{ear_val:.2f}"
+                old_stage, current_instruction = self.stage, self.stage.name 
 
                 if self.stage != RegistrationStage.EXTRACTION and not self.in_ext:
                     self._record_data_buffers(face, pose) 
                     result = self.liveness.update_register(face, self.detector)
                     self._commit_stage_data(result["step"])
-                    
                     current_instruction = result["instruction"] 
-
-                    color = config.COLOR_GREEN if result["step"] == "DONE" else config.COLOR_CYAN
-                    RegistrationUI.draw_hud(display, self.stage, current_instruction, result.get("progress",""), score_txt, "VALIDATING", face.bbox, color)
+                    RegistrationUI.draw_hud(display, self.stage, current_instruction, result.get("progress",""), score_txt, "VALIDATING", face.bbox, config.COLOR_GREEN if result["step"] == "DONE" else config.COLOR_CYAN)
 
                 elif self.stage == RegistrationStage.EXTRACTION and not self.in_ext:
                     current_instruction = "4. Ekstraksi Fitur Database"
                     print(f"\r[{current_instruction}] {score_txt}          ", end="", flush=True)
-                    self._process_extraction(frame, face, display, pose, score_txt)
+                    self._process_extraction(enhanced_frame, face, display, pose, score_txt)
 
                 if self.stage != RegistrationStage.EXTRACTION:
                     self.print_counter += 1
-                    if self.print_counter % 3 == 0:
-                        print(f"\r[{current_instruction}] {score_txt}          ", end="", flush=True)
+                    if self.print_counter % 3 == 0: print(f"\r[{current_instruction}] {score_txt}          ", end="", flush=True)
 
                 if old_stage != self.stage:
-                    print() 
-                    if old_stage == RegistrationStage.FACEMESH:
-                        _log(f"✅ FACEMESH 3D Terekam -> (Wajah Posisi Lurus/Netral)", "SUCCESS")
-                    elif old_stage == RegistrationStage.YAW:
-                        snaps = self.captured_data.get("yaw_snapshots", [])
-                        L = next((s["yaw"] for s in snaps if s["tag"] == "yaw_left"), 0)
-                        R = next((s["yaw"] for s in snaps if s["tag"] == "yaw_right"), 0)
-                        _log(f"✅ YAW Selesai -> Toleh Kiri (Max Score): {L:.1f}° | Toleh Kanan (Max Score): {R:.1f}°", "SUCCESS")
-                    elif old_stage == RegistrationStage.PITCH:
-                        snaps = self.captured_data.get("pitch_snapshots", [])
-                        U = next((s["pitch"] for s in snaps if s["tag"] == "pitch_up"), 0)
-                        D = next((s["pitch"] for s in snaps if s["tag"] == "pitch_down"), 0)
-                        _log(f"✅ PITCH Selesai -> Dongak Atas (Max Score): {U:.1f}° | Tunduk Bawah (Max Score): {D:.1f}°", "SUCCESS")
-                    elif old_stage == RegistrationStage.ROLL:
-                        snaps = self.captured_data.get("roll_snapshots", [])
-                        L = next((s["roll"] for s in snaps if s["tag"] == "roll_left"), 0)
-                        R = next((s["roll"] for s in snaps if s["tag"] == "roll_right"), 0)
-                        _log(f"✅ ROLL Selesai -> Miring Kiri (Max Score): {L:.1f}° | Miring Kanan (Max Score): {R:.1f}°", "SUCCESS")
+                    print()
+                    def get_snap(key, tag): 
+                        return next((s[key] for s in self.captured_data.get(f"{key}_snapshots", []) if s["tag"] == tag), 0)
+                    
+                    if old_stage == RegistrationStage.FACEMESH:   _log("✅ FACEMESH 3D Terekam -> (Wajah Posisi Lurus/Netral)", "SUCCESS")
+                    elif old_stage == RegistrationStage.YAW:      _log(f"✅ YAW Selesai -> Toleh Kiri: {get_snap('yaw','yaw_left'):.1f}° | Toleh Kanan: {get_snap('yaw','yaw_right'):.1f}°", "SUCCESS")
+                    elif old_stage == RegistrationStage.PITCH:    _log(f"✅ PITCH Selesai -> Dongak Atas: {get_snap('pitch','pitch_up'):.1f}° | Tunduk Bawah: {get_snap('pitch','pitch_down'):.1f}°", "SUCCESS")
+                    elif old_stage == RegistrationStage.ROLL:     _log(f"✅ ROLL Selesai -> Miring Kiri: {get_snap('roll','roll_left'):.1f}° | Miring Kanan: {get_snap('roll','roll_right'):.1f}°", "SUCCESS")
                     elif old_stage == RegistrationStage.BLINK:
-                        c = self.captured_data.get("blink_closed", {}).get("avg_ear", 0)
-                        o = self.captured_data.get("blink_open", {}).get("avg_ear", 0)
+                        c, o = self.captured_data.get("blink_closed", {}).get("avg_ear", 0), self.captured_data.get("blink_open", {}).get("avg_ear", 0)
                         _log(f"✅ BLINK Selesai -> Mata Terbuka (Max EAR): {o:.2f} | Mata Tertutup (Min EAR): {c:.2f}", "SUCCESS")
                     elif old_stage == RegistrationStage.EXTRACTION:
                         _log(f"✅ Ekstraksi MobileFaceNet Selesai -> Skor Kemiripan Database: {self.last_match_score:.4f}", "SUCCESS")
-                        if self.last_match_score < 0.50:
-                            _log(f"ℹ️  Info: Wajah sangat unik dan aman (belum ada yang mirip).", "INFO")
+                        if self.last_match_score < 0.50: _log("ℹ️ Info: Wajah sangat unik dan aman (belum ada yang mirip).", "INFO")
 
-                # Update frame untuk ditampilkan oleh main thread
-                with self.frame_lock:
-                    self.display_frame = display
+                with self.frame_lock: self.display_frame = display
 
-        except Exception as e:
-            _log(f"❌ Terjadi Crash di Thread: {e}", "ERROR")
-        finally:
-            self.is_running = False
+        except Exception as e: _log(f"❌ Terjadi Crash di Thread: {e}", "ERROR")
+        finally: self.is_running = False
 
     def run(self):
         if self.stage == RegistrationStage.COMPLETE: return
         _log(f"🎬 Memulai registrasi: {self.name}", "SYSTEM")
         
-        # Memulai Worker Thread
         processing_thread = threading.Thread(target=self._process_thread, daemon=True)
         processing_thread.start()
 
         try:
-            # Main Thread UI Loop
             while self.is_running and self.stage != RegistrationStage.COMPLETE:
                 frame_to_show = None
-                with self.frame_lock:
-                    if self.display_frame is not None:
-                        frame_to_show = self.display_frame.copy()
-                
-                if frame_to_show is not None:
-                    cv2.imshow("Register", frame_to_show)
-                
-                # Menangani input keyboard di main thread
-                if cv2.waitKey(1) & 0xFF == ord("q"): 
-                    self.is_running = False
-                    break
+                with self.frame_lock: frame_to_show = self.display_frame.copy() if self.display_frame is not None else None
+                if frame_to_show is not None: cv2.imshow("Register", frame_to_show)
+                if cv2.waitKey(1) & 0xFF == ord("q"): self.is_running = False; break
         finally:
-            print() 
-            self.is_running = False
-            processing_thread.join(timeout=1.0) # Tunggu thread tertutup aman
+            print(); self.is_running = False
+            processing_thread.join(timeout=1.0) 
             if GPIO_AVAILABLE: GPIO.cleanup()
             self.cam.stop(); self.detector.close(); cv2.destroyAllWindows()
 
@@ -325,21 +302,15 @@ class FaceRegistrationApp:
             return
 
         self.in_ext = True
-        
         missing = [k for k, is_valid in [
-            ("FaceMesh", self.captured_data["facemesh_vector"] is not None), 
-            ("Yaw", len(self.captured_data["yaw_snapshots"]) > 1), 
-            ("Pitch", len(self.captured_data["pitch_snapshots"]) > 1), 
-            ("Roll", len(self.captured_data["roll_snapshots"]) > 1), 
-            ("Blink", self.captured_data["blink_closed"] is not None)
+            ("FaceMesh", self.captured_data["facemesh_vector"] is not None), ("Yaw", len(self.captured_data["yaw_snapshots"]) > 1), 
+            ("Pitch", len(self.captured_data["pitch_snapshots"]) > 1), ("Roll", len(self.captured_data["roll_snapshots"]) > 1), ("Blink", self.captured_data["blink_closed"] is not None)
         ] if not is_valid]
         
         if missing:
             RegistrationUI.show_msg(display, "❌ GAGAL!", f"Data Kurang: {', '.join(missing)}", config.COLOR_RED)
             with self.frame_lock: self.display_frame = display.copy()
-            time.sleep(4) # Mengganti cv2.waitKey(4000)
-            self.stage = RegistrationStage.COMPLETE
-            return
+            time.sleep(4); self.stage = RegistrationStage.COMPLETE; return
 
         emb = self.model.get_embedding(self.model.crop_face(frame, face.bbox))
         self.captured_data["headpose_vector"] = [float(yaw), float(pitch), float(roll)]
@@ -351,9 +322,7 @@ class FaceRegistrationApp:
             _log(f"⚠️ WAJAH DUPLIKASI: Score: {match['score']:.4f}", "WARNING")
             RegistrationUI.show_msg(display, "❌ SUDAH TERDAFTAR!", f"Mirip dengan {match['name']} ({match['score']:.2f})", config.COLOR_RED)
             with self.frame_lock: self.display_frame = display.copy()
-            time.sleep(4) # Mengganti cv2.waitKey(4000)
-            self.stage = RegistrationStage.COMPLETE
-            return
+            time.sleep(4); self.stage = RegistrationStage.COMPLETE; return
 
         if self.db.save_face(self.name, emb, self.captured_data):
             RegistrationUI.show_msg(display, "✅ BERHASIL!", f"Nama: {self.name}", config.COLOR_GREEN)
@@ -361,8 +330,7 @@ class FaceRegistrationApp:
         else: RegistrationUI.show_msg(display, "❌ GAGAL!", "Database Error", config.COLOR_RED)
         
         with self.frame_lock: self.display_frame = display.copy()
-        time.sleep(3) # Mengganti cv2.waitKey(3000)
-        self.stage = RegistrationStage.COMPLETE
+        time.sleep(3); self.stage = RegistrationStage.COMPLETE
 
 if __name__ == "__main__":
     name = input("\nMasukkan Nama Panggilan: ").strip()

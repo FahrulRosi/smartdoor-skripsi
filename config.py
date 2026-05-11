@@ -1,5 +1,5 @@
 # ── Camera & Hardware ────────────────────────────────────────────────────────
-CAMERA_INDEX    = 1
+CAMERA_INDEX    = 0
 FRAME_WIDTH     = 640
 FRAME_HEIGHT    = 480
 IR_CUT_PIN      = 12
@@ -44,7 +44,8 @@ REGISTER_BLINK_COUNT = 2
 
 # ── Anti-Spoofing & Recognition ──────────────────────────────────────────────
 ANTI_SPOOFING_MODEL     = "liveness/antispoofing.onnx"
-ANTI_SPOOFING_THRESHOLD = 0.95 
+# --- PERBAIKAN: Diturunkan dari 0.95 ke 0.85 agar tidak terlalu sering false rejection di jarak dekat/cahaya rendah ---
+ANTI_SPOOFING_THRESHOLD = 0.85 
 
 # --- PERBAIKAN: Threshold kemiripan wajah DINAIKKAN AGAR KETAT ---
 MATCH_THRESHOLD         = 0.68

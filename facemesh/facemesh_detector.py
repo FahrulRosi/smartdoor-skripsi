@@ -3,7 +3,7 @@ import numpy as np
 import mediapipe as mp
 from dataclasses import dataclass
 
-import config # <-- TAMBAHAN: Mengimpor file konfigurasi utama
+import config 
 
 # ─── Landmark index groups ────────────────────────────────────────────────────
 LEFT_EYE_INDICES  = [33, 160, 158, 133, 153, 144]
@@ -16,26 +16,26 @@ RIGHT_EYE_R= 33
 MOUTH_LEFT = 287
 MOUTH_RIGHT= 57
 
-
 @dataclass
 class FaceResult:
-    landmarks: list          # raw NormalizedLandmark list
-    landmarks_px: np.ndarray # shape (N, 2) pixel coords
-    bbox: tuple              # (x, y, w, h)
-    image_shape: tuple       # (h, w)
-
+    landmarks: list          
+    landmarks_px: np.ndarray 
+    bbox: tuple              
+    image_shape: tuple       
 
 class FaceMeshDetector:
     def __init__(
         self,
         max_faces: int = 1,
-        refine_landmarks: bool = True,
-        # --- PERBAIKAN: Mengambil nilai confidence dari config.py agar lebih sensitif di cahaya rendah ---
-        min_detection_confidence: float = getattr(config, "MIN_DETECTION_CONFIDENCE", 0.5),
-        min_tracking_confidence: float = getattr(config, "MIN_TRACKING_CONFIDENCE", 0.5),
+        # --- SOLUSI 2: Matikan refine_landmarks agar lebih toleran pada mata di kamera NoIR ---
+        refine_landmarks: bool = False,
+        min_detection_confidence: float = 0.35,
+        min_tracking_confidence: float = 0.35,
     ):
         self.mp_face_mesh = mp.solutions.face_mesh
         self.face_mesh = self.mp_face_mesh.FaceMesh(
+            # --- SOLUSI 1: Aktifkan static_image_mode agar AI agresif mendeteksi setiap frame ---
+            static_image_mode=True,
             max_num_faces=max_faces,
             refine_landmarks=refine_landmarks,
             min_detection_confidence=min_detection_confidence,
@@ -44,10 +44,29 @@ class FaceMeshDetector:
         self.mp_draw = mp.solutions.drawing_utils
         self.mp_styles = mp.solutions.drawing_styles
 
-    # ------------------------------------------------------------------ #
     def detect(self, frame: np.ndarray) -> list[FaceResult]:
-        h, w = frame.shape[:2]
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        process_frame = frame.copy()
+        
+        # --- SOLUSI 3 (OPSIONAL): Aktifkan baris ini jika posisi fisik kamera Anda terbalik 180 derajat ---
+        # process_frame = cv2.flip(process_frame, -1)
+        # -------------------------------------------------------------------------------------------------
+        
+        # Peningkatan Kontras CLAHE untuk mengatasi backlight/low-light
+        if getattr(config, "ENABLE_CLAHE_ENHANCEMENT", True):
+            lab = cv2.cvtColor(process_frame, cv2.COLOR_BGR2LAB)
+            l_chan, a_chan, b_chan = cv2.split(lab)
+            
+            clahe = cv2.createCLAHE(
+                clipLimit=getattr(config, "CLAHE_CLIP_LIMIT", 2.5), 
+                tileGridSize=getattr(config, "CLAHE_TILE_GRID_SIZE", (8, 8))
+            )
+            l_chan = clahe.apply(l_chan)
+            
+            lab = cv2.merge((l_chan, a_chan, b_chan))
+            process_frame = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+
+        h, w = process_frame.shape[:2]
+        rgb = cv2.cvtColor(process_frame, cv2.COLOR_BGR2RGB)
         results = self.face_mesh.process(rgb)
 
         faces: list[FaceResult] = []
@@ -72,11 +91,8 @@ class FaceMeshDetector:
 
         return faces
 
-    # ------------------------------------------------------------------ #
     def draw(self, frame: np.ndarray, face: FaceResult) -> np.ndarray:
         annotated = frame.copy()
-        # Reconstruct NormalizedLandmarkList for drawing
-        lm_list = self.mp_face_mesh.FaceMesh  # just for typing hint
         fake_proto = type("FakeLM", (), {"landmark": face.landmarks})()
         self.mp_draw.draw_landmarks(
             annotated,
@@ -87,15 +103,11 @@ class FaceMeshDetector:
         )
         return annotated
 
-    # ------------------------------------------------------------------ #
     def get_eye_points(self, face: FaceResult, eye: str) -> np.ndarray:
         indices = LEFT_EYE_INDICES if eye == "left" else RIGHT_EYE_INDICES
         return face.landmarks_px[indices]
 
     def get_head_pose_points(self, face: FaceResult) -> tuple:
-        """
-        Returns 6 2D points + 6 corresponding 3D model points for solvePnP.
-        """
         lm = face.landmarks_px
         h, w = face.image_shape
 
@@ -109,12 +121,12 @@ class FaceMeshDetector:
         ], dtype=np.float64)
 
         model_points = np.array([
-            [0.0,    0.0,    0.0],     # Nose tip
-            [0.0,  -330.0, -65.0],     # Chin
-            [-225.0, 170.0, -135.0],   # Left eye left corner
-            [225.0,  170.0, -135.0],   # Right eye right corner
-            [-150.0, -150.0, -125.0],  # Left mouth corner
-            [150.0,  -150.0, -125.0],  # Right mouth corner
+            [0.0,    0.0,    0.0],     
+            [0.0,  -330.0, -65.0],     
+            [-225.0, 170.0, -135.0],   
+            [225.0,  170.0, -135.0],   
+            [-150.0, -150.0, -125.0],  
+            [150.0,  -150.0, -125.0],  
         ], dtype=np.float64)
 
         focal_length = w

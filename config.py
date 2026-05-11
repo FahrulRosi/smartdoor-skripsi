@@ -1,5 +1,5 @@
 # ── Camera & Hardware ────────────────────────────────────────────────────────
-CAMERA_INDEX    = 0
+CAMERA_INDEX    = 1
 FRAME_WIDTH     = 640
 FRAME_HEIGHT    = 480
 IR_CUT_PIN      = 12
@@ -46,9 +46,10 @@ REGISTER_BLINK_COUNT = 2
 ANTI_SPOOFING_MODEL     = "liveness/antispoofing.onnx"
 ANTI_SPOOFING_THRESHOLD = 0.95 
 
-# Threshold kemiripan wajah (Cosine Similarity).
-MATCH_THRESHOLD         = 0.55
+# --- PERBAIKAN: Threshold kemiripan wajah DINAIKKAN AGAR KETAT ---
+MATCH_THRESHOLD         = 0.68
 MOBILEFACENET_PATH      = "recognition/mobilefacenet.onnx"
+# -----------------------------------------------------------------
 
 # ── Door Lock & UI ───────────────────────────────────────────────────────────
 LOCK_GPIO_PIN   = 18

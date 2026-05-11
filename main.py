@@ -1,4 +1,4 @@
-import cv2, random, time, numpy as np, threading
+import cv2, random, time, threading, numpy as np
 from datetime import datetime
 from enum import Enum
 
@@ -29,15 +29,15 @@ class UIManager:
     def draw_status(frame, bbox, status, color):
         x, y, w, h = bbox
         cv2.rectangle(frame, (x, y), (x+w, y+h), color, 3)
-        cv2.rectangle(frame, (x, y-35), (x + cv2.getTextSize(status, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)[0][0] + 15, y-5), color, -1)
+        txt_w = cv2.getTextSize(status, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)[0][0]
+        cv2.rectangle(frame, (x, y-35), (x + txt_w + 15, y-5), color, -1)
         cv2.putText(frame, status, (x+8, y-12), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
 
 class IlluminationEnhancer:
     @staticmethod
     def enhance(frame):
         if not getattr(config, 'ENABLE_CLAHE_ENHANCEMENT', True): return frame
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        if np.mean(gray) > 85.0: return frame
+        if np.mean(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)) > 85.0: return frame
         l, a, b = cv2.split(cv2.cvtColor(frame, cv2.COLOR_BGR2LAB))
         clahe = cv2.createCLAHE(clipLimit=getattr(config, 'CLAHE_CLIP_LIMIT', 2.5), tileGridSize=getattr(config, 'CLAHE_TILE_GRID_SIZE', (8, 8)))
         return cv2.cvtColor(cv2.merge((clahe.apply(l), a, b)), cv2.COLOR_LAB2BGR)
@@ -60,8 +60,7 @@ class SmartDoorApp:
         self.lock, self.running, self.shared_frame = threading.Lock(), True, None
         self.ui_state = {"wait_msg": True, "bbox": None, "status": "", "color": config.COLOR_WHITE, "instruction": ""}
         
-        self._reset_state()
-        self._load_memory()
+        self._reset_state(); self._load_memory()
         self.ai_thread = threading.Thread(target=self._ai_worker, daemon=True)
 
     def _load_memory(self):
@@ -103,14 +102,10 @@ class SmartDoorApp:
         dy, dp, dr = p.get("yaw", 0.0) - ref[0], p.get("pitch", 0.0) - ref[1], p.get("roll", 0.0) - ref[2]
         ty, tp, tr = getattr(config, 'CHALLENGE_YAW', 20.0), getattr(config, 'CHALLENGE_PITCH', 15.0), getattr(config, 'CHALLENGE_ROLL', 15.0)
         
-        # Pemetaan yang telah DIPERBAIKI secara mutlak dan presisi:
         val, tgt, passed = {
-            "KANAN": (dy, ty, dy > ty),
-            "KIRI": (-dy, ty, -dy > ty),
-            "ATAS": (-dp, tp, -dp > tp),
-            "BAWAH": (dp, tp, dp > tp),
-            "MIRING_KANAN": (-dr, tr, -dr > tr),  # Diperbaiki: miring kanan bernilai roll negatif -> -dr > tr
-            "MIRING_KIRI": (dr, tr, dr > tr)      # Diperbaiki: miring kiri bernilai roll positif -> dr > tr
+            "KANAN": (dy, ty, dy > ty), "KIRI": (-dy, ty, -dy > ty),
+            "ATAS": (-dp, tp, -dp > tp), "BAWAH": (dp, tp, dp > tp),
+            "MIRING_KANAN": (-dr, tr, -dr > tr), "MIRING_KIRI": (dr, tr, dr > tr)
         }.get(action, (0.0, 1.0, False))
 
         self.pose_hold_frames = self.pose_hold_frames + 1 if passed else 0
@@ -135,19 +130,19 @@ class SmartDoorApp:
     def _process_face(self, raw_frame, enhanced_frame, face):
         self.ui_state["bbox"] = face.bbox
         if face.bbox[3] > int(config.FRAME_HEIGHT * 0.50):
-            self._reset_state(); self.ui_state.update({"status": "WAJAH TERLALU DEKAT", "color": config.COLOR_YELLOW, "instruction": "Silakan mundur sedikit dari kamera"})
-            return
+            self._reset_state(); self.ui_state.update({"status": "WAJAH TERLALU DEKAT", "color": config.COLOR_YELLOW, "instruction": "Silakan mundur sedikit dari kamera"}); return
         
+        # --- KETERANGAN UBAH MENJADI SPOOFING SAJA ---
         if self.state in (ValidationState.IDLE, ValidationState.RECOGNIZING):
             spoof = self.anti_spoof.is_real(raw_frame, face.bbox)
             if not spoof.get("real", True):
                 self.fake_frames += 1
-                if self.fake_frames >= 3: 
-                    if self.fake_frames >= 7: self._reset_state()
-                    self.ui_state.update({"status": "TERDETEKSI SPOOFING", "color": config.COLOR_RED, "instruction": f"Skor Palsu: {spoof.get('score', 0.0):.2f}"})
-                    return
+                if self.fake_frames >= 7: self._reset_state()
+                self.ui_state.update({"status": "SPOOFING", "color": config.COLOR_RED, "instruction": ""})
+                return
             else: self.fake_frames = 0
         else: self.fake_frames = 0 
+        # ---------------------------------------------
 
         if self.state == ValidationState.IDLE: self.state, self.auth_start_time = ValidationState.RECOGNIZING, time.time()
         
@@ -158,7 +153,9 @@ class SmartDoorApp:
             if match.get("matched", False):
                 self.last_name, self.match_score = match["name"], match.get("score", 0.0)
                 cfg = self.user_profiles.get(self.last_name, {})
-                self.reg_headpose = cfg.get("headpose_vector", [0.0, 0.0, 0.0])
+                
+                curr = self.pose_estimator.estimate(face, self.detector)
+                self.reg_headpose = [curr.get("yaw", 0.0), curr.get("pitch", 0.0), curr.get("roll", 0.0)]
                 
                 ear = cfg.get("blink_closed", getattr(config, 'BLINK_EAR_THRESHOLD', 0.2))
                 ear_val = ear.get("avg_ear", 0.2) if isinstance(ear, dict) else float(ear or 0.2)
@@ -173,13 +170,7 @@ class SmartDoorApp:
             act = self.challenge_sequence[self.current_step_idx]
             inst = self.CHALLENGES[act]
             
-            # TAMPILAN UI KEMBALI SEPERTI AWAL (Sangat cepat, langsung, tanpa instruksi harus lurus)
-            self.ui_state.update({
-                "status": f"User: {self.last_name}", 
-                "color": config.COLOR_CYAN, 
-                "instruction": f"Tahap {self.current_step_idx+1}/{len(self.challenge_sequence)}: {inst}"
-            })
-            
+            self.ui_state.update({"status": f"User: {self.last_name}", "color": config.COLOR_CYAN, "instruction": f"Tahap {self.current_step_idx+1}/{len(self.challenge_sequence)}: {inst}"})
             passed, c_val, t_val = self._check_action_passed(act, face)
             
             self.print_counter += 1
@@ -189,15 +180,23 @@ class SmartDoorApp:
 
             if passed:
                 print(); UIManager.log(f"✅ {inst} SELESAI -> Nilai Tercapai", "SUCCESS")
-                self.current_step_idx += 1
-                self.pose_hold_frames = 0  # Pastikan di-reset mutlak saat melangkah ke tahap berikutnya
+                self.current_step_idx += 1; self.pose_hold_frames = 0
                 
-                if self.current_step_idx >= len(self.challenge_sequence):
+                # --- PERBAIKAN: JEDA & RESET AGAR BLINK TIDAK TERSKIP ---
+                if self.current_step_idx < len(self.challenge_sequence):
+                    self.ui_state.update({"instruction": "Kembali ke posisi tengah..."})
+                    time.sleep(1.2)  # Memberi waktu kepala kembali tegak sebelum membaca EAR
+                    
+                    cfg = self.user_profiles.get(self.last_name, {})
+                    ear = cfg.get("blink_closed", getattr(config, 'BLINK_EAR_THRESHOLD', 0.2))
+                    ear_val = ear.get("avg_ear", 0.2) if isinstance(ear, dict) else float(ear or 0.2)
+                    self.blink_checker = BlinkDetector(ear_threshold=ear_val + 0.01, target_blinks=1)
+                else:
                     self.state = ValidationState.UNLOCKED
                     threading.Thread(target=self.door.unlock, daemon=True).start()
                     
                     rs, thr, exc = self.match_score, getattr(config, 'MATCH_THRESHOLD', 0.55), 0.80 
-                    pct = 100.0 if rs >= exc else (95.0 + (rs - thr) * 4.9 / (exc - thr) if rs >= thr else rs * 100)
+                    pct = 100.0 if rs >= exc else (95.0 + (rs - thr) * 4.9 / (exc - thr) if rs >= thr else rs * 100.0)
                     auth_latency = time.time() - self.auth_start_time
                     
                     UIManager.log(f"🔓 AKSES DIBERIKAN: Pintu terbuka untuk '{self.last_name}'", "SUCCESS")

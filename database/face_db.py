@@ -1,11 +1,5 @@
-import os
-import json
-import time
-import threading
-import numpy as np
-import traceback
+import os, json, time, threading, traceback, numpy as np
 from supabase import create_client, Client
-
 import config
 
 # ==============================================================================
@@ -22,6 +16,7 @@ class DataTransformer:
         fm_vector = liveness_data.get("facemesh_vector", [])
         fm_list = fm_vector.tolist() if isinstance(fm_vector, np.ndarray) else list(fm_vector)
         emb_list = embedding.tolist() if isinstance(embedding, np.ndarray) else list(embedding)
+        hp_vec = liveness_data.get("headpose_vector", [0.0, 0.0, 0.0])
 
         yaw_left = yaw_right = pitch_up = pitch_down = roll_left = roll_right = 0.0
         for snap in liveness_data.get("yaw_snapshots", []):
@@ -41,8 +36,9 @@ class DataTransformer:
                 "facemesh_vector": fm_list,
                 "blink_closed": float(ear_c),
                 "blink_open": float(ear_o),
+                "headpose_vector": hp_vec,  # KUNCI KRUSIAL: Agar sinkron langsung dibaca oleh main.py
                 "headpose": {
-                    "neutral_vector": liveness_data.get("headpose_vector", [0.0, 0.0, 0.0]),
+                    "neutral_vector": hp_vec,
                     "yaw_left": float(yaw_left),
                     "yaw_right": float(yaw_right),
                     "pitch_up": float(pitch_up),
@@ -59,42 +55,34 @@ class DataTransformer:
 # ==============================================================================
 class LocalStorage:
     def __init__(self, path="local_faces.json"):
-        self.path = path
-        self.lock = threading.Lock()
-        if not os.path.exists(self.path):
-            self._write({})
+        self.path, self.lock = path, threading.Lock()
+        if not os.path.exists(self.path): self._write({})
 
     def _read(self):
         try:
-            with open(self.path, 'r') as f:
-                return json.load(f)
-        except Exception:
-            return {}
+            with open(self.path, 'r') as f: return json.load(f)
+        except Exception: return {}
 
     def _write(self, data):
-        with open(self.path, 'w') as f:
-            json.dump(data, f, indent=4)
+        with open(self.path, 'w') as f: json.dump(data, f, indent=4)
 
     def save_user(self, name, payload):
         with self.lock:
-            data = self._read()
-            data[name] = payload
-            self._write(data)
+            d = self._read()
+            d[name] = payload
+            self._write(d)
 
     def load_all(self):
-        with self.lock:
-            return self._read()
+        with self.lock: return self._read()
 
     def exists(self, name):
-        with self.lock:
-            return name in self._read()
+        with self.lock: return name in self._read()
 
     def overwrite_all(self, data_dict):
-        with self.lock:
-            self._write(data_dict)
+        with self.lock: self._write(data_dict)
 
 # ==============================================================================
-# 3. CLOUD STORAGE (Dilengkapi Fitur Auto-Create Web Profile)
+# 3. CLOUD STORAGE
 # ==============================================================================
 class CloudStorage:
     def __init__(self):
@@ -107,40 +95,31 @@ class CloudStorage:
                 self.client: Client = create_client(self.url, self.key)
                 self.is_connected = True
                 print("[Supabase] Terhubung ke Cloud Database PostgreSQL.")
-            except Exception as e:
-                print(f"[Supabase WARNING] Gagal inisialisasi: {e}")
+            except Exception as e: print(f"[Supabase WARNING] Gagal inisialisasi: {e}")
 
     def get_user_id(self, username):
         if not self.is_connected: return None
         try:
             res = self.client.table("users_profile").select("id").eq("username", username).execute()
             return res.data[0]["id"] if res.data else None
-        except Exception:
-            return None
+        except Exception: return None
 
     def create_dummy_user(self, username):
-        """Membuat profil Web otomatis jika belum terdaftar"""
         try:
-            dummy_email = f"{username.lower().replace(' ', '')}@auto.local"
             payload = {
                 "username": username,
-                "email": dummy_email,
+                "email": f"{username.lower().replace(' ', '')}@auto.local",
                 "password_hash": "auto_generated_by_ai"
             }
             res = self.client.table("users_profile").insert(payload).execute()
-            if res.data:
-                return res.data[0]["id"]
-            return None
+            return res.data[0]["id"] if res.data else None
         except Exception as e:
-            print(f"[Supabase ERROR] Gagal auto-create profil web: {e}")
-            return None
+            print(f"[Supabase ERROR] Gagal auto-create profil web: {e}"); return None
 
     def sync_register(self, name, payload):
         if not self.is_connected: return
         try:
             user_id = self.get_user_id(name)
-            
-            # Jika user belum ada di web, buatkan otomatis
             if not user_id:
                 print(f"[Supabase] Username '{name}' belum ada. Membuatkan profil Web otomatis...")
                 user_id = self.create_dummy_user(name)
@@ -155,32 +134,25 @@ class CloudStorage:
             }
             self.client.table("register").upsert(db_payload).execute()
             print(f"[Supabase] Vektor wajah '{name}' berhasil disinkronkan ke Cloud!")
-        except Exception as e:
-            print(f"[Cloud Error] Gagal sinkronisasi vektor: {e}")
+        except Exception as e: print(f"[Cloud Error] Gagal sinkronisasi vektor: {e}")
 
     def push_access_log(self, user_name, status, score):
         if not self.is_connected: return
         try:
             user_id = self.get_user_id(user_name)
             if not user_id: return
-
             log_data = {
-                "user_id": user_id,
-                "status": status,
+                "user_id": user_id, "status": status,
                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             }
             if score is not None: log_data["liveness_score"] = float(score)
-
             self.client.table("access_logs").insert(log_data).execute()
         except Exception: pass
 
     def fetch_all_registered_users(self):
         if not self.is_connected: return None
-        try:
-            response = self.client.table("register").select("*").execute()
-            return response.data
-        except Exception as e:
-            return None
+        try: return self.client.table("register").select("*").execute().data
+        except Exception: return None
 
 # ==============================================================================
 # 4. MAIN FACADE
@@ -197,15 +169,11 @@ class FaceDatabase:
         try:
             payload = DataTransformer.prepare_payload(name, embedding, liveness_data)
             self.local.save_user(name, payload)
-            
             if self.cloud.is_connected:
                 t = threading.Thread(target=self.cloud.sync_register, args=(name, payload))
-                t.daemon = True
-                t.start()
+                t.daemon = True; t.start()
             return True
-        except Exception as e:
-            traceback.print_exc()
-            return False
+        except Exception: traceback.print_exc(); return False
 
     def load_all_faces(self, silent=False):
         faces = self.local.load_all()
@@ -213,7 +181,6 @@ class FaceDatabase:
         if not faces and self.cloud.is_connected:
             if not silent: print("[Hybrid Sync] Memori lokal kosong. Menarik data vektor dari Supabase...")
             cloud_data = self.cloud.fetch_all_registered_users()
-            
             if cloud_data:
                 faces = {
                     row["username"]: {
@@ -226,15 +193,13 @@ class FaceDatabase:
                 self.local.overwrite_all(faces)
                 if not silent: print(f"[Hybrid Sync] Berhasil memulihkan {len(faces)} identitas wajah.")
 
-        embeddings = {}
-        if faces:
-            for name, data in faces.items():
-                if "embedding" in data:
-                    embeddings[name] = np.array(data["embedding"], dtype=np.float32)
-        return embeddings
+        # --- PERBAIKAN MUTLAK: MENGEMBALIKAN FACES SECARA UTUH ---
+        # Dengan mengembalikan dictionary aslinya, logika pemrosesan memori 
+        # di main.py dan register.py dapat mengakses 'embedding' sekaligus 
+        # menarik keluar 'liveness_config' unik milik setiap user secara akurat.
+        return faces
 
     def push_access_log_async(self, user_name, status="UNLOCKED", score=None):
         if self.cloud.is_connected:
             t = threading.Thread(target=self.cloud.push_access_log, args=(user_name, status, score))
-            t.daemon = True
-            t.start()
+            t.daemon = True; t.start()

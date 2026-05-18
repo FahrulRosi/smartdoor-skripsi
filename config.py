@@ -47,7 +47,7 @@ ANTI_SPOOFING_MODEL     = "liveness/antispoofing.onnx"
 ANTI_SPOOFING_THRESHOLD = 0.85 
 
 # --- PERBAIKAN: Threshold kemiripan wajah DINAIKKAN AGAR KETAT ---
-MATCH_THRESHOLD         = 0.75
+MATCH_THRESHOLD         = 0.82
 MOBILEFACENET_PATH      = "recognition/mobilefacenet.onnx"
 # -----------------------------------------------------------------
 

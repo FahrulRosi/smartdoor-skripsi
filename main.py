@@ -25,8 +25,7 @@ class UIHelper:
     def enhance_frame(frame):
         if not getattr(config, 'ENABLE_CLAHE_ENHANCEMENT', True): return frame
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        mean_val = np.mean(gray)
-        if mean_val > 160.0: return frame  
+        if (mean_val := np.mean(gray)) > 160.0: return frame  
         l, a, b = cv2.split(cv2.cvtColor(frame, cv2.COLOR_BGR2LAB))
         limit = 2.5 if mean_val < 85.0 else 1.2
         return cv2.cvtColor(cv2.merge((cv2.createCLAHE(clipLimit=limit, tileGridSize=(8, 8)).apply(l), a, b)), cv2.COLOR_LAB2BGR)
@@ -52,8 +51,7 @@ class UIHelper:
             x, y, w, h = ui["bbox"]
             col = ui.get("color", config.COLOR_WHITE)
             cv2.rectangle(disp, (x, y), (x+w, y+h), col, 3)
-            status = ui.get("status", "")
-            if status:
+            if status := ui.get("status", ""):
                 txt_w = cv2.getTextSize(status, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)[0][0]
                 cv2.rectangle(disp, (x, y-35), (x + txt_w + 15, y-5), col, -1)
                 cv2.putText(disp, status, (x+8, y-12), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
@@ -67,19 +65,21 @@ class SmartDoorApp:
         UIHelper.log("Sistem Smart Door Lock diaktifkan", "SYSTEM")
         self.db, self.model, self.pose_estimator, self.anti_spoof = FaceDatabase(), MobileFaceNet(), HeadPoseEstimator(), SilentAntiSpoofing()
         self.cam, self.detector, self.door = CameraStream(config.CAMERA_INDEX, config.FRAME_WIDTH, config.FRAME_HEIGHT).start(), FaceMeshDetector(min_detection_confidence=0.5, min_tracking_confidence=0.5), DoorLock(pin=getattr(config, 'LOCK_GPIO_PIN', 18), unlock_duration=getattr(config, 'UNLOCK_DURATION', 5))
-        self.matcher, self.lock, self.running, self.shared_frame = FaceMatcher(threshold=getattr(config, 'MATCH_THRESHOLD', 0.68)), threading.Lock(), True, None
+        
+        # 🚨 PAKSA THRESHOLD MENJADI 0.75 AGAR AI LEBIH GALAK (MENCEGAH SALAH ORANG) 🚨
+        self.matcher = FaceMatcher(threshold=max(0.75, getattr(config, 'MATCH_THRESHOLD', 0.75)))
+        
+        self.lock, self.running, self.shared_frame = threading.Lock(), True, None
         self.ui, self.missed_frames = {"wait": True, "bbox": None, "status": "", "color": config.COLOR_WHITE, "instr": ""}, 0
         self._reset_state(); self._load_memory()
         threading.Thread(target=self._ai_worker, daemon=True).start()
 
     def _load_memory(self):
         try:
-            raw = self.db.load_all_faces()
-            if not raw: return
+            if not (raw := self.db.load_all_faces()): return
             faces = {k: np.array(v.get('embedding', v.get('mobilefacenet_embedding')), dtype=np.float32) for k, v in raw.items() if isinstance(v, dict) and v.get('embedding') is not None}
             self.user_profiles = {k: v.get('liveness_config', v) for k, v in raw.items() if isinstance(v, dict)}
-            if hasattr(self.matcher, 'load_faces'): self.matcher.load_faces(faces)
-            else: self.matcher.known_faces = faces
+            self.matcher.load_faces(faces) if hasattr(self.matcher, 'load_faces') else setattr(self.matcher, 'known_faces', faces)
             UIHelper.log(f"Memori dimuat: {len(faces)} wajah siap.", "SUCCESS")
         except Exception as e: UIHelper.log(f"Gagal muat: {e}", "WARNING")
 
@@ -87,6 +87,7 @@ class SmartDoorApp:
         self.state, self.last_name, self.match_score, self.auth_start, self.fake_frames = ValidationState.IDLE, "", 0.0, 0.0, 0
         self.seq, self.step_idx, self.reg_pose, self.pose_hold = [], 0, [0.0, 0.0, 0.0], 0
         self.wait_center, self.center_hold, self.blink_passed, self.blink_hold, self.ear_hist, self.print_counter = False, 0, False, 0, [], 0
+        self.prev_center = None 
         if hasattr(self, 'door'): self.door.lock()
 
     def _check_action(self, action, face):
@@ -117,18 +118,36 @@ class SmartDoorApp:
             faces = self.detector.detect(enhanced)
             
             if not faces: 
-                self.missed_frames += 1
+                self.missed_frames += 1 # PERBAIKAN: Ditulis manual, bukan :=
                 if self.missed_frames >= 5: 
                     self._reset_state()
                     self.ui.update({"wait": True, "bbox": None, "status": "", "instr": ""})
             else: 
                 self.missed_frames = 0
-                self.ui.update({"wait": False, "bbox": faces[0].bbox}) 
-                self._process_face(raw, enhanced, faces[0])
+                
+                # SELALU FOKUS KE WAJAH TERBESAR/TERDEKAT (Abaikan orang di background)
+                faces = sorted(faces, key=lambda f: f.bbox[2] * f.bbox[3], reverse=True)
+                target_face = faces[0]
+                
+                self.ui.update({"wait": False, "bbox": target_face.bbox}) 
+                self._process_face(raw, enhanced, target_face)
                 
             self.latency = (time.time() - t0) * 1000; time.sleep(0.01) 
 
     def _process_face(self, raw, enhanced, face):
+        x, y, w, h = face.bbox
+        cx, cy = x + w // 2, y + h // 2
+        
+        # ANTI-HIJACK: Jika kotak wajah melompat ke orang lain, langsung batalkan sesi!
+        if self.state not in (ValidationState.IDLE, ValidationState.RECOGNIZING) and self.prev_center:
+            px, py = self.prev_center
+            if np.hypot(cx - px, cy - py) > max(w, h) * 0.8: 
+                self._reset_state()
+                self.ui.update({"status": "WAJAH BERGANTI", "color": config.COLOR_RED, "instr": "Mulai Ulang"})
+                return
+        
+        self.prev_center = (cx, cy) 
+
         if face.bbox[3] > int(config.FRAME_HEIGHT * 0.50): 
             self._reset_state()
             self.ui.update({"status": "TERLALU DEKAT", "color": config.COLOR_YELLOW, "instr": "Mundur sedikit"})
@@ -137,7 +156,7 @@ class SmartDoorApp:
         if self.state in (ValidationState.IDLE, ValidationState.RECOGNIZING):
             sp = self.anti_spoof.is_real(raw, face.bbox)
             if not sp.get("real", True):
-                self.fake_frames += 1
+                self.fake_frames += 1 # PERBAIKAN: Ditulis manual, bukan :=
                 if self.fake_frames >= 7: 
                     self._reset_state()
                     self.ui.update({"status": "SPOOFING", "color": config.COLOR_RED, "instr": ""})
@@ -149,8 +168,7 @@ class SmartDoorApp:
         
         if self.state == ValidationState.RECOGNIZING:
             emb = self.model.get_embedding(self.model.crop_face(enhanced, face.bbox))
-            match = self.matcher.match(emb)
-            if match.get("matched", False):
+            if (match := self.matcher.match(emb)).get("matched", False):
                 self.last_name, self.match_score = match["name"], match.get("score", 0.0)
                 curr = self.pose_estimator.estimate(face, self.detector)
                 self.reg_pose, self.seq, self.state, self.step_idx, self.wait_center, self.center_hold = [curr.get("yaw", 0), curr.get("pitch", 0), curr.get("roll", 0)], [random.choice([k for k in self.CHALLENGES if k != "BLINK"]), "BLINK"], ValidationState.CHALLENGE, 0, True, 0
@@ -162,7 +180,7 @@ class SmartDoorApp:
             if self.wait_center:
                 curr = self.pose_estimator.estimate(face, self.detector)
                 if abs(curr["yaw"]) < 15 and abs(curr["pitch"]) < 15 and abs(curr["roll"]) < 15:
-                    self.center_hold += 1
+                    self.center_hold += 1 # PERBAIKAN: Ditulis manual, bukan :=
                     if self.center_hold >= 10: 
                         self.wait_center, self.center_hold, cfg = False, 0, self.user_profiles.get(self.last_name, {})
                         ec, eo = float(cfg.get("blink_closed", 0.15)), float(cfg.get("blink_open", 0.30))
@@ -186,35 +204,20 @@ class SmartDoorApp:
                 else:
                     self.state = ValidationState.UNLOCKED; threading.Thread(target=self.door.unlock, daemon=True).start()
                     
-                    # ==============================================================
-                    # 🌞 DETEKSI CAHAYA CERDAS (Wajah vs Background)
-                    # ==============================================================
                     gray = cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY)
-                    x, y, w, h = face.bbox
                     fh, fw = gray.shape
-                    
-                    # Cegah Error Out-of-Bounds
                     x1, y1, x2, y2 = max(0, x), max(0, y), min(fw, x+w), min(fh, y+h)
                     
-                    # Cahaya Wajah Saja (Region of Interest)
                     face_light = np.mean(gray[y1:y2, x1:x2]) if x2 > x1 and y2 > y1 else 100.0
-                    
-                    # Cahaya Latar Belakang Saja
-                    bg_mask = np.ones(gray.shape, dtype=bool)
-                    bg_mask[y1:y2, x1:x2] = False
+                    bg_mask = np.ones(gray.shape, dtype=bool); bg_mask[y1:y2, x1:x2] = False
                     bg_light = np.mean(gray[bg_mask])
 
                     rs, thr, exc = self.match_score, getattr(config, 'MATCH_THRESHOLD', 0.68), 0.73
                     base_acc = 100.0 if rs >= exc else (95.0 + (rs - thr) * 4.9 / (exc - thr) if rs >= thr else rs * 100.0)
                     
-                    # Klasifikasi Paling Akurat!
-                    if face_light < 85.0 and bg_light > 130.0:
-                        light_cond, final_acc = f"Backlight (F:{face_light:.0f}/B:{bg_light:.0f})", min(base_acc - 6.0, 90.8)
-                    elif face_light < 85.0:
-                        light_cond, final_acc = f"Low Light (F:{face_light:.0f}/B:{bg_light:.0f})", min(base_acc - 4.5, 92.5)
-                    else:
-                        light_cond, final_acc = f"Normal (F:{face_light:.0f}/B:{bg_light:.0f})", min(base_acc, 99.8)
-                    # ==============================================================
+                    if face_light < 85.0 and bg_light > 130.0: light_cond, final_acc = f"Backlight (F:{face_light:.0f}/B:{bg_light:.0f})", min(base_acc - 6.0, 90.8)
+                    elif face_light < 85.0: light_cond, final_acc = f"Low Light (F:{face_light:.0f}/B:{bg_light:.0f})", min(base_acc - 4.5, 92.5)
+                    else: light_cond, final_acc = f"Normal (F:{face_light:.0f}/B:{bg_light:.0f})", min(base_acc, 99.8)
                     
                     self.ui.update({"status": f"SELAMAT DATANG, {self.last_name}", "color": config.COLOR_GREEN, "instr": ""})
                     
@@ -229,10 +232,9 @@ class SmartDoorApp:
     def run(self):
         try:
             while self.running:
-                ret, frame = self.cam.read()
-                if not ret: continue
-                with self.lock: self.shared_frame = frame.copy()
-                display = frame.copy()
+                if not (ret := self.cam.read())[0]: continue
+                with self.lock: self.shared_frame = ret[1].copy()
+                display = ret[1].copy()
                 
                 UIHelper.draw_ui(display, self.ui, self.door.locked)
                 cv2.imshow("Smart Door Lock", display)

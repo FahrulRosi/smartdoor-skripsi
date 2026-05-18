@@ -2,7 +2,6 @@
 CAMERA_INDEX    = 0
 FRAME_WIDTH     = 640
 FRAME_HEIGHT    = 480
-IR_CUT_PIN      = 12
 
 # ── Peningkatan Gambar (Low-Light & Backlight) ───────────────────────────────
 ENABLE_CLAHE_ENHANCEMENT = True
@@ -48,7 +47,7 @@ ANTI_SPOOFING_MODEL     = "liveness/antispoofing.onnx"
 ANTI_SPOOFING_THRESHOLD = 0.85 
 
 # --- PERBAIKAN: Threshold kemiripan wajah DINAIKKAN AGAR KETAT ---
-MATCH_THRESHOLD         = 0.68
+MATCH_THRESHOLD         = 0.75
 MOBILEFACENET_PATH      = "recognition/mobilefacenet.onnx"
 # -----------------------------------------------------------------
 

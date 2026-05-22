@@ -47,12 +47,14 @@ class UIHelper:
             cv2.putText(disp, "Menunggu Wajah...", (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, config.COLOR_YELLOW, 2)
         elif ui.get("bbox"):
             x, y, w, h = ui["bbox"]
+            # SINKRONISASI CERMIN: Membalikkan posisi X Bounding Box agar pas di layar cermin
+            fx = config.FRAME_WIDTH - x - w
             c = ui.get("color", config.COLOR_WHITE)
-            cv2.rectangle(disp, (x, y), (x+w, y+h), c, 3)
+            cv2.rectangle(disp, (fx, y), (fx+w, y+h), c, 3)
             if stat := ui.get("status", ""):
                 tw = cv2.getTextSize(stat, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)[0][0]
-                cv2.rectangle(disp, (x, y-35), (x + tw + 15, y-5), c, -1)
-                cv2.putText(disp, stat, (x+8, y-12), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
+                cv2.rectangle(disp, (fx, y-35), (fx + tw + 15, y-5), c, -1)
+                cv2.putText(disp, stat, (fx+8, y-12), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
         cv2.putText(disp, f"PINTU: {'TERKUNCI' if locked else 'TERBUKA'}", (10, config.FRAME_HEIGHT - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.75, config.COLOR_RED if locked else config.COLOR_GREEN, 2)
 
 class SmartDoorApp:
@@ -99,21 +101,26 @@ class SmartDoorApp:
         dy, dp, dr = p.get("yaw", 0)-ref[0], p.get("pitch", 0)-ref[1], p.get("roll", 0)-ref[2]
         ty, tp, tr = getattr(config, 'CHALLENGE_YAW', 25.0), getattr(config, 'CHALLENGE_PITCH', 20.0), getattr(config, 'CHALLENGE_ROLL', 25.0)
         
+        # ─── PERBAIKAN FINAL: Rumus DIKEMBALIKAN KE ASLI KARENA AI MEMBACA FRAME ASLI ───
         val, tgt, passed = {
-            "KANAN": (dy, ty, dy>ty), "KIRI": (-dy, ty, -dy>ty), 
-            "ATAS": (-dp, tp, -dp>tp), "BAWAH": (dp, tp, dp>tp), 
-            "MIRING_KANAN": (dr, tr, dr>tr), "MIRING_KIRI": (-dr, tr, -dr>tr)
+            "KANAN": (dy, ty, dy>ty),          # Dibalikkan ke asli (positif)
+            "KIRI": (-dy, ty, -dy>ty),         # Dibalikkan ke asli (negatif)
+            "ATAS": (-dp, tp, -dp>tp),         
+            "BAWAH": (dp, tp, dp>tp), 
+            "MIRING_KANAN": (dr, tr, dr>tr),   # Dibalikkan ke asli (positif)
+            "MIRING_KIRI": (-dr, tr, -dr>tr)   # Dibalikkan ke asli (negatif)
         }.get(action, (0.0, 1.0, False))
         
         if passed: self.pose_hold += 1
         else: self.pose_hold = 0
-        return self.pose_hold >= 2, val, tgt # Dioptimasi dari keharusan hold 3 frame menjadi 2 frame agar lebih responsif
+        return self.pose_hold >= 2, val, tgt
 
     def _ai_worker(self):
         while self.running:
             with self.lock: frame = self.shared_frame.copy() if self.shared_frame is not None else None
             if frame is None: time.sleep(0.01); continue
             
+            # AI TETAP MEMPROSES FRAME ORIGINAL (UNFLIPPED)
             t0, raw = time.time(), frame.copy()
             enhanced = UIHelper.enhance_frame(raw)
             faces = self.detector.detect(enhanced)
@@ -170,7 +177,6 @@ class SmartDoorApp:
             curr = self.pose_estimator.estimate(face, self.detector)
             
             if self.wait_center:
-                # ─── OPTIMASI 1: Batas diperlonggar & Cukup 1 frame langsung lolos tanpa nahan ───
                 if abs(curr.get("yaw", 0)) < 15 and abs(curr.get("pitch", 0)) < 15 and abs(curr.get("roll", 0)) < 12:
                     self.wait_center, self.center_hold = False, 0
                     self.reg_pose = [curr.get(k, 0) for k in ("yaw", "pitch", "roll")]
@@ -195,7 +201,6 @@ class SmartDoorApp:
                 self.ear_hist.clear()
                 
                 if self.step_idx < len(self.seq): 
-                    # ─── OPTIMASI 2: POTONG BIROKRASI (Tidak perlu dipaksa balik ke tengah lagi) ───
                     self.reg_pose = [curr.get(k, 0) for k in ("yaw", "pitch", "roll")]
                     self.wait_center = False 
                 else:
@@ -235,8 +240,12 @@ class SmartDoorApp:
         try:
             while self.running:
                 if not (ret := self.cam.read())[0]: continue
+                
+                # Biarkan shared_frame TETAP NORMAL (unflipped) untuk diproses AI
                 with self.lock: self.shared_frame = ret[1].copy()
-                display = ret[1].copy()
+                
+                # Flip HANYA UNTUK TAMPILAN LAYAR (UI / Display)
+                display = cv2.flip(ret[1], 1)
                 
                 UIHelper.draw_ui(display, self.ui, self.door.locked)
                 cv2.imshow("Smart Door Lock", display)

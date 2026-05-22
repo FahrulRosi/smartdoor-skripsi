@@ -42,6 +42,8 @@ class Helpers:
     def draw_hud(f, stg, instr, prog, score_txt, status, bbox, col):
         if bbox:
             bx, by, bw, bh = bbox
+            # SINKRONISASI CERMIN: Membalikkan X Bounding Box
+            bx = config.FRAME_WIDTH - bx - bw
             cv2.rectangle(f, (bx, by), (bx+bw, by+bh), col, 3)
             cv2.rectangle(f, (bx, by-35), (bx+180, by-5), col, -1)
             cv2.putText(f, status, (bx+5, by-12), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255,255,255), 2)
@@ -79,7 +81,7 @@ class FaceRegistrationApp:
         self.detector = FaceMeshDetector(min_detection_confidence=0.5, min_tracking_confidence=0.5)
         self.liveness, self.model = LivenessManager(), MobileFaceNet()
         self.anti_spoof = SilentAntiSpoofing(getattr(config, 'ANTI_SPOOFING_MODEL', "liveness/antispoofing.onnx"), getattr(config, 'ANTI_SPOOFING_THRESHOLD', 0.85))
-        self.matcher = FaceMatcher(getattr(config, 'MATCH_THRESHOLD', 0.55))
+        self.matcher = FaceMatcher(getattr(config, 'MATCH_THRESHOLD', 0.82))
         
         try:
             raw = self.db.load_all_faces()
@@ -133,13 +135,10 @@ class FaceRegistrationApp:
             
         if cur_step == "DONE" and self._prev_step == "BLINK":
             bc, bo = self._blink_buf["closed"], self._blink_buf["open"]
-            
-            # FITUR BARU: Mengambil parameter Quality Control Kedipan dari config.py
             min_open   = getattr(config, 'MIN_BLINK_OPEN_EAR', 0.22)
             max_closed = getattr(config, 'MAX_BLINK_CLOSED_EAR', 0.20)
             min_delta  = getattr(config, 'MIN_BLINK_DELTA', 0.04)
             
-            # Validasi ekstra ketat
             if not bc or not bo or (bo["avg_ear"] < min_open) or (bc["avg_ear"] > max_closed) or (bo["avg_ear"] - bc["avg_ear"] < min_delta): 
                 _log(f"⚠️ Kualitas Kedipan Ditolak! (Melek: {(bo or {}).get('avg_ear', 0):.2f}, Merem: {(bc or {}).get('avg_ear', 0):.2f}). Silakan ulangi.", "WARNING")
                 self.liveness._register_step, self.liveness._blink_state, self.liveness._hold_frames, self.liveness._blink_count, self._blink_buf = 7, 0, 0, 0, {"closed": None, "open": None}; return
@@ -227,6 +226,7 @@ class FaceRegistrationApp:
                 ret, frame = self.cam.read()
                 if not ret: time.sleep(0.01); continue
                 
+                # AI TETAP MEMPROSES FRAME ORIGINAL (UNFLIPPED)
                 raw = frame.copy()
                 enhanced = Helpers.enhance_frame(raw)
                 display = enhanced.copy()
@@ -236,8 +236,10 @@ class FaceRegistrationApp:
                     self.missed_frames += 1
                     if self.missed_frames >= 5: 
                         bbox_memory = None
+                        display = cv2.flip(display, 1) # FLIP SEBELUM DIGAMBAR UI
                         Helpers.draw_hud(display, self.stage, "Hadapkan wajah", "", "", "NO FACE", None, config.COLOR_RED)
                     elif bbox_memory: 
+                        display = cv2.flip(display, 1) # FLIP SEBELUM DIGAMBAR UI
                         Helpers.draw_hud(display, self.stage, "Menganalisa...", "", "", "TRACKING", bbox_memory, config.COLOR_YELLOW)
                     with self.frame_lock: self.display_frame = display
                     continue
@@ -245,7 +247,12 @@ class FaceRegistrationApp:
                 self.missed_frames = 0
                 face = faces[0]
                 bbox_memory = face.bbox
+                
+                # Menggambar jaring hijau (FaceMesh) pada gambar original
                 display = self.detector.draw(display, face)
+                
+                # BARI DISINI KITA FLIP SEMUANYA: Gambar + Jaring Hijau ikut terbalik!
+                display = cv2.flip(display, 1)
                 
                 if face.bbox[3] > int(config.FRAME_HEIGHT * 0.50): 
                     Helpers.draw_hud(display, self.stage, "Wajah Terlalu Dekat!", "Mundur", "", "TOO CLOSE", face.bbox, config.COLOR_YELLOW)
@@ -281,6 +288,7 @@ class FaceRegistrationApp:
                     self._commit_stage_data(res["step"])
                     instr = res.get("instruction", "")
                     hud_col = config.COLOR_GREEN if res["step"] == "DONE" else config.COLOR_CYAN
+                    # HUD digambar di atas layar yang sudah di-flip (teks tidak akan ikut terbalik)
                     Helpers.draw_hud(display, self.stage, instr, res.get("progress",""), score_txt, "VALIDATING", face.bbox, hud_col)
                 elif not self.in_ext: 
                     instr = "4. Tuning & Ekstraksi Fitur"

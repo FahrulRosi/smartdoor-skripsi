@@ -88,7 +88,7 @@ class SmartDoorApp:
             ear = UIHelper.get_ear(face)
             self.ear_hist.append(ear)
             if len(self.ear_hist) > 3: self.ear_hist.pop(0)
-            tgt = getattr(self, 'dyn_blink_thr', 0.20)
+            tgt = getattr(self, 'dyn_blink_thr', 0.21)
             if min(self.ear_hist) <= tgt: self.blink_hold += 1
             else:
                 if self.blink_hold >= 1: self.blink_passed = True
@@ -97,19 +97,17 @@ class SmartDoorApp:
 
         p, ref = self.pose_estimator.estimate(face, self.detector), self.reg_pose
         dy, dp, dr = p.get("yaw", 0)-ref[0], p.get("pitch", 0)-ref[1], p.get("roll", 0)-ref[2]
-        ty, tp, tr = getattr(config, 'CHALLENGE_YAW', 20), getattr(config, 'CHALLENGE_PITCH', 15), 12.0
+        ty, tp, tr = getattr(config, 'CHALLENGE_YAW', 25.0), getattr(config, 'CHALLENGE_PITCH', 20.0), getattr(config, 'CHALLENGE_ROLL', 25.0)
         
-        # 🚨 PERBAIKAN SUMBU ROLL: Memisahkan arah positif/negatif agar gerakan miring tidak tumpang tindih
         val, tgt, passed = {
             "KANAN": (dy, ty, dy>ty), "KIRI": (-dy, ty, -dy>ty), 
             "ATAS": (-dp, tp, -dp>tp), "BAWAH": (dp, tp, dp>tp), 
             "MIRING_KANAN": (dr, tr, dr>tr), "MIRING_KIRI": (-dr, tr, -dr>tr)
         }.get(action, (0.0, 1.0, False))
         
-        # Filter Penahanan Frame ditingkatkan menjadi 3 frame berturut-turut untuk menyaring guncangan mikro
         if passed: self.pose_hold += 1
         else: self.pose_hold = 0
-        return self.pose_hold >= 3, val, tgt
+        return self.pose_hold >= 2, val, tgt # Dioptimasi dari keharusan hold 3 frame menjadi 2 frame agar lebih responsif
 
     def _ai_worker(self):
         while self.running:
@@ -162,7 +160,7 @@ class SmartDoorApp:
             emb = self.model.get_embedding(self.model.crop_face(enhanced, face.bbox))
             if (match := self.matcher.match(emb)).get("matched", False):
                 self.last_name, self.match_score = match["name"], match.get("score", 0.0)
-                self.reg_pose, self.seq = [0.0, 0.0, 0.0], [random.choice([k for k in self.CHALLENGES if k != "BLINK"]), "BLINK"]
+                self.seq = [random.choice([k for k in self.CHALLENGES if k != "BLINK"]), "BLINK"]
                 self.state, self.step_idx, self.wait_center, self.center_hold = ValidationState.CHALLENGE, 0, True, 0
                 UIHelper.log(f"Wajah {self.last_name} Dikenali. Memulai Liveness...", "SUCCESS")
             else: 
@@ -171,20 +169,14 @@ class SmartDoorApp:
         elif self.state == ValidationState.CHALLENGE:
             curr = self.pose_estimator.estimate(face, self.detector)
             
-            # 🚨 PERBAIKAN UTAMA: Kalibrasi ulang wait_center dengan batas sudut yang sinkron (Tatap lurus harus benar-benar lurus)
             if self.wait_center:
-                if abs(curr.get("yaw", 0)) < 10 and abs(curr.get("pitch", 0)) < 10 and abs(curr.get("roll", 0)) < 8:
-                    self.center_hold += 1 
-                    if self.center_hold >= 3: # Menunggu 3 frame stabil agar posisi tengah terkunci sempurna
-                        self.wait_center, self.center_hold = False, 0
-                        # Kunci Titik Nol (Baseline) yang baru di sini!
-                        self.reg_pose = [curr.get(k, 0) for k in ("yaw", "pitch", "roll")]
-                        cfg = self.user_profiles.get(self.last_name, {})
-                        ec, eo = float(cfg.get("blink_closed", 0.15)), float(cfg.get("blink_open", 0.30))
-                        self.dyn_blink_thr = ec + ((eo - ec) * 0.40) if ec != eo else getattr(config, 'BLINK_EAR_THRESHOLD', 0.21)
-                else: 
-                    self.center_hold = 0
-                return self.ui.update({"status": f"User: {self.last_name}", "color": config.COLOR_CYAN, "instr": "Tatap LURUS ke kamera dulu..."})
+                # ─── OPTIMASI 1: Batas diperlonggar & Cukup 1 frame langsung lolos tanpa nahan ───
+                if abs(curr.get("yaw", 0)) < 15 and abs(curr.get("pitch", 0)) < 15 and abs(curr.get("roll", 0)) < 12:
+                    self.wait_center, self.center_hold = False, 0
+                    self.reg_pose = [curr.get(k, 0) for k in ("yaw", "pitch", "roll")]
+                    self.dyn_blink_thr = getattr(config, 'BLINK_EAR_THRESHOLD', 0.21)
+                else:
+                    return self.ui.update({"status": f"User: {self.last_name}", "color": config.COLOR_CYAN, "instr": "Tatap LURUS ke kamera dulu..."})
                 
             act, inst = self.seq[self.step_idx], self.CHALLENGES[self.seq[self.step_idx]]
             self.ui.update({"status": f"User: {self.last_name}", "color": config.COLOR_CYAN, "instr": f"Tahap {self.step_idx+1}/{len(self.seq)}: {inst}"})
@@ -198,13 +190,14 @@ class SmartDoorApp:
                 print(); UIHelper.log(f"✅ {inst} SELESAI", "SUCCESS")
                 self.step_idx += 1
                 
-                # Reset cache penahanan frame secara total agar tidak bocor ke tantangan berikutnya
                 self.pose_hold = self.blink_hold = 0
                 self.blink_passed = False
                 self.ear_hist.clear()
                 
                 if self.step_idx < len(self.seq): 
-                    self.wait_center, self.center_hold = True, 0
+                    # ─── OPTIMASI 2: POTONG BIROKRASI (Tidak perlu dipaksa balik ke tengah lagi) ───
+                    self.reg_pose = [curr.get(k, 0) for k in ("yaw", "pitch", "roll")]
+                    self.wait_center = False 
                 else:
                     self.state = ValidationState.UNLOCKED
                     threading.Thread(target=self.door.unlock, daemon=True).start()
@@ -224,7 +217,7 @@ class SmartDoorApp:
 
         scale = min(1.0, (max(self.match_score, 0.82) - 0.82) / 0.18001)
 
-        if face_light < 85.0 and bg_light > 130.0: 
+        if bg_light > 130.0: 
             light_cond, base_acc, add = f"Backlight (F:{face_light:.0f}/B:{bg_light:.0f})", 95.0, 1.4
         elif face_light < 85.0: 
             light_cond, base_acc, add = f"Low Light (F:{face_light:.0f}/B:{bg_light:.0f})", 96.5, 1.4

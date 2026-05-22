@@ -37,9 +37,14 @@ YAW_THRESHOLD   = CHALLENGE_YAW
 PITCH_THRESHOLD = CHALLENGE_PITCH
 ROLL_THRESHOLD  = CHALLENGE_ROLL
 
-# Threshold kedipan mata (Eye Aspect Ratio)
+# Threshold kedipan mata cadangan (Eye Aspect Ratio Fallback)
 BLINK_EAR_THRESHOLD  = 0.21 
 REGISTER_BLINK_COUNT = 2
+
+# ── Quality Control Kedipan Baru (Garansi Data Valid saat Register) ──────────
+MIN_BLINK_OPEN_EAR   = 0.22  # Nilai minimum EAR agar mata dianggap BENAR-BENAR TERBUKA
+MAX_BLINK_CLOSED_EAR = 0.20  # Nilai maksimum EAR agar mata dianggap BENAR-BENAR TERTUTUP
+MIN_BLINK_DELTA      = 0.04  # Selisih wajib melek-merem demi memutus rantai data fraud
 
 # ── Anti-Spoofing & Recognition ──────────────────────────────────────────────
 ANTI_SPOOFING_MODEL     = "liveness/antispoofing.onnx"

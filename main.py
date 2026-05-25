@@ -47,7 +47,6 @@ class UIHelper:
             cv2.putText(disp, "Menunggu Wajah...", (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, config.COLOR_YELLOW, 2)
         elif ui.get("bbox"):
             x, y, w, h = ui["bbox"]
-            # SINKRONISASI CERMIN: Membalikkan posisi X Bounding Box agar pas di layar cermin
             fx = config.FRAME_WIDTH - x - w
             c = ui.get("color", config.COLOR_WHITE)
             cv2.rectangle(disp, (fx, y), (fx+w, y+h), c, 3)
@@ -64,7 +63,7 @@ class SmartDoorApp:
         UIHelper.log("Sistem Smart Door Lock diaktifkan", "SYSTEM")
         self.db, self.model, self.pose_estimator, self.anti_spoof = FaceDatabase(), MobileFaceNet(), HeadPoseEstimator(), SilentAntiSpoofing()
         self.cam, self.detector = CameraStream(config.CAMERA_INDEX, config.FRAME_WIDTH, config.FRAME_HEIGHT).start(), FaceMeshDetector(min_detection_confidence=0.5, min_tracking_confidence=0.5)
-        self.door, self.matcher = DoorLock(pin=getattr(config, 'LOCK_GPIO_PIN', 18), unlock_duration=getattr(config, 'UNLOCK_DURATION', 5)), FaceMatcher(threshold=0.82)
+        self.door, self.matcher = DoorLock(pin=getattr(config, 'LOCK_GPIO_PIN', 18), unlock_duration=getattr(config, 'UNLOCK_DURATION', 5)), FaceMatcher(threshold=getattr(config, 'MATCH_THRESHOLD', 0.82))
         self.lock, self.running, self.shared_frame = threading.Lock(), True, None
         self.ui, self.missed_frames = {"wait": True, "bbox": None, "status": "", "color": config.COLOR_WHITE, "instr": ""}, 0
         self._reset_state(); self._load_memory()
@@ -83,6 +82,7 @@ class SmartDoorApp:
         self.state, self.last_name, self.match_score, self.auth_start, self.fake_frames = ValidationState.IDLE, "", 0.0, 0.0, 0
         self.seq, self.step_idx, self.reg_pose, self.pose_hold, self.prev_center = [], 0, [0.0, 0.0, 0.0], 0, None
         self.wait_center, self.center_hold, self.blink_passed, self.blink_hold, self.ear_hist, self.print_counter = False, 0, False, 0, [], 0
+        self.spoof_score = 1.0
         if hasattr(self, 'door'): self.door.lock()
 
     def _check_action(self, action, face):
@@ -90,7 +90,7 @@ class SmartDoorApp:
             ear = UIHelper.get_ear(face)
             self.ear_hist.append(ear)
             if len(self.ear_hist) > 3: self.ear_hist.pop(0)
-            tgt = getattr(self, 'dyn_blink_thr', 0.21)
+            tgt = getattr(self, 'dyn_blink_thr', getattr(config, 'BLINK_EAR_THRESHOLD', 0.21))
             if min(self.ear_hist) <= tgt: self.blink_hold += 1
             else:
                 if self.blink_hold >= 1: self.blink_passed = True
@@ -101,14 +101,10 @@ class SmartDoorApp:
         dy, dp, dr = p.get("yaw", 0)-ref[0], p.get("pitch", 0)-ref[1], p.get("roll", 0)-ref[2]
         ty, tp, tr = getattr(config, 'CHALLENGE_YAW', 25.0), getattr(config, 'CHALLENGE_PITCH', 20.0), getattr(config, 'CHALLENGE_ROLL', 25.0)
         
-        # ─── PERBAIKAN FINAL: Rumus DIKEMBALIKAN KE ASLI KARENA AI MEMBACA FRAME ASLI ───
         val, tgt, passed = {
-            "KANAN": (dy, ty, dy>ty),          # Dibalikkan ke asli (positif)
-            "KIRI": (-dy, ty, -dy>ty),         # Dibalikkan ke asli (negatif)
-            "ATAS": (-dp, tp, -dp>tp),         
-            "BAWAH": (dp, tp, dp>tp), 
-            "MIRING_KANAN": (dr, tr, dr>tr),   # Dibalikkan ke asli (positif)
-            "MIRING_KIRI": (-dr, tr, -dr>tr)   # Dibalikkan ke asli (negatif)
+            "KANAN": (dy, ty, dy>ty), "KIRI": (-dy, ty, -dy>ty), 
+            "ATAS": (-dp, tp, -dp>tp), "BAWAH": (dp, tp, dp>tp), 
+            "MIRING_KANAN": (dr, tr, dr>tr), "MIRING_KIRI": (-dr, tr, -dr>tr)
         }.get(action, (0.0, 1.0, False))
         
         if passed: self.pose_hold += 1
@@ -120,7 +116,6 @@ class SmartDoorApp:
             with self.lock: frame = self.shared_frame.copy() if self.shared_frame is not None else None
             if frame is None: time.sleep(0.01); continue
             
-            # AI TETAP MEMPROSES FRAME ORIGINAL (UNFLIPPED)
             t0, raw = time.time(), frame.copy()
             enhanced = UIHelper.enhance_frame(raw)
             faces = self.detector.detect(enhanced)
@@ -152,7 +147,10 @@ class SmartDoorApp:
             return self.ui.update({"status": "TERLALU DEKAT", "color": config.COLOR_YELLOW, "instr": "Mundur sedikit"})
         
         if self.state in (ValidationState.IDLE, ValidationState.RECOGNIZING):
-            if not self.anti_spoof.is_real(raw, face.bbox).get("real", True):
+            sp = self.anti_spoof.is_real(raw, face.bbox)
+            self.spoof_score = sp.get("score", 1.0)
+            
+            if not sp.get("real", True):
                 self.fake_frames += 1 
                 if self.fake_frames >= 7: 
                     self._reset_state()
@@ -215,38 +213,32 @@ class SmartDoorApp:
         gray = cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY)
         fh, fw = gray.shape
         x1, y1, x2, y2 = max(0, bbox[0]), max(0, bbox[1]), min(fw, bbox[0]+bbox[2]), min(fh, bbox[1]+bbox[3])
-        
-        face_light = np.mean(gray[y1:y2, x1:x2]) if x2 > x1 and y2 > y1 else 100.0
-        bg_mask = np.ones(gray.shape, dtype=bool); bg_mask[y1:y2, x1:x2] = False
-        bg_light = np.mean(gray[bg_mask])
+        bg_mask = np.ones(gray.shape, dtype=bool)
+        bg_mask[y1:y2, x1:x2] = False
+        bg_light = np.mean(gray[bg_mask]) if np.any(bg_mask) else 100.0
 
-        scale = min(1.0, (max(self.match_score, 0.82) - 0.82) / 0.18001)
+        if bg_light > 130.0: light_cond = f"Backlight (B:{bg_light:.0f})"
+        elif bg_light < 85.0: light_cond = f"Low Light (B:{bg_light:.0f})"
+        else: light_cond = f"Normal (B:{bg_light:.0f})"
 
-        if bg_light > 130.0: 
-            light_cond, base_acc, add = f"Backlight (F:{face_light:.0f}/B:{bg_light:.0f})", 95.0, 1.4
-        elif face_light < 85.0: 
-            light_cond, base_acc, add = f"Low Light (F:{face_light:.0f}/B:{bg_light:.0f})", 96.5, 1.4
-        else: 
-            light_cond, base_acc, add = f"Normal (F:{face_light:.0f}/B:{bg_light:.0f})", 98.0, 1.9
-            
-        final_acc = max(95.0, min(99.9, base_acc + (scale * add))) 
+        # =================================================================================
+        # 🎯 MURNI TANPA RUMUS: Mengambil langsung skor mentah (Raw Score) keluaran model
+        # =================================================================================
+        # match_score adalah nilai murni dari Cosine Similarity MobileFaceNet
+        final_acc = self.match_score * 100.0
+        # =================================================================================
         
         self.ui.update({"status": f"SELAMAT DATANG, {self.last_name}", "color": config.COLOR_GREEN, "instr": ""})
         UIHelper.log(f"🔓 AKSES DIBERIKAN. Waktu: {time.time() - self.auth_start:.2f}s", "SUCCESS")
-        UIHelper.log(f"📊 Akurasi: {final_acc:.1f}% | Kondisi: {light_cond}", "SUCCESS")
+        UIHelper.log(f"📊 Akurasi Pengenalan (MobileFaceNet): {final_acc:.2f}% | Liveness Score: {self.spoof_score*100:.2f}% | Latar: {light_cond}", "SUCCESS")
         if hasattr(self.db, 'push_access_log_async'): self.db.push_access_log_async(self.last_name, "UNLOCKED", final_acc)
 
     def run(self):
         try:
             while self.running:
                 if not (ret := self.cam.read())[0]: continue
-                
-                # Biarkan shared_frame TETAP NORMAL (unflipped) untuk diproses AI
                 with self.lock: self.shared_frame = ret[1].copy()
-                
-                # Flip HANYA UNTUK TAMPILAN LAYAR (UI / Display)
                 display = cv2.flip(ret[1], 1)
-                
                 UIHelper.draw_ui(display, self.ui, self.door.locked)
                 cv2.imshow("Smart Door Lock", display)
                 if cv2.waitKey(1) & 0xFF == ord("q"): self.running = False; break

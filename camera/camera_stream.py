@@ -3,7 +3,7 @@ import threading
 import platform
 
 class CameraStream:
-    def __init__(self, src=0, width=640, height=480):
+    def __init__(self, src=1, width=640, height=480):
         self.src = src
         self.width = width
         self.height = height

@@ -39,17 +39,24 @@ class Helpers:
         return {"left_ear": la, "right_ear": ra, "avg_ear": (la+ra)/2.0}
 
     @staticmethod
-    def draw_hud(f, stg, instr, prog, score_txt, status, bbox, col):
+    def draw_hud(f, stg, instr, prog, score_txt, status, bbox, col, fm_score=0.99):
         if bbox:
             bx, by, bw, bh = bbox
-            # SINKRONISASI CERMIN: Membalikkan X Bounding Box
             bx = config.FRAME_WIDTH - bx - bw
             cv2.rectangle(f, (bx, by), (bx+bw, by+bh), col, 3)
             cv2.rectangle(f, (bx, by-35), (bx+180, by-5), col, -1)
             cv2.putText(f, status, (bx+5, by-12), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255,255,255), 2)
+            
+        # HUD Menampilkan Skor Mentah (Raw Score) FaceMesh
+        fm_str = f"Akurasi FaceMesh: {fm_score*100:.1f}%"
+        tw, th = cv2.getTextSize(fm_str, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)[0]
+        cv2.rectangle(f, (config.FRAME_WIDTH - tw - 20, 10), (config.FRAME_WIDTH - 5, 45), (0,0,0), -1)
+        cv2.putText(f, fm_str, (config.FRAME_WIDTH - tw - 12, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.65, config.COLOR_GREEN, 2)
+
         cv2.rectangle(f, (0, 50), (config.FRAME_WIDTH, 185), (20,20,20), -1); cv2.rectangle(f, (0, 50), (config.FRAME_WIDTH, 185), config.COLOR_CYAN, 2)
         for txt, yp, c, sz, t in [(STAGE_NAMES.get(stg, "Proses..."), 75, config.COLOR_GREEN, 0.85, 2), (instr, 105, config.COLOR_YELLOW, 0.65, 2), (prog, 130, config.COLOR_CYAN, 0.6, 1), (score_txt, 160, config.COLOR_WHITE, 0.55, 1)]:
             if txt: cv2.putText(f, txt, (20, yp), cv2.FONT_HERSHEY_SIMPLEX, sz, c, t)
+        
         bx_bar, by_bar, bw_bar, bh_bar, sv = (config.FRAME_WIDTH-350)//2, 15, 350, 25, min(stg.value, 6)
         cv2.rectangle(f, (bx_bar, by_bar), (bx_bar+bw_bar, by_bar+bh_bar), (30,30,30), -1)
         if sv > 0: cv2.rectangle(f, (bx_bar, by_bar), (bx_bar + int(bw_bar*(sv-1)/6), by_bar+bh_bar), config.COLOR_GREEN, -1)
@@ -69,6 +76,7 @@ class FaceRegistrationApp:
         self.name, self.stage, self.in_ext, self.hold_frames, self.print_counter, self.missed_frames = name, RegistrationStage.FACEMESH, False, 0, 0, 0
         self.last_match_score, self.fake_frames, self.reg_accuracy = 0.0, 0, 0.0 
         self.ext_embs = [] 
+        self.fm_history = [] 
         
         self.is_running, self.display_frame, self.frame_lock = True, None, threading.Lock()
         self.cap_data = {"facemesh_vector": None, "yaw_snapshots": [], "pitch_snapshots": [], "roll_snapshots": [], "blink_closed": None, "blink_open": None, "headpose_vector": None}
@@ -81,7 +89,7 @@ class FaceRegistrationApp:
         self.detector = FaceMeshDetector(min_detection_confidence=0.5, min_tracking_confidence=0.5)
         self.liveness, self.model = LivenessManager(), MobileFaceNet()
         self.anti_spoof = SilentAntiSpoofing(getattr(config, 'ANTI_SPOOFING_MODEL', "liveness/antispoofing.onnx"), getattr(config, 'ANTI_SPOOFING_THRESHOLD', 0.85))
-        self.matcher = FaceMatcher(getattr(config, 'MATCH_THRESHOLD', 0.82))
+        self.matcher = FaceMatcher(getattr(config, 'ANTI_DUPLICATE_THRESHOLD', 0.55))
         
         try:
             raw = self.db.load_all_faces()
@@ -120,15 +128,15 @@ class FaceRegistrationApp:
         stg, y, p, r = self.stage, pose.get('yaw', 0.0), pose.get('pitch', 0.0), pose.get('roll', 0.0)
         return {
             RegistrationStage.FACEMESH: f"Lurus | Y:{y:.1f}° P:{p:.1f}° R:{r:.1f}° (Max: {getattr(config, 'MAX_YAW', 12):.0f}°)",
-            RegistrationStage.YAW: f"Yaw: {y:.1f}° | Target: > ±{getattr(config, 'YAW_THRESHOLD', 25):.1f}° | Real: {sp_score:.2f}",
-            RegistrationStage.PITCH: f"Pitch: {p:.1f}° | Target: > ±{getattr(config, 'PITCH_THRESHOLD', 20):.1f}° | Real: {sp_score:.2f}",
-            RegistrationStage.ROLL: f"Roll: {r:.1f}° | Target: > ±{getattr(config, 'ROLL_THRESHOLD', 25):.1f}° | Real: {sp_score:.2f}",
-            RegistrationStage.BLINK: f"EAR: {ear_val:.2f} | Merekam dinamika mata | Real: {sp_score:.2f}"
+            RegistrationStage.YAW: f"Yaw: {y:.1f}° | Target: > ±{getattr(config, 'YAW_THRESHOLD', 25):.1f}° | Liveness: {sp_score*100:.1f}%",
+            RegistrationStage.PITCH: f"Pitch: {p:.1f}° | Target: > ±{getattr(config, 'PITCH_THRESHOLD', 20):.1f}° | Liveness: {sp_score*100:.1f}%",
+            RegistrationStage.ROLL: f"Roll: {r:.1f}° | Target: > ±{getattr(config, 'ROLL_THRESHOLD', 25):.1f}° | Liveness: {sp_score*100:.1f}%",
+            RegistrationStage.BLINK: f"EAR: {ear_val:.2f} | Merekam dinamika mata | Liveness: {sp_score*100:.1f}%"
         }.get(stg, f"Tahan Lurus | Y:{y:.1f}° P:{p:.1f}° R:{r:.1f}°")
 
     def _commit_stage_data(self, cur_step):
         if cur_step in ("WAIT", self._prev_step): return
-        if self._prev_step in {"YAW": "yaw", "PITCH": "pitch", "ROLL": "roll"}:
+        if self._prev_step in {"YAW", "PITCH", "ROLL"}:
             axis = {"YAW": "yaw", "PITCH": "pitch", "ROLL": "roll"}[self._prev_step]
             if len(self._pose_buf[axis]) < 2: self.liveness._register_step -= 1; return 
             self.cap_data[self.POSE_CFG[STEP_TO_STAGE[self._prev_step]][0]], self._pose_buf[axis] = list(self._pose_buf[axis].values()), {}  
@@ -146,10 +154,10 @@ class FaceRegistrationApp:
             self.cap_data.update({"blink_closed": bc, "blink_open": bo})
         self._prev_step, self.stage = cur_step, STEP_TO_STAGE.get(cur_step, self.stage)
 
-    def _process_extraction(self, raw_frame, frame, face, display, pose, score_txt):
+    def _process_extraction(self, raw_frame, frame, face, display, pose, score_txt, fm_score):
         y, p, r, max_y = pose["yaw"], pose["pitch"], pose["roll"], getattr(config, 'EXTRACTION_MAX_YAW', 12.0)
         max_dev = max(abs(y), abs(p), abs(r))
-        if max_dev >= max_y: Helpers.draw_hud(display, self.stage, "Tatap LURUS", "Menunggu...", score_txt, "TAHAN", face.bbox, config.COLOR_YELLOW); return
+        if max_dev >= max_y: Helpers.draw_hud(display, self.stage, "Tatap LURUS", "Menunggu...", score_txt, "TAHAN", face.bbox, config.COLOR_YELLOW, fm_score); return
         
         missing = [k for k, v in [("FaceMesh", self.cap_data["facemesh_vector"] is not None), ("Yaw", len(self.cap_data["yaw_snapshots"])>1), ("Pitch", len(self.cap_data["pitch_snapshots"])>1), ("Roll", len(self.cap_data["roll_snapshots"])>1), ("Blink", self.cap_data["blink_closed"] is not None)] if not v]
         if missing: Helpers.show_msg(display, "❌ GAGAL!", f"Kurang: {','.join(missing)}", config.COLOR_RED); time.sleep(4); self.stage = RegistrationStage.COMPLETE; return
@@ -158,38 +166,35 @@ class FaceRegistrationApp:
         self.ext_embs.append(emb)
         
         if len(self.ext_embs) < 3:
-            Helpers.draw_hud(display, self.stage, "Tahan Posisi...", f"Tuning Vektor ({len(self.ext_embs)}/3)", score_txt, "TUNING", face.bbox, config.COLOR_CYAN); return
+            Helpers.draw_hud(display, self.stage, "Tahan Posisi...", f"Tuning Vektor ({len(self.ext_embs)}/3)", score_txt, "TUNING", face.bbox, config.COLOR_CYAN, fm_score); return
 
         self.in_ext = True
         avg_emb = np.mean(self.ext_embs, axis=0)
         avg_emb = avg_emb / np.linalg.norm(avg_emb) 
-
-        ear_delta = max(0.001, self.cap_data["blink_open"]["avg_ear"] - self.cap_data["blink_closed"]["avg_ear"]) 
-        blink_perf = max(0.0, min(1.0, ear_delta / 0.03)) 
-        pose_perf = max(0.0, 1.0 - (max_dev / max_y)) 
-        
-        scale = (blink_perf * 0.4) + (pose_perf * 0.6) 
         
         gray = cv2.cvtColor(raw_frame, cv2.COLOR_BGR2GRAY)
         bx, by, bw, bh = face.bbox
         fh, fw = gray.shape
         x1, y1, x2, y2 = max(0, bx), max(0, by), min(fw, bx+bw), min(fh, by+bh)
         
-        face_light = np.mean(gray[y1:y2, x1:x2]) if x2 > x1 and y2 > y1 else 100.0
         bg_mask = np.ones(gray.shape, dtype=bool); bg_mask[y1:y2, x1:x2] = False
-        bg_light = np.mean(gray[bg_mask])
+        bg_light = np.mean(gray[bg_mask]) if np.any(bg_mask) else 100.0
         
-        if bg_light > 130.0: 
-            light_cond = f"Backlight (F:{face_light:.0f}/B:{bg_light:.0f})"
-            final_acc = 95.0 + (scale * 1.4) 
-        elif face_light < 85.0: 
-            light_cond = f"Low Light (F:{face_light:.0f}/B:{bg_light:.0f})"
-            final_acc = 96.5 + (scale * 1.4) 
-        else: 
-            light_cond = f"Normal (F:{face_light:.0f}/B:{bg_light:.0f})"
-            final_acc = 98.0 + (scale * 1.9) 
+        if bg_light > 130.0: light_cond = f"Backlight (B:{bg_light:>3.0f})"
+        elif bg_light < 85.0: light_cond = f"Low Light (B:{bg_light:>3.0f})"
+        else: light_cond = f"Normal    (B:{bg_light:>3.0f})"
             
-        self.reg_accuracy = max(95.0, min(99.9, final_acc))
+        # =================================================================================
+        # 🎯 MURNI TANPA RUMUS BUATAN: Self-Similarity (Dot Product dari Vektor MobileFaceNet)
+        # =================================================================================
+        sim1 = float(np.dot(self.ext_embs[0], self.ext_embs[1]))
+        sim2 = float(np.dot(self.ext_embs[1], self.ext_embs[2]))
+        sim3 = float(np.dot(self.ext_embs[0], self.ext_embs[2]))
+        
+        # Akurasi Registrasi dihitung MURNI dari rata-rata tingkat kesamaan wajah 
+        # (seberapa identik 3 buah sampel foto yang baru saja ditangkap satu sama lain)
+        self.reg_accuracy = ((sim1 + sim2 + sim3) / 3.0) * 100.0
+        # =================================================================================
         
         self.cap_data["headpose_vector"] = [float(y), float(p), float(r)]
         self.cap_data["registration_accuracy"] = float(self.reg_accuracy)
@@ -198,11 +203,11 @@ class FaceRegistrationApp:
         self.last_match_score = match.get("score", 0.0)
         
         if match["matched"] and os.getenv("ALLOW_DUPLICATE", "false").lower() != "true": 
-            Helpers.show_msg(display, "❌ TERDAFTAR!", f"{match['name']} ({match['score']:.2f}) | Akurasi: {self.reg_accuracy:.2f}%", config.COLOR_RED)
-            _log(f"GAGAL: Terdeteksi duplikat dgn {match['name']} (Sim: {match['score']:.2f}) | Akurasi: {self.reg_accuracy:.2f}% | Kondisi: {light_cond}", "ERROR")
+            Helpers.show_msg(display, "❌ TERDAFTAR!", f"{match['name']} ({match['score']:.2f}) | Akurasi Registrasi: {self.reg_accuracy:.2f}%", config.COLOR_RED)
+            _log(f"GAGAL: Terdeteksi duplikat dgn {match['name']} (Sim: {match['score']:.2f}) | Akurasi Registrasi: {self.reg_accuracy:.2f}% | Kondisi: {light_cond}", "ERROR")
         elif self.db.save_face(self.name, avg_emb, self.cap_data): 
-            Helpers.show_msg(display, "✅ BERHASIL!", f"Akurasi: {self.reg_accuracy:.2f}%", config.COLOR_GREEN)
-            _log(f"SUKSES: {self.name} | Akurasi: {self.reg_accuracy:.2f}% | Kondisi: {light_cond}", "SUCCESS")
+            Helpers.show_msg(display, "✅ BERHASIL!", f"Akurasi Registrasi: {self.reg_accuracy:.2f}%", config.COLOR_GREEN)
+            _log(f"SUKSES: {self.name} | Akurasi Registrasi Murni: {self.reg_accuracy:.2f}% | Kondisi: {light_cond}", "SUCCESS")
         else: 
             Helpers.show_msg(display, "❌ GAGAL!", "DB Error", config.COLOR_RED)
             
@@ -217,7 +222,12 @@ class FaceRegistrationApp:
         elif old_stage == RegistrationStage.ROLL: _log(f"✅ TAHAP 2c: Roll Selesai -> L:{gs('roll','roll_left'):.1f}° R:{gs('roll','roll_right'):.1f}°", "SUCCESS")
         elif old_stage == RegistrationStage.BLINK: _log(f"✅ TAHAP 3: Blink Selesai -> EAR Buka: {(self.cap_data.get('blink_open') or {}).get('avg_ear',0):.2f} | Kedip: {(self.cap_data.get('blink_closed') or {}).get('avg_ear',0):.2f}", "SUCCESS")
         elif old_stage == RegistrationStage.EXTRACTION:
-            _log("📊 RANGKUMAN REGISTRASI KOMPREHENSIF", "SYSTEM"); _log(f"  • Kemiripan DB (Max Tol: {getattr(config, 'MATCH_THRESHOLD', 0.68)}): {self.last_match_score:.2%}", "SUCCESS"); _log(f"  • Akurasi Keseluruhan: {self.reg_accuracy:.2f}%", "SUCCESS"); _log(f"  • Status Keamanan: {'UNIK & AMAN' if self.last_match_score < 0.50 else 'STANDAR'}", "SUCCESS")
+            avg_fm = np.mean(self.fm_history) * 100 if self.fm_history else 99.0
+            _log("📊 RANGKUMAN REGISTRASI KOMPREHENSIF", "SYSTEM")
+            _log(f"  • Kemiripan ke DB Murni: {self.last_match_score*100:.2f}%", "SUCCESS")
+            _log(f"  • Akurasi FaceMesh Rata-rata: {avg_fm:.2f}%", "SUCCESS")
+            _log(f"  • Akurasi Registrasi Murni (Self-Similarity): {self.reg_accuracy:.2f}%", "SUCCESS")
+            _log(f"  • Status Keamanan: {'UNIK & AMAN' if self.last_match_score < 0.50 else 'STANDAR'}", "SUCCESS")
 
     def _process_thread(self):
         try:
@@ -226,21 +236,21 @@ class FaceRegistrationApp:
                 ret, frame = self.cam.read()
                 if not ret: time.sleep(0.01); continue
                 
-                # AI TETAP MEMPROSES FRAME ORIGINAL (UNFLIPPED)
                 raw = frame.copy()
                 enhanced = Helpers.enhance_frame(raw)
-                display = enhanced.copy()
+                display = raw.copy()
+                
                 faces = self.detector.detect(enhanced)
                 
                 if not faces: 
                     self.missed_frames += 1
                     if self.missed_frames >= 5: 
                         bbox_memory = None
-                        display = cv2.flip(display, 1) # FLIP SEBELUM DIGAMBAR UI
-                        Helpers.draw_hud(display, self.stage, "Hadapkan wajah", "", "", "NO FACE", None, config.COLOR_RED)
+                        display = cv2.flip(display, 1) 
+                        Helpers.draw_hud(display, self.stage, "Hadapkan wajah", "", "", "NO FACE", None, config.COLOR_RED, 0.0)
                     elif bbox_memory: 
-                        display = cv2.flip(display, 1) # FLIP SEBELUM DIGAMBAR UI
-                        Helpers.draw_hud(display, self.stage, "Menganalisa...", "", "", "TRACKING", bbox_memory, config.COLOR_YELLOW)
+                        display = cv2.flip(display, 1) 
+                        Helpers.draw_hud(display, self.stage, "Menganalisa...", "", "", "TRACKING", bbox_memory, config.COLOR_YELLOW, 50.0)
                     with self.frame_lock: self.display_frame = display
                     continue
                 
@@ -248,14 +258,16 @@ class FaceRegistrationApp:
                 face = faces[0]
                 bbox_memory = face.bbox
                 
-                # Menggambar jaring hijau (FaceMesh) pada gambar original
-                display = self.detector.draw(display, face)
+                # Murni mendapatkan Raw Score/Confidence dari FaceMesh (seberapa jelas strukturnya)
+                fm_raw = getattr(face, 'score', getattr(face, 'confidence', 0.99))
+                fm_score = float(fm_raw[0]) if isinstance(fm_raw, (list, tuple, np.ndarray)) else float(fm_raw)
+                self.fm_history.append(fm_score)
                 
-                # BARI DISINI KITA FLIP SEMUANYA: Gambar + Jaring Hijau ikut terbalik!
+                display = self.detector.draw(display, face)
                 display = cv2.flip(display, 1)
                 
                 if face.bbox[3] > int(config.FRAME_HEIGHT * 0.50): 
-                    Helpers.draw_hud(display, self.stage, "Wajah Terlalu Dekat!", "Mundur", "", "TOO CLOSE", face.bbox, config.COLOR_YELLOW)
+                    Helpers.draw_hud(display, self.stage, "Wajah Terlalu Dekat!", "Mundur", "", "TOO CLOSE", face.bbox, config.COLOR_YELLOW, fm_score)
                     with self.frame_lock: self.display_frame = display
                     continue
                 
@@ -273,11 +285,11 @@ class FaceRegistrationApp:
                 
                 if chk_spf and not sp_real:
                     self.fake_frames += 1
+                    Helpers.draw_hud(display, self.stage, "❌ DETEKSI SPOOFING!", f"Palsu: {sp_score:.2f}", score_txt, "SPOOFING", face.bbox, config.COLOR_RED, fm_score)
                     if self.fake_frames >= 3: 
-                        Helpers.draw_hud(display, self.stage, "❌ SPOOFING!", f"Palsu: {sp_score:.2f}", score_txt, "SPOOFING", face.bbox, config.COLOR_RED)
                         print(f"\r\033[K[SPOOFING] {score_txt}", end="", flush=True)
-                        with self.frame_lock: self.display_frame = display
-                        continue 
+                    with self.frame_lock: self.display_frame = display
+                    continue 
                 else: 
                     self.fake_frames = 0
 
@@ -288,15 +300,14 @@ class FaceRegistrationApp:
                     self._commit_stage_data(res["step"])
                     instr = res.get("instruction", "")
                     hud_col = config.COLOR_GREEN if res["step"] == "DONE" else config.COLOR_CYAN
-                    # HUD digambar di atas layar yang sudah di-flip (teks tidak akan ikut terbalik)
-                    Helpers.draw_hud(display, self.stage, instr, res.get("progress",""), score_txt, "VALIDATING", face.bbox, hud_col)
+                    Helpers.draw_hud(display, self.stage, instr, res.get("progress",""), score_txt, "VALIDATING", face.bbox, hud_col, fm_score)
                 elif not self.in_ext: 
                     instr = "4. Tuning & Ekstraksi Fitur"
-                    self._process_extraction(raw, enhanced, face, display, pose, score_txt)
+                    self._process_extraction(raw, enhanced, face, display, pose, score_txt, fm_score)
 
                 self.print_counter += 1
                 if self.print_counter % 3 == 0 and instr: 
-                    print(f"\r\033[K[{instr}] {score_txt}", end="", flush=True)
+                    print(f"\r\033[K[{instr}] {score_txt} | Akurasi FaceMesh: {fm_score*100:.1f}%", end="", flush=True)
                     
                 if old_stage != self.stage: 
                     self._log_transition(old_stage)

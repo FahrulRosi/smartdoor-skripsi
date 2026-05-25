@@ -1,5 +1,5 @@
 # ── Camera & Hardware ────────────────────────────────────────────────────────
-CAMERA_INDEX    = 1
+CAMERA_INDEX    = 0
 FRAME_WIDTH     = 640
 FRAME_HEIGHT    = 480
 

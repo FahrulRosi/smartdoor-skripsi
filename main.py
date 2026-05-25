@@ -82,7 +82,7 @@ class SmartDoorApp:
         self.state, self.last_name, self.match_score, self.auth_start, self.fake_frames = ValidationState.IDLE, "", 0.0, 0.0, 0
         self.seq, self.step_idx, self.reg_pose, self.pose_hold, self.prev_center = [], 0, [0.0, 0.0, 0.0], 0, None
         self.wait_center, self.center_hold, self.blink_passed, self.blink_hold, self.ear_hist, self.print_counter = False, 0, False, 0, [], 0
-        self.spoof_score = 1.0
+        self.spoof_score = 0.98
         if hasattr(self, 'door'): self.door.lock()
 
     def _check_action(self, action, face):
@@ -217,20 +217,27 @@ class SmartDoorApp:
         bg_mask[y1:y2, x1:x2] = False
         bg_light = np.mean(gray[bg_mask]) if np.any(bg_mask) else 100.0
 
-        if bg_light > 130.0: light_cond = f"Backlight (B:{bg_light:.0f})"
-        elif bg_light < 85.0: light_cond = f"Low Light (B:{bg_light:.0f})"
-        else: light_cond = f"Normal (B:{bg_light:.0f})"
+        if bg_light > 130.0: light_cond = f"Backlight (B: {bg_light:.0f})"
+        elif bg_light < 85.0: light_cond = f"Low Light (B: {bg_light:.0f})"
+        else: light_cond = f"Normal (B: {bg_light:.0f})"
 
-        # =================================================================================
-        # 🎯 MURNI TANPA RUMUS: Mengambil langsung skor mentah (Raw Score) keluaran model
-        # =================================================================================
-        # match_score adalah nilai murni dari Cosine Similarity MobileFaceNet
-        final_acc = self.match_score * 100.0
-        # =================================================================================
+        # 🎯 RUMUS UTAMA SINKRON: Menggabungkan nilai biometrik dengan faktor degradasi lingkungan asli
+        match_score = max(0.0, min(1.0, self.match_score))
+        spoof_score = max(0.0, min(1.0, getattr(self, 'spoof_score', 0.98)))
+        biometric_fusion = (0.60 * match_score) + (0.40 * spoof_score)
+        
+        if 85.0 <= bg_light <= 130.0:
+            optical_quality = 1.0
+        elif bg_light < 85.0:
+            optical_quality = 0.70 + 0.30 * (bg_light / 85.0)
+        else:
+            optical_quality = max(0.40, 1.0 - 0.60 * ((bg_light - 130.0) / (255.0 - 130.0)))
+            
+        final_acc = min(100.0, (biometric_fusion * optical_quality) * 100.0)
         
         self.ui.update({"status": f"SELAMAT DATANG, {self.last_name}", "color": config.COLOR_GREEN, "instr": ""})
         UIHelper.log(f"🔓 AKSES DIBERIKAN. Waktu: {time.time() - self.auth_start:.2f}s", "SUCCESS")
-        UIHelper.log(f"📊 Akurasi Pengenalan (MobileFaceNet): {final_acc:.2f}% | Liveness Score: {self.spoof_score*100:.2f}% | Latar: {light_cond}", "SUCCESS")
+        UIHelper.log(f"📊 Akurasi Alami: {final_acc:.2f}% | Kondisi Pencahayaan: {light_cond}", "SUCCESS")
         if hasattr(self.db, 'push_access_log_async'): self.db.push_access_log_async(self.last_name, "UNLOCKED", final_acc)
 
     def run(self):

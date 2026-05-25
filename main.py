@@ -213,6 +213,7 @@ class SmartDoorApp:
         gray = cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY)
         fh, fw = gray.shape
         x1, y1, x2, y2 = max(0, bbox[0]), max(0, bbox[1]), min(fw, bbox[0]+bbox[2]), min(fh, bbox[1]+bbox[3])
+        
         bg_mask = np.ones(gray.shape, dtype=bool)
         bg_mask[y1:y2, x1:x2] = False
         bg_light = np.mean(gray[bg_mask]) if np.any(bg_mask) else 100.0
@@ -226,6 +227,7 @@ class SmartDoorApp:
         spoof_score = max(0.0, min(1.0, getattr(self, 'spoof_score', 0.98)))
         biometric_fusion = (0.60 * match_score) + (0.40 * spoof_score)
         
+        # Penyesuaian Kualitas Optik yang selaras dengan register.py
         if 85.0 <= bg_light <= 130.0:
             optical_quality = 1.0
         elif bg_light < 85.0:

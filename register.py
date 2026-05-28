@@ -57,12 +57,9 @@ class Helpers:
 
     @staticmethod
     def show_msg(f, t_title, t_sub, col):
-        # Pembersihan layar dialog popup multi-line agar informasi tidak bertumpuk keluar layar
         cv2.rectangle(f, (0, 0), (config.FRAME_WIDTH, config.FRAME_HEIGHT), (15, 15, 15), -1)
         cv2.rectangle(f, (15, 15), (config.FRAME_WIDTH - 15, config.FRAME_HEIGHT - 15), col, 8)
         cv2.putText(f, t_title, (40, config.FRAME_HEIGHT // 2 - 50), cv2.FONT_HERSHEY_SIMPLEX, 1.2, col, 3)
-        
-        # Pisahkan string berdasarkan tanda '|' untuk mencetak baris ke bawah secara natural
         lines = t_sub.split(" | ")
         y_offset = config.FRAME_HEIGHT // 2 + 10
         for line in lines:
@@ -178,12 +175,17 @@ class FaceRegistrationApp:
         x1, y1, x2, y2 = max(0, bx), max(0, by), min(fw, bx+bw), min(fh, by+bh)
         
         bg_mask = np.ones(gray.shape, dtype=bool); bg_mask[y1:y2, x1:x2] = False
-        bg_light = np.mean(gray[bg_mask]) if np.any(bg_mask) else 100.0
+        bg_pixels = gray[bg_mask]
         
-        if bg_light > 130.0: light_cond = f"Backlight (B:{bg_light:>3.0f})"
-        elif bg_light < 85.0: light_cond = f"Low Light (B:{bg_light:>3.0f})"
+        bg_light = np.percentile(bg_pixels, 80) if len(bg_pixels) > 0 else 100.0
+        
+        if bg_light > 150.0: light_cond = f"Backlight (B:{bg_light:>3.0f})"
+        elif bg_light < 80.0: light_cond = f"Low Light (B:{bg_light:>3.0f})"
         else: light_cond = f"Normal    (B:{bg_light:>3.0f})"
             
+        # =================================================================================
+        # 🚨 RUMUS DEGRADASI OPTIK KETAT (SAMA PERSIS DENGAN MAIN.PY) 🚨
+        # =================================================================================
         yaw_req = getattr(config, 'YAW_THRESHOLD', 25.0) * 0.7 * 2
         yaw_l = abs(next((s.get("yaw", 0) for s in self.cap_data.get("yaw_snapshots", []) if s.get("tag") == "yaw_left"), 0))
         yaw_r = abs(next((s.get("yaw", 0) for s in self.cap_data.get("yaw_snapshots", []) if s.get("tag") == "yaw_right"), 0))
@@ -203,19 +205,23 @@ class FaceRegistrationApp:
         blink_score = min(1.0, ear_delta / 0.025)
         
         extraction_dev = max(abs(y), abs(p), abs(r))
-        ext_score = max(0.0, (90.0 - extraction_dev) / 90.0)
+        ext_score = np.exp(-0.02 * extraction_dev)
         spoof_score = sp_score
 
+        # 1. Rata-rata Komponen Fisik Mentah
         raw_average = (yaw_score + pitch_score + roll_score + blink_score + ext_score + spoof_score) / 6.0
         
-        if 85.0 <= bg_light <= 130.0:
-            optical_quality = 1.0  
-        elif bg_light < 85.0:
-            optical_quality = 0.70 + 0.30 * (bg_light / 85.0)
+        # 2. PERHITUNGAN MATEMATIS RENTANG SPESIFIK (REAL-TIME INTERPOLATION)
+        if bg_light > 150.0:
+            optical_quality = 0.88 - ((bg_light - 150.0) / 105.0) * 0.08
+        elif bg_light < 80.0:
+            optical_quality = 0.88 + (bg_light / 80.0) * 0.07
         else:
-            optical_quality = max(0.40, 1.0 - 0.60 * ((bg_light - 130.0) / (255.0 - 130.0)))
+            optical_quality = 0.95 + 0.03 * (1.0 - abs(bg_light - 115.0) / 35.0)
 
+        # 🎯 3. Akurasi Akhir
         self.reg_accuracy = min(100.0, (raw_average * optical_quality) * 100.0)
+        # =================================================================================
         
         self.cap_data["headpose_vector"] = [float(y), float(p), float(r)]
         self.cap_data["registration_accuracy"] = float(self.reg_accuracy)
@@ -225,14 +231,13 @@ class FaceRegistrationApp:
         match = self.matcher.match(avg_emb)
         self.last_match_score = match.get("score", 0.0)
         
-        # PERBAIKAN: Menyertakan rincian akurasi serta nilai kondisi cahaya secara terpisah meskipun wajah sama/duplikat
         if match["matched"] and os.getenv("ALLOW_DUPLICATE", "false").lower() != "true": 
-            msg_sub = f"User: {match['name']} ({match['score']:.2f}) | Akurasi Dinamis: {self.reg_accuracy:.2f}% | Kondisi Kecerahan: {light_cond}"
+            msg_sub = f"User: {match['name']} ({match['score']:.2f}) | Akurasi: {self.reg_accuracy:.2f}% | Kecerahan: {light_cond}"
             Helpers.show_msg(display, "❌ WAJAH SUDAH TERDAFTAR!", msg_sub, config.COLOR_RED)
-            _log(f"GAGAL: Terdeteksi duplikat dgn {match['name']} (Sim: {match['score']:.2f}) | Akurasi Dinamis: {self.reg_accuracy:.2f}% | Kondisi: {light_cond}", "ERROR")
+            _log(f"GAGAL: Terdeteksi duplikat dgn {match['name']} (Sim: {match['score']:.2f}) | Akurasi: {self.reg_accuracy:.2f}% | Kondisi: {light_cond}", "ERROR")
         elif self.db.save_face(self.name, avg_emb, self.cap_data): 
-            Helpers.show_msg(display, "✅ REGISTRASI BERHASIL!", f"User Baru: {self.name} | Akurasi Dinamis: {self.reg_accuracy:.2f}% | Kondisi Kecerahan: {light_cond}", config.COLOR_GREEN)
-            _log(f"SUKSES: {self.name} | Akurasi Dinamis: {self.reg_accuracy:.2f}% | Kondisi: {light_cond}", "SUCCESS")
+            Helpers.show_msg(display, "✅ REGISTRASI BERHASIL!", f"User Baru: {self.name} | Akurasi: {self.reg_accuracy:.2f}% | Kecerahan: {light_cond}", config.COLOR_GREEN)
+            _log(f"SUKSES: {self.name} | Akurasi: {self.reg_accuracy:.2f}% | Kondisi: {light_cond}", "SUCCESS")
         else: 
             Helpers.show_msg(display, "❌ GAGAL!", "DB Error", config.COLOR_RED)
             
@@ -249,7 +254,7 @@ class FaceRegistrationApp:
         elif old_stage == RegistrationStage.EXTRACTION:
             _log("📊 RANGKUMAN REGISTRASI KOMPREHENSIF", "SYSTEM")
             _log(f"  • Kemiripan DB (Max Tol: {getattr(config, 'MATCH_THRESHOLD', 0.68)}): {self.last_match_score:.2%}", "SUCCESS")
-            _log(f"  • Akurasi Akhir (Dinamis): {self.reg_accuracy:.2f}%", "SUCCESS")
+            _log(f"  • Akurasi Akhir (Sistem Kasta): {self.reg_accuracy:.2f}%", "SUCCESS")
             _log(f"  • Kondisi Cahaya Tercatat: {self.cap_data.get('light_condition', 'N/A')}", "SUCCESS")
 
     def _process_thread(self):
@@ -299,18 +304,22 @@ class FaceRegistrationApp:
                 else:
                     sp_score, sp_real = 1.0, True
                 
-                # 🎯 KONDISI CAHAYA REAL-TIME DIHITUNG DISINI AGAR SELALU MUNCUL DI TERMINAL/HUD
                 bg_mask_live = np.ones(raw.shape[:2], dtype=bool)
                 bx, by, bw, bh = face.bbox
                 fh_l, fw_l = raw.shape[:2]
                 x1_l, y1_l, x2_l, y2_l = max(0, bx), max(0, by), min(fw_l, bx+bw), min(fh_l, by+bh)
                 bg_mask_live[y1_l:y2_l, x1_l:x2_l] = False
-                bg_light_live = np.mean(cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY)[bg_mask_live]) if np.any(bg_mask_live) else 100.0
+                
+                bg_pixels_live = cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY)[bg_mask_live]
+                bg_light_live = np.percentile(bg_pixels_live, 80) if len(bg_pixels_live) > 0 else 100.0
 
                 score_txt = self._generate_metric_text(pose, ear_val, sp_score, bg_light_live)
                 
                 if chk_spf and not sp_real:
                     self.fake_frames += 1
+                    # Log terminal murni tanpa merusak UI HUD asli pada monitor
+                    _log(f"⚠️ Registrasi Ditolak (Gunakan Wajah Asli) | Spoof Score: {sp_score:.4f} | Frame Palsu: {self.fake_frames}", "WARNING")
+                    
                     Helpers.draw_hud(display, self.stage, "❌ DETEKSI SPOOFING!", f"Palsu: {sp_score:.2f}", score_txt, "SPOOFING", face.bbox, config.COLOR_RED)
                     with self.frame_lock: self.display_frame = display
                     continue 

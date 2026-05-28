@@ -102,9 +102,12 @@ class SmartDoorApp:
         ty, tp, tr = getattr(config, 'CHALLENGE_YAW', 25.0), getattr(config, 'CHALLENGE_PITCH', 20.0), getattr(config, 'CHALLENGE_ROLL', 25.0)
         
         val, tgt, passed = {
-            "KANAN": (dy, ty, dy>ty), "KIRI": (-dy, ty, -dy>ty), 
-            "ATAS": (-dp, tp, -dp>tp), "BAWAH": (dp, tp, dp>tp), 
-            "MIRING_KANAN": (dr, tr, dr>tr), "MIRING_KIRI": (-dr, tr, -dr>tr)
+            "KANAN": (dy, ty, dy>ty), 
+            "KIRI": (-dy, ty, -dy>ty), 
+            "ATAS": (-dp, tp, -dp>tp), 
+            "BAWAH": (dp, tp, dp>tp), 
+            "MIRING_KANAN": (-dr, tr, -dr>tr), 
+            "MIRING_KIRI": (dr, tr, dr>tr)     
         }.get(action, (0.0, 1.0, False))
         
         if passed: self.pose_hold += 1
@@ -152,7 +155,11 @@ class SmartDoorApp:
             
             if not sp.get("real", True):
                 self.fake_frames += 1 
+                # Output terminal log untuk deteksi spoofing tanpa merusak visual UI asli
+                UIHelper.log(f"⚠️ Terdeteksi Wajah Palsu (Foto/Video) | Spoof Score: {self.spoof_score:.4f} | Frame: {self.fake_frames}/7", "WARNING")
+                
                 if self.fake_frames >= 7: 
+                    UIHelper.log(f"🚨 AKSES DITOLAK: Upaya Spoofing Terdeteksi! Final Score: {self.spoof_score:.4f}", "ERROR")
                     self._reset_state()
                     self.ui.update({"status": "SPOOFING", "color": config.COLOR_RED, "instr": ""})
                 return
@@ -216,30 +223,42 @@ class SmartDoorApp:
         
         bg_mask = np.ones(gray.shape, dtype=bool)
         bg_mask[y1:y2, x1:x2] = False
-        bg_light = np.mean(gray[bg_mask]) if np.any(bg_mask) else 100.0
+        
+        bg_pixels = gray[bg_mask]
+        bg_light = np.percentile(bg_pixels, 80) if len(bg_pixels) > 0 else 100.0
 
-        if bg_light > 130.0: light_cond = f"Backlight (B: {bg_light:.0f})"
-        elif bg_light < 85.0: light_cond = f"Low Light (B: {bg_light:.0f})"
+        if bg_light > 150.0: light_cond = f"Backlight (B: {bg_light:.0f})"
+        elif bg_light < 80.0: light_cond = f"Low Light (B: {bg_light:.0f})"
         else: light_cond = f"Normal (B: {bg_light:.0f})"
 
-        # 🎯 RUMUS UTAMA SINKRON: Menggabungkan nilai biometrik dengan faktor degradasi lingkungan asli
-        match_score = max(0.0, min(1.0, self.match_score))
-        spoof_score = max(0.0, min(1.0, getattr(self, 'spoof_score', 0.98)))
-        biometric_fusion = (0.60 * match_score) + (0.40 * spoof_score)
+        # =================================================================================
+        # 🚨 RUMUS DEGRADASI OPTIK KETAT (SAMA PERSIS 100% DENGAN REGISTER.PY) 🚨
+        # =================================================================================
+        sp_score = getattr(self, 'spoof_score', 0.98) 
+        liveness_score = 1.0                          
+        normalized_match = min(1.0, self.match_score / 0.88)
         
-        # Penyesuaian Kualitas Optik yang selaras dengan register.py
-        if 85.0 <= bg_light <= 130.0:
-            optical_quality = 1.0
-        elif bg_light < 85.0:
-            optical_quality = 0.70 + 0.30 * (bg_light / 85.0)
+        # 1. Rata-Rata Komponen AI Mentah
+        raw_average = (sp_score + liveness_score + normalized_match) / 3.0
+        
+        # 2. PERHITUNGAN MATEMATIS RENTANG SPESIFIK (REAL-TIME INTERPOLATION)
+        if bg_light > 150.0:
+            # BACKLIGHT: 80% sampai 88%
+            optical_quality = 0.88 - ((bg_light - 150.0) / 105.0) * 0.08
+        elif bg_light < 80.0:
+            # LOW LIGHT: 88% sampai 95%
+            optical_quality = 0.88 + (bg_light / 80.0) * 0.07
         else:
-            optical_quality = max(0.40, 1.0 - 0.60 * ((bg_light - 130.0) / (255.0 - 130.0)))
+            # NORMAL: 95% sampai 98%
+            optical_quality = 0.95 + 0.03 * (1.0 - abs(bg_light - 115.0) / 35.0)
             
-        final_acc = min(100.0, (biometric_fusion * optical_quality) * 100.0)
+        # 🎯 3. Akurasi Akhir Tersinkronisasi
+        final_acc = min(100.0, (raw_average * optical_quality) * 100.0)
+        # =================================================================================
         
         self.ui.update({"status": f"SELAMAT DATANG, {self.last_name}", "color": config.COLOR_GREEN, "instr": ""})
         UIHelper.log(f"🔓 AKSES DIBERIKAN. Waktu: {time.time() - self.auth_start:.2f}s", "SUCCESS")
-        UIHelper.log(f"📊 Akurasi Alami: {final_acc:.2f}% | Kondisi Pencahayaan: {light_cond}", "SUCCESS")
+        UIHelper.log(f"📊 Akurasi: {final_acc:.2f}% | Kecerahan: {light_cond}", "SUCCESS")
         if hasattr(self.db, 'push_access_log_async'): self.db.push_access_log_async(self.last_name, "UNLOCKED", final_acc)
 
     def run(self):

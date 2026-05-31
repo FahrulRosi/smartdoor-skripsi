@@ -36,7 +36,7 @@ class DataTransformer:
                 "facemesh_vector": fm_list,
                 "blink_closed": float(ear_c),
                 "blink_open": float(ear_o),
-                "headpose_vector": hp_vec,  # KUNCI KRUSIAL: Agar sinkron langsung dibaca oleh main.py
+                "headpose_vector": hp_vec,
                 "headpose": {
                     "neutral_vector": hp_vec,
                     "yaw_left": float(yaw_left),
@@ -97,37 +97,25 @@ class CloudStorage:
                 print("[Supabase] Terhubung ke Cloud Database PostgreSQL.")
             except Exception as e: print(f"[Supabase WARNING] Gagal inisialisasi: {e}")
 
-    def get_user_id(self, username):
-        if not self.is_connected: return None
-        try:
-            res = self.client.table("users_profile").select("id").eq("username", username).execute()
-            return res.data[0]["id"] if res.data else None
-        except Exception: return None
-
-    def create_dummy_user(self, username):
-        try:
-            payload = {
-                "username": username,
-                "email": f"{username.lower().replace(' ', '')}@auto.local",
-                "password_hash": "auto_generated_by_ai"
-            }
-            res = self.client.table("users_profile").insert(payload).execute()
-            return res.data[0]["id"] if res.data else None
-        except Exception as e:
-            print(f"[Supabase ERROR] Gagal auto-create profil web: {e}"); return None
+    # Fungsi get_user_id & create_dummy_user DIMATIKAN untuk menghindari error tabel users_profile
+    # def get_user_id(self, username):
+    #     ...
+    # def create_dummy_user(self, username):
+    #     ...
 
     def sync_register(self, name, payload):
         if not self.is_connected: return
         try:
-            user_id = self.get_user_id(name)
-            if not user_id:
-                print(f"[Supabase] Username '{name}' belum ada. Membuatkan profil Web otomatis...")
-                user_id = self.create_dummy_user(name)
-                if not user_id: return
+            # BLOK AUTO-CREATE DIMATIKAN
+            # user_id = self.get_user_id(name)
+            # if not user_id:
+            #     print(f"[Supabase] Username '{name}' belum ada. Membuatkan profil Web otomatis...")
+            #     user_id = self.create_dummy_user(name)
+            #     if not user_id: return
             
             db_payload = {
-                "user_id": user_id,
-                "username": name,
+                # Menggunakan username sebagai pengenal utama langsung ke tabel register
+                "username": name, 
                 "face_embedding": payload["embedding"],
                 "liveness_config": payload["liveness_config"],
                 "registered_at": payload["registered_at"]
@@ -139,10 +127,13 @@ class CloudStorage:
     def push_access_log(self, user_name, status, score):
         if not self.is_connected: return
         try:
-            user_id = self.get_user_id(user_name)
-            if not user_id: return
+            # BLOK PENCARIAN ID DIMATIKAN
+            # user_id = self.get_user_id(user_name)
+            # if not user_id: return
+            
             log_data = {
-                "user_id": user_id, "status": status,
+                "username": user_name, # Mengirim username langsung
+                "status": status,
                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             }
             if score is not None: log_data["liveness_score"] = float(score)
@@ -193,10 +184,6 @@ class FaceDatabase:
                 self.local.overwrite_all(faces)
                 if not silent: print(f"[Hybrid Sync] Berhasil memulihkan {len(faces)} identitas wajah.")
 
-        # --- PERBAIKAN MUTLAK: MENGEMBALIKAN FACES SECARA UTUH ---
-        # Dengan mengembalikan dictionary aslinya, logika pemrosesan memori 
-        # di main.py dan register.py dapat mengakses 'embedding' sekaligus 
-        # menarik keluar 'liveness_config' unik milik setiap user secara akurat.
         return faces
 
     def push_access_log_async(self, user_name, status="UNLOCKED", score=None):

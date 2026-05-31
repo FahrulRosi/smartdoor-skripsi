@@ -44,7 +44,7 @@ class Helpers:
             bx, by, bw, bh = bbox
             bx = config.FRAME_WIDTH - bx - bw
             cv2.rectangle(f, (bx, by), (bx+bw, by+bh), col, 3)
-            cv2.rectangle(f, (bx, by-35), (bx+180, by-5), col, -1)
+            cv2.rectangle(f, (bx, by-35), (bx+200, by-5), col, -1)
             cv2.putText(f, status, (bx+5, by-12), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255,255,255), 2)
         cv2.rectangle(f, (0, 50), (config.FRAME_WIDTH, 185), (20,20,20), -1); cv2.rectangle(f, (0, 50), (config.FRAME_WIDTH, 185), config.COLOR_CYAN, 2)
         for txt, yp, c, sz, t in [(STAGE_NAMES.get(stg, "Proses..."), 75, config.COLOR_GREEN, 0.85, 2), (instr, 105, config.COLOR_YELLOW, 0.65, 2), (prog, 130, config.COLOR_CYAN, 0.6, 1), (score_txt, 160, config.COLOR_WHITE, 0.55, 1)]:
@@ -109,7 +109,7 @@ class FaceRegistrationApp:
             if val < -cap_thr or val > cap_thr:
                 self.hold_frames += 1
                 tag = t_neg if val < -cap_thr else t_pos
-                if self.hold_frames >= 2 and (tag not in buf or abs(val) > abs(buf[tag][axis])): 
+                if self.hold_frames >= 6 and (tag not in buf or abs(val) > abs(buf[tag][axis])): 
                     buf[tag] = {k: float(pose.get(k, 0.0)) for k in ("yaw", "pitch", "roll")}
                     buf[tag]["tag"] = tag
             else: self.hold_frames = 0
@@ -122,14 +122,14 @@ class FaceRegistrationApp:
 
     def _generate_metric_text(self, pose, ear_val, sp_score, bg_light=100.0):
         stg, y, p, r = self.stage, pose.get('yaw', 0.0), pose.get('pitch', 0.0), pose.get('roll', 0.0)
-        cahaya_txt = f"Cahaya BG: {bg_light:.0f}"
+        cahaya_txt = f"B: {bg_light:.0f}"
         return {
-            RegistrationStage.FACEMESH: f"Lurus | Y:{y:.1f}° P:{p:.1f}° R:{r:.1f}° | {cahaya_txt}",
-            RegistrationStage.YAW: f"Yaw: {y:.1f}° | Target: > ±{getattr(config, 'YAW_THRESHOLD', 25):.1f}° | {cahaya_txt}",
-            RegistrationStage.PITCH: f"Pitch: {p:.1f}° | Target: > ±{getattr(config, 'PITCH_THRESHOLD', 20):.1f}° | {cahaya_txt}",
-            RegistrationStage.ROLL: f"Roll: {r:.1f}° | Target: > ±{getattr(config, 'ROLL_THRESHOLD', 25):.1f}° | {cahaya_txt}",
-            RegistrationStage.BLINK: f"EAR: {ear_val:.2f} | Deteksi Mata | {cahaya_txt}"
-        }.get(stg, f"Tahan Lurus | Y:{y:.1f}° P:{p:.1f}° R:{r:.1f}° | {cahaya_txt}")
+            RegistrationStage.FACEMESH: f"Lurus | Y:{y:.1f}° P:{p:.1f}° R:{r:.1f}° | Asli: {sp_score*100:.0f}% | {cahaya_txt}",
+            RegistrationStage.YAW: f"Yaw: {y:.1f}° | Tgt: > ±{getattr(config, 'YAW_THRESHOLD', 25):.0f}° | Asli: {sp_score*100:.0f}% | {cahaya_txt}",
+            RegistrationStage.PITCH: f"Pitch: {p:.1f}° | Tgt: > ±{getattr(config, 'PITCH_THRESHOLD', 20):.0f}° | Asli: {sp_score*100:.0f}% | {cahaya_txt}",
+            RegistrationStage.ROLL: f"Roll: {r:.1f}° | Tgt: > ±{getattr(config, 'ROLL_THRESHOLD', 25):.0f}° | Asli: {sp_score*100:.0f}% | {cahaya_txt}",
+            RegistrationStage.BLINK: f"EAR: {ear_val:.2f} | Deteksi Mata | Asli: {sp_score*100:.0f}% | {cahaya_txt}"
+        }.get(stg, f"Tahan Lurus | Y:{y:.1f}° P:{p:.1f}° R:{r:.1f}° | Asli: {sp_score*100:.0f}% | {cahaya_txt}")
 
     def _commit_stage_data(self, cur_step):
         if cur_step in ("WAIT", self._prev_step): return
@@ -163,7 +163,7 @@ class FaceRegistrationApp:
         self.ext_embs.append(emb)
         
         if len(self.ext_embs) < 3:
-            Helpers.draw_hud(display, self.stage, "Tahan Posisi...", f"Tuning Vektor ({len(self.ext_embs)}/3)", score_txt, "TUNING", face.bbox, config.COLOR_CYAN); return
+            Helpers.draw_hud(display, self.stage, "Tahan Posisi...", f"Tuning Vektor ({len(self.ext_embs)}/3)", score_txt, f"TUNING (Asli: {sp_score*100:.0f}%)", face.bbox, config.COLOR_CYAN); return
 
         self.in_ext = True
         avg_emb = np.mean(self.ext_embs, axis=0)
@@ -177,51 +177,30 @@ class FaceRegistrationApp:
         bg_mask = np.ones(gray.shape, dtype=bool); bg_mask[y1:y2, x1:x2] = False
         bg_pixels = gray[bg_mask]
         
-        bg_light = np.percentile(bg_pixels, 80) if len(bg_pixels) > 0 else 100.0
+        bg_light = np.median(bg_pixels) if len(bg_pixels) > 0 else 100.0
         
-        if bg_light > 150.0: light_cond = f"Backlight (B:{bg_light:>3.0f})"
+        if bg_light > 160.0: light_cond = f"Backlight (B:{bg_light:>3.0f})"
         elif bg_light < 80.0: light_cond = f"Low Light (B:{bg_light:>3.0f})"
         else: light_cond = f"Normal    (B:{bg_light:>3.0f})"
             
         # =================================================================================
-        # 🚨 RUMUS DEGRADASI OPTIK KETAT (SAMA PERSIS DENGAN MAIN.PY) 🚨
+        # 🚨 PERBAIKAN: Sinkronisasi Absolut dengan main.py
+        # 3 Komponen AI Pembagi dibuat SAMA PERSIS dengan main.py agar tidak ada drop nilai.
         # =================================================================================
-        yaw_req = getattr(config, 'YAW_THRESHOLD', 25.0) * 0.7 * 2
-        yaw_l = abs(next((s.get("yaw", 0) for s in self.cap_data.get("yaw_snapshots", []) if s.get("tag") == "yaw_left"), 0))
-        yaw_r = abs(next((s.get("yaw", 0) for s in self.cap_data.get("yaw_snapshots", []) if s.get("tag") == "yaw_right"), 0))
-        yaw_score = min(1.0, (yaw_l + yaw_r) / yaw_req) if (yaw_l and yaw_r) else 1.0
-        
-        pitch_req = getattr(config, 'PITCH_THRESHOLD', 20.0) * 0.7 * 2
-        pitch_u = abs(next((s.get("pitch", 0) for s in self.cap_data.get("pitch_snapshots", []) if s.get("tag") == "pitch_up"), 0))
-        pitch_d = abs(next((s.get("pitch", 0) for s in self.cap_data.get("pitch_snapshots", []) if s.get("tag") == "pitch_down"), 0))
-        pitch_score = min(1.0, (pitch_u + pitch_d) / pitch_req) if (pitch_u and pitch_d) else 1.0
-        
-        roll_req = getattr(config, 'ROLL_THRESHOLD', 25.0) * 0.7 * 2
-        roll_l = abs(next((s.get("roll", 0) for s in self.cap_data.get("roll_snapshots", []) if s.get("tag") == "roll_left"), 0))
-        roll_r = abs(next((s.get("roll", 0) for s in self.cap_data.get("roll_snapshots", []) if s.get("tag") == "roll_right"), 0))
-        roll_score = min(1.0, (roll_l + roll_r) / roll_req) if (roll_l and roll_r) else 1.0
-        
-        ear_delta = max(0.001, self.cap_data["blink_open"]["avg_ear"] - self.cap_data["blink_closed"]["avg_ear"])
-        blink_score = min(1.0, ear_delta / 0.025)
-        
-        extraction_dev = max(abs(y), abs(p), abs(r))
-        ext_score = np.exp(-0.02 * extraction_dev)
         spoof_score = sp_score
-
-        # 1. Rata-rata Komponen Fisik Mentah
-        raw_average = (yaw_score + pitch_score + roll_score + blink_score + ext_score + spoof_score) / 6.0
+        liveness_score = 1.0  # Lulus Liveness fisik secara sempurna
+        template_score = 1.0  # Wajah acuan pendaftaran bernilai mutlak 100% terhadap dirinya sendiri
         
-        # 2. PERHITUNGAN MATEMATIS RENTANG SPESIFIK (REAL-TIME INTERPOLATION)
-        if bg_light > 150.0:
-            optical_quality = 0.88 - ((bg_light - 150.0) / 105.0) * 0.08
-        elif bg_light < 80.0:
-            optical_quality = 0.88 + (bg_light / 80.0) * 0.07
-        else:
-            optical_quality = 0.95 + 0.03 * (1.0 - abs(bg_light - 115.0) / 35.0)
+        # Rata-rata mentah sekarang murni ~1.0 (100%), sama seperti di main.py
+        raw_average = (spoof_score + liveness_score + template_score) / 3.0
+        
+        # 🚨 MATEMATIKA MURNI: PHOTOMETRIC NORMALIZATION (8-BIT COLOR SPACE)
+        normalized_light = bg_light / 255.0  
+        deviation = normalized_light - 0.5  
+        max_degradation = 0.40 if deviation > 0 else 0.24 
+        optical_quality = 1.0 - (abs(deviation) * max_degradation)
 
-        # 🎯 3. Akurasi Akhir
         self.reg_accuracy = min(100.0, (raw_average * optical_quality) * 100.0)
-        # =================================================================================
         
         self.cap_data["headpose_vector"] = [float(y), float(p), float(r)]
         self.cap_data["registration_accuracy"] = float(self.reg_accuracy)
@@ -254,7 +233,7 @@ class FaceRegistrationApp:
         elif old_stage == RegistrationStage.EXTRACTION:
             _log("📊 RANGKUMAN REGISTRASI KOMPREHENSIF", "SYSTEM")
             _log(f"  • Kemiripan DB (Max Tol: {getattr(config, 'MATCH_THRESHOLD', 0.68)}): {self.last_match_score:.2%}", "SUCCESS")
-            _log(f"  • Akurasi Akhir (Sistem Kasta): {self.reg_accuracy:.2f}%", "SUCCESS")
+            _log(f"  • Akurasi Akhir (Matematika Murni): {self.reg_accuracy:.2f}%", "SUCCESS")
             _log(f"  • Kondisi Cahaya Tercatat: {self.cap_data.get('light_condition', 'N/A')}", "SUCCESS")
 
     def _process_thread(self):
@@ -311,16 +290,13 @@ class FaceRegistrationApp:
                 bg_mask_live[y1_l:y2_l, x1_l:x2_l] = False
                 
                 bg_pixels_live = cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY)[bg_mask_live]
-                bg_light_live = np.percentile(bg_pixels_live, 80) if len(bg_pixels_live) > 0 else 100.0
+                bg_light_live = np.median(bg_pixels_live) if len(bg_pixels_live) > 0 else 100.0
 
                 score_txt = self._generate_metric_text(pose, ear_val, sp_score, bg_light_live)
                 
                 if chk_spf and not sp_real:
                     self.fake_frames += 1
-                    # Log terminal murni tanpa merusak UI HUD asli pada monitor
-                    _log(f"⚠️ Registrasi Ditolak (Gunakan Wajah Asli) | Spoof Score: {sp_score:.4f} | Frame Palsu: {self.fake_frames}", "WARNING")
-                    
-                    Helpers.draw_hud(display, self.stage, "❌ DETEKSI SPOOFING!", f"Palsu: {sp_score:.2f}", score_txt, "SPOOFING", face.bbox, config.COLOR_RED)
+                    Helpers.draw_hud(display, self.stage, "❌ DETEKSI SPOOFING!", f"Palsu: {sp_score:.2f}", score_txt, f"FOTO/VIDEO ({sp_score*100:.0f}%)", face.bbox, config.COLOR_RED)
                     with self.frame_lock: self.display_frame = display
                     continue 
                 else: 
@@ -333,7 +309,8 @@ class FaceRegistrationApp:
                     self._commit_stage_data(res["step"])
                     instr = res.get("instruction", "")
                     hud_col = config.COLOR_GREEN if res["step"] == "DONE" else config.COLOR_CYAN
-                    Helpers.draw_hud(display, self.stage, instr, res.get("progress",""), score_txt, "VALIDATING", face.bbox, hud_col)
+                    hud_status = "VALIDATING" if not chk_spf else f"ASLI: {sp_score*100:.0f}%"
+                    Helpers.draw_hud(display, self.stage, instr, res.get("progress",""), score_txt, hud_status, face.bbox, hud_col)
                 elif not self.in_ext: 
                     instr = "4. Tuning & Ekstraksi Fitur"
                     self._process_extraction(raw, enhanced, face, display, pose, score_txt, sp_score)

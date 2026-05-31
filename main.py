@@ -65,9 +65,7 @@ class SmartDoorApp:
         self.cam = CameraStream(config.CAMERA_INDEX, config.FRAME_WIDTH, config.FRAME_HEIGHT).start()
         self.detector = FaceMeshDetector(min_detection_confidence=0.5, min_tracking_confidence=0.5)
         self.door = DoorLock(pin=getattr(config, 'LOCK_GPIO_PIN', 18), unlock_duration=getattr(config, 'UNLOCK_DURATION', 5))
-        
-        # 🚨 PERBAIKAN: Menurunkan batas Threshold ke 0.65 agar toleran terhadap kamera Raspberry Pi
-        self.matcher = FaceMatcher(threshold=getattr(config, 'MATCH_THRESHOLD', 0.65))
+        self.matcher = FaceMatcher(threshold=getattr(config, 'MATCH_THRESHOLD', 0.82))
         
         self.lock, self.running, self.shared_frame = threading.Lock(), True, None
         self.ui, self.missed_frames = {"wait": True, "bbox": None, "status": "", "color": config.COLOR_WHITE, "instr": ""}, 0
@@ -193,7 +191,20 @@ class SmartDoorApp:
                 self.state, self.auth_start = ValidationState.RECOGNIZING, time.time()
                 return
 
-            emb = self.model.get_embedding(self.model.crop_face(enhanced, face.bbox))
+            # 🚨 PERBAIKAN: SAFE BOUNDING BOX (Mencegah Kamera Mengekstrak Tembok/Noise)
+            bx, by, bw, bh = face.bbox
+            fh, fw = enhanced.shape[:2]
+            x1, y1 = max(0, bx), max(0, by)
+            x2, y2 = min(fw, bx + bw), min(fh, by + bh)
+            safe_bbox = [x1, y1, x2 - x1, y2 - y1]
+
+            raw_emb = self.model.get_embedding(self.model.crop_face(enhanced, safe_bbox))
+            if raw_emb is None: return
+            
+            # 🚨 PERBAIKAN: FLATTEN & L2 NORM MUTLAK (Mengunci Dimensi Vector)
+            emb = np.array(raw_emb, dtype=np.float32).flatten()
+            emb = emb / (np.linalg.norm(emb) + 1e-6)
+
             match = self.matcher.match(emb)
             
             if match.get("matched", False):
@@ -202,9 +213,8 @@ class SmartDoorApp:
                 self.state, self.step_idx, self.wait_center, self.center_hold = ValidationState.CHALLENGE, 0, True, 0
                 UIHelper.log(f"Wajah {self.last_name} Dikenali (Asli: {self.spoof_score*100:.0f}%). Memulai Liveness...", "SUCCESS")
             else: 
-                # 🚨 PERBAIKAN: Menampilkan log debug skor ke terminal jika ditolak agar mudah dianalisa
                 self.print_counter += 1
-                if self.print_counter % 10 == 0:  # Agar terminal tidak spam
+                if self.print_counter % 10 == 0: 
                     UIHelper.log(f"Ditolak: Skor kemiripan hanya {match.get('score', 0.0):.2f}", "WARNING")
                 self.ui.update({"status": "TIDAK DIKENAL", "color": config.COLOR_RED, "instr": ""})
 

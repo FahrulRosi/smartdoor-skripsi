@@ -124,12 +124,12 @@ class FaceRegistrationApp:
         stg, y, p, r = self.stage, pose.get('yaw', 0.0), pose.get('pitch', 0.0), pose.get('roll', 0.0)
         cahaya_txt = f"B: {bg_light:.0f}"
         return {
-            RegistrationStage.FACEMESH: f"Lurus | Y:{y:.1f}° P:{p:.1f}° R:{r:.1f}° | Asli: {sp_score*100:.0f}% | {cahaya_txt}",
-            RegistrationStage.YAW: f"Yaw: {y:.1f}° | Tgt: > ±{getattr(config, 'YAW_THRESHOLD', 25):.0f}° | Asli: {sp_score*100:.0f}% | {cahaya_txt}",
-            RegistrationStage.PITCH: f"Pitch: {p:.1f}° | Tgt: > ±{getattr(config, 'PITCH_THRESHOLD', 20):.0f}° | Asli: {sp_score*100:.0f}% | {cahaya_txt}",
-            RegistrationStage.ROLL: f"Roll: {r:.1f}° | Tgt: > ±{getattr(config, 'ROLL_THRESHOLD', 25):.0f}° | Asli: {sp_score*100:.0f}% | {cahaya_txt}",
-            RegistrationStage.BLINK: f"EAR: {ear_val:.2f} | Deteksi Mata | Asli: {sp_score*100:.0f}% | {cahaya_txt}"
-        }.get(stg, f"Tahan Lurus | Y:{y:.1f}° P:{p:.1f}° R:{r:.1f}° | Asli: {sp_score*100:.0f}% | {cahaya_txt}")
+            RegistrationStage.FACEMESH: f"Lurus | Y:{y:.1f}° P:{p:.1f}° R:{r:.1f}° | Spoof: {sp_score:.2f} | {cahaya_txt}",
+            RegistrationStage.YAW: f"Yaw: {y:.1f}° | Tgt: > ±{getattr(config, 'YAW_THRESHOLD', 25):.0f}° | Spoof: {sp_score:.2f} | {cahaya_txt}",
+            RegistrationStage.PITCH: f"Pitch: {p:.1f}° | Tgt: > ±{getattr(config, 'PITCH_THRESHOLD', 20):.0f}° | Spoof: {sp_score:.2f} | {cahaya_txt}",
+            RegistrationStage.ROLL: f"Roll: {r:.1f}° | Tgt: > ±{getattr(config, 'ROLL_THRESHOLD', 25):.0f}° | Spoof: {sp_score:.2f} | {cahaya_txt}",
+            RegistrationStage.BLINK: f"EAR: {ear_val:.2f} | Deteksi Mata | Spoof: {sp_score:.2f} | {cahaya_txt}"
+        }.get(stg, f"Tahan Lurus | Y:{y:.1f}° P:{p:.1f}° R:{r:.1f}° | Spoof: {sp_score:.2f} | {cahaya_txt}")
 
     def _commit_stage_data(self, cur_step):
         if cur_step in ("WAIT", self._prev_step): return
@@ -173,13 +173,12 @@ class FaceRegistrationApp:
             self.ext_embs.append(emb_norm)
         
         if len(self.ext_embs) < 3:
-            Helpers.draw_hud(display, self.stage, "Tahan Posisi...", f"Tuning Vektor ({len(self.ext_embs)}/3)", score_txt, f"TUNING (Asli: {sp_score*100:.0f}%)", face.bbox, config.COLOR_CYAN); return
+            Helpers.draw_hud(display, self.stage, "Tahan Posisi...", f"Tuning Vektor ({len(self.ext_embs)}/3)", score_txt, f"TUNING (Spoof: {sp_score:.2f})", face.bbox, config.COLOR_CYAN); return
 
         self.in_ext = True
         avg_emb = np.mean(self.ext_embs, axis=0)
         avg_emb = avg_emb / (np.linalg.norm(avg_emb) + 1e-6) 
         
-        # 🚨 PERBAIKAN: Gaussian Blur + Percentile 85
         gray = cv2.cvtColor(raw_frame, cv2.COLOR_BGR2GRAY)
         gray_blur = cv2.GaussianBlur(gray, (15, 15), 0)
         
@@ -216,6 +215,8 @@ class FaceRegistrationApp:
             msg_sub = f"User: {match['name']} ({match['score']:.2f}) | Akurasi: {self.reg_accuracy:.2f}% | Kecerahan: {light_cond}"
             Helpers.show_msg(display, "❌ WAJAH SUDAH TERDAFTAR!", msg_sub, config.COLOR_RED)
             _log(f"GAGAL: Terdeteksi duplikat dgn {match['name']} (Sim: {match['score']:.2f}) | Akurasi: {self.reg_accuracy:.2f}% | Kondisi: {light_cond}", "ERROR")
+            if hasattr(self.db, 'log_register_async'):
+                self.db.log_register_async(self.name, "FAILED", self.reg_accuracy, f"Duplikat dengan {match['name']}")
         elif self.db.save_face(self.name, avg_emb, self.cap_data): 
             Helpers.show_msg(display, "✅ REGISTRASI BERHASIL!", f"User Baru: {self.name} | Akurasi: {self.reg_accuracy:.2f}% | Kecerahan: {light_cond}", config.COLOR_GREEN)
             _log(f"SUKSES: {self.name} | Akurasi: {self.reg_accuracy:.2f}% | Kondisi: {light_cond}", "SUCCESS")
@@ -291,7 +292,6 @@ class FaceRegistrationApp:
                 x1_l, y1_l, x2_l, y2_l = max(0, bx), max(0, by), min(fw_l, bx+bw), min(fh_l, by+bh)
                 bg_mask_live[y1_l:y2_l, x1_l:x2_l] = False
                 
-                # 🚨 PERBAIKAN: Gaussian Blur + Percentile 85 (Live HUD)
                 gray_live = cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY)
                 gray_blur_live = cv2.GaussianBlur(gray_live, (15, 15), 0)
                 bg_pixels_live = gray_blur_live[bg_mask_live]
@@ -301,7 +301,7 @@ class FaceRegistrationApp:
                 
                 if chk_spf and not sp_real:
                     self.fake_frames += 1
-                    Helpers.draw_hud(display, self.stage, "❌ DETEKSI SPOOFING!", f"Palsu: {sp_score:.2f}", score_txt, f"FOTO/VIDEO ({sp_score*100:.0f}%)", face.bbox, config.COLOR_RED)
+                    Helpers.draw_hud(display, self.stage, "❌ DETEKSI SPOOFING!", f"Palsu: {sp_score:.2f}", score_txt, f"FOTO/VIDEO (Spoof: {sp_score:.2f})", face.bbox, config.COLOR_RED)
                     with self.frame_lock: self.display_frame = display
                     continue 
                 else: 
@@ -314,7 +314,7 @@ class FaceRegistrationApp:
                     self._commit_stage_data(res["step"])
                     instr = res.get("instruction", "")
                     hud_col = config.COLOR_GREEN if res["step"] == "DONE" else config.COLOR_CYAN
-                    hud_status = "VALIDATING" if not chk_spf else f"ASLI: {sp_score*100:.0f}%"
+                    hud_status = "VALIDATING" if not chk_spf else f"Spoof: {sp_score:.2f}"
                     Helpers.draw_hud(display, self.stage, instr, res.get("progress",""), score_txt, hud_status, face.bbox, hud_col)
                 elif not self.in_ext: 
                     instr = "4. Tuning & Ekstraksi Fitur"

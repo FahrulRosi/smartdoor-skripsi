@@ -97,52 +97,95 @@ class CloudStorage:
                 print("[Supabase] Terhubung ke Cloud Database PostgreSQL.")
             except Exception as e: print(f"[Supabase WARNING] Gagal inisialisasi: {e}")
 
-    # Fungsi get_user_id & create_dummy_user DIMATIKAN untuk menghindari error tabel users_profile
-    # def get_user_id(self, username):
-    #     ...
-    # def create_dummy_user(self, username):
-    #     ...
-
-    def sync_register(self, name, payload):
+    def sync_register(self, name, payload, accuracy, light_cond):
         if not self.is_connected: return
         try:
-            # BLOK AUTO-CREATE DIMATIKAN
-            # user_id = self.get_user_id(name)
-            # if not user_id:
-            #     print(f"[Supabase] Username '{name}' belum ada. Membuatkan profil Web otomatis...")
-            #     user_id = self.create_dummy_user(name)
-            #     if not user_id: return
-            
             db_payload = {
-                # Menggunakan username sebagai pengenal utama langsung ke tabel register
-                "username": name, 
-                "face_embedding": payload["embedding"],
+                "name": name,
+                "embedding": payload["embedding"],
                 "liveness_config": payload["liveness_config"],
-                "registered_at": payload["registered_at"]
+                "registration_accuracy": float(accuracy),
+                "light_condition": light_cond,
+                "created_at": payload["registered_at"]
             }
-            self.client.table("register").upsert(db_payload).execute()
-            print(f"[Supabase] Vektor wajah '{name}' berhasil disinkronkan ke Cloud!")
-        except Exception as e: print(f"[Cloud Error] Gagal sinkronisasi vektor: {e}")
+            self.client.table("registered_faces").upsert(db_payload, on_conflict="name").execute()
+            print(f"\n[Supabase] ✅ Data wajah '{name}' berhasil disimpan ke Cloud!")
+        except Exception as e: print(f"\n[Cloud Error] Gagal sinkronisasi vektor: {e}")
 
-    def push_access_log(self, user_name, status, score):
+    def push_register_log(self, name, status, accuracy, light_cond, message, liveness_scores=None):
         if not self.is_connected: return
         try:
-            # BLOK PENCARIAN ID DIMATIKAN
-            # user_id = self.get_user_id(user_name)
-            # if not user_id: return
-            
-            log_data = {
-                "username": user_name, # Mengirim username langsung
-                "status": status,
-                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            data = {
+                "name": name, 
+                "status": status, 
+                "message": message
             }
-            if score is not None: log_data["liveness_score"] = float(score)
-            self.client.table("access_logs").insert(log_data).execute()
+            if liveness_scores:
+                data["yaw_score"] = liveness_scores.get("yaw", "")
+                data["pitch_score"] = liveness_scores.get("pitch", "")
+                data["roll_score"] = liveness_scores.get("roll", "")
+                data["blink_score"] = liveness_scores.get("blink", "")
+            
+            # Akurasi dan Cahaya di urutan terakhir JSON payload
+            data["accuracy"] = float(accuracy)
+            data["light_condition"] = light_cond
+
+            self.client.table("register_logs").insert(data).execute()
+            print(f"\n[Supabase] 📝 Log Registrasi '{name}' ({status}) tersimpan ke Cloud!")
+        except Exception: pass
+
+    def push_access_log(self, user_name, status, accuracy, light_cond, access_details=None):
+        if not self.is_connected: return
+        try:
+            yaw_str = ""
+            pitch_str = ""
+            roll_str = ""
+            blink_str = ""
+
+            if access_details:
+                for detail in access_details:
+                    nama_tantangan = detail.get("tantangan", "").lower()
+                    info = f"{detail.get('tantangan')}: {float(detail.get('skor_asli', 0)):.2f} (Tgt: {float(detail.get('target', 0)):.2f}, Lat: {float(detail.get('latensi_ms', 0)):.0f}ms)"
+                    
+                    if "toleh" in nama_tantangan:
+                        yaw_str += info + " | "
+                    elif "dongak" in nama_tantangan or "tunduk" in nama_tantangan:
+                        pitch_str += info + " | "
+                    elif "miring" in nama_tantangan:
+                        roll_str += info + " | "
+                    elif "kedip" in nama_tantangan or "mata" in nama_tantangan:
+                        blink_str += info + " | "
+
+            data = {
+                "name": user_name, 
+                "status": status, 
+                "yaw_score": yaw_str.strip(" | "),       
+                "pitch_score": pitch_str.strip(" | "), 
+                "roll_score": roll_str.strip(" | "),  
+                "blink_score": blink_str.strip(" | "),
+                # Akurasi dan Cahaya di urutan terakhir JSON payload
+                "accuracy": float(accuracy), 
+                "light_condition": light_cond
+            }
+            
+            self.client.table("access_logs").insert(data).execute()
+            print(f"\n[Supabase] 📝 Log Akses Pintu '{user_name}' beserta detail skor liveness tersimpan ke Cloud!")
+            
+        except Exception as e: 
+            print(f"\n[Supabase Error] Gagal merekam log akses pintu: {e}")
+
+    def push_spoofing_log(self, score, message):
+        if not self.is_connected: return
+        try:
+            self.client.table("spoofing_logs").insert({
+                "spoof_score": float(score), "message": message
+            }).execute()
+            print(f"\n[Supabase] 🚨 Peringatan Spoofing (Skor: {score:.2f}) tersimpan ke Cloud!")
         except Exception: pass
 
     def fetch_all_registered_users(self):
         if not self.is_connected: return None
-        try: return self.client.table("register").select("*").execute().data
+        try: return self.client.table("registered_faces").select("*").execute().data
         except Exception: return None
 
 # ==============================================================================
@@ -156,37 +199,79 @@ class FaceDatabase:
     def check_user_exists(self, name):
         return self.local.exists(name)
 
-    def save_face(self, name, embedding, liveness_data):
+    def save_face(self, name, embedding, cap_data):
         try:
-            payload = DataTransformer.prepare_payload(name, embedding, liveness_data)
+            payload = DataTransformer.prepare_payload(name, embedding, cap_data)
             self.local.save_user(name, payload)
+            accuracy = cap_data.get("registration_accuracy", 0.0)
+            light_cond = cap_data.get("light_condition", "N/A")
+            
             if self.cloud.is_connected:
-                t = threading.Thread(target=self.cloud.sync_register, args=(name, payload))
-                t.daemon = True; t.start()
+                threading.Thread(target=self.cloud.sync_register, args=(name, payload, accuracy, light_cond), daemon=True).start()
+                
+                hp = payload["liveness_config"]["headpose"]
+                ear_o = payload["liveness_config"]["blink_open"]
+                ear_c = payload["liveness_config"]["blink_closed"]
+                
+                liveness_scores = {
+                    "yaw": f"L:{hp['yaw_left']:.1f}° R:{hp['yaw_right']:.1f}°",
+                    "pitch": f"U:{hp['pitch_up']:.1f}° D:{hp['pitch_down']:.1f}°",
+                    "roll": f"L:{hp['roll_left']:.1f}° R:{hp['roll_right']:.1f}°",
+                    "blink": f"Buka:{ear_o:.2f} Kedip:{ear_c:.2f}"
+                }
+                
+                msg = "Berhasil didaftarkan"
+                threading.Thread(target=self.cloud.push_register_log, args=(name, "SUCCESS", accuracy, light_cond, msg, liveness_scores), daemon=True).start()
             return True
-        except Exception: traceback.print_exc(); return False
+        except Exception: 
+            traceback.print_exc()
+            if self.cloud.is_connected:
+                threading.Thread(target=self.cloud.push_register_log, args=(name, "FAILED", 0.0, "N/A", "Sistem error saat menyimpan ke memori"), daemon=True).start()
+            return False
 
     def load_all_faces(self, silent=False):
         faces = self.local.load_all()
-
         if not faces and self.cloud.is_connected:
             if not silent: print("[Hybrid Sync] Memori lokal kosong. Menarik data vektor dari Supabase...")
             cloud_data = self.cloud.fetch_all_registered_users()
             if cloud_data:
                 faces = {
-                    row["username"]: {
-                        "name": row["username"],
-                        "embedding": row["face_embedding"],
-                        "liveness_config": row["liveness_config"],
-                        "registered_at": row["registered_at"]
+                    row["name"]: {
+                        "name": row["name"],
+                        "embedding": row["embedding"],
+                        "liveness_config": row.get("liveness_config", {}),
+                        "registered_at": row.get("created_at", "")
                     } for row in cloud_data
                 }
                 self.local.overwrite_all(faces)
                 if not silent: print(f"[Hybrid Sync] Berhasil memulihkan {len(faces)} identitas wajah.")
-
         return faces
 
-    def push_access_log_async(self, user_name, status="UNLOCKED", score=None):
+    def log_register_async(self, name, status, accuracy, message, light_cond="N/A", cap_data=None):
         if self.cloud.is_connected:
-            t = threading.Thread(target=self.cloud.push_access_log, args=(user_name, status, score))
-            t.daemon = True; t.start()
+            liveness_scores = None
+            if cap_data:
+                try:
+                    payload = DataTransformer.prepare_payload(name, np.zeros(128), cap_data)
+                    hp = payload["liveness_config"]["headpose"]
+                    ear_o = payload["liveness_config"]["blink_open"]
+                    ear_c = payload["liveness_config"]["blink_closed"]
+                    light_cond = cap_data.get("light_condition", light_cond)
+                    
+                    liveness_scores = {
+                        "yaw": f"L:{hp['yaw_left']:.1f}° R:{hp['yaw_right']:.1f}°",
+                        "pitch": f"U:{hp['pitch_up']:.1f}° D:{hp['pitch_down']:.1f}°",
+                        "roll": f"L:{hp['roll_left']:.1f}° R:{hp['roll_right']:.1f}°",
+                        "blink": f"Buka:{ear_o:.2f} Kedip:{ear_c:.2f}"
+                    }
+                except Exception: pass
+
+            threading.Thread(target=self.cloud.push_register_log, args=(name, status, accuracy, light_cond, message, liveness_scores), daemon=True).start()
+
+    def push_access_log_async(self, user_name, status, accuracy, light_cond="N/A", access_details=None):
+        if self.cloud.is_connected:
+            threading.Thread(target=self.cloud.push_access_log, args=(user_name, status, accuracy, light_cond, access_details), daemon=True).start()
+
+    def log_spoofing_async(self, score, message):
+        if self.cloud.is_connected:
+            threading.Thread(target=self.cloud.push_spoofing_log, args=(score, message), daemon=True).start()

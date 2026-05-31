@@ -65,11 +65,12 @@ class SmartDoorApp:
         self.cam = CameraStream(config.CAMERA_INDEX, config.FRAME_WIDTH, config.FRAME_HEIGHT).start()
         self.detector = FaceMeshDetector(min_detection_confidence=0.5, min_tracking_confidence=0.5)
         self.door = DoorLock(pin=getattr(config, 'LOCK_GPIO_PIN', 18), unlock_duration=getattr(config, 'UNLOCK_DURATION', 5))
-        self.matcher = FaceMatcher(threshold=getattr(config, 'MATCH_THRESHOLD', 0.82))
+        self.matcher = FaceMatcher(threshold=getattr(config, 'MATCH_THRESHOLD', 0.65))
         
         self.lock, self.running, self.shared_frame = threading.Lock(), True, None
         self.ui, self.missed_frames = {"wait": True, "bbox": None, "status": "", "color": config.COLOR_WHITE, "instr": ""}, 0
         
+        self.spoof_score = 1.0  
         self._setup_button() 
         self._reset_state()
         self.fake_frames = 0
@@ -108,7 +109,6 @@ class SmartDoorApp:
         self.state, self.last_name, self.match_score, self.auth_start = ValidationState.IDLE, "", 0.0, 0.0
         self.seq, self.step_idx, self.reg_pose, self.pose_hold, self.prev_center = [], 0, [0.0, 0.0, 0.0], 0, None
         self.wait_center, self.center_hold, self.blink_passed, self.blink_hold, self.ear_hist, self.print_counter = False, 0, False, 0, [], 0
-        self.spoof_score = 0.98
 
     def _check_action(self, action, face):
         if action == "BLINK": 
@@ -172,26 +172,29 @@ class SmartDoorApp:
             self.fake_frames = 0 
             return self.ui.update({"status": "TERLALU DEKAT", "color": config.COLOR_YELLOW, "instr": "Mundur sedikit"})
         
+        sp = self.anti_spoof.is_real(raw, face.bbox)
+        self.spoof_score = sp.get("score", 1.0)
+        
+        if not sp.get("real", True):
+            self.fake_frames += 1 
+            # 🚨 PENGHAPUSAN TEKS GANDA: Menghilangkan log sementara, hanya cetak log akhir
+            if self.fake_frames == 7: 
+                current_spoof = self.spoof_score 
+                self._reset_state()
+                self.spoof_score = current_spoof
+                UIHelper.log(f"⚠️ Serangan Spoofing Terdeteksi! Pintu Tetap Terkunci. (Spoofing: {self.spoof_score:.2f})", "WARNING")
+            
+            if self.fake_frames >= 7:
+                self.ui.update({"status": f"FOTO/VIDEO (Spoof: {self.spoof_score:.2f})", "color": config.COLOR_RED, "instr": ""})
+            return
+        
+        self.fake_frames = 0
+        
         if self.state in (ValidationState.IDLE, ValidationState.RECOGNIZING):
-            sp = self.anti_spoof.is_real(raw, face.bbox)
-            self.spoof_score = sp.get("score", 1.0)
-            
-            if not sp.get("real", True):
-                self.fake_frames += 1 
-                if self.fake_frames == 7: 
-                    self._reset_state()
-                    UIHelper.log(f"⚠️ Serangan Spoofing Terdeteksi! Pintu Tetap Terkunci. (Asli: {self.spoof_score*100:.0f}%)", "WARNING")
-                
-                if self.fake_frames >= 7:
-                    self.ui.update({"status": f"FOTO/VIDEO ({self.spoof_score*100:.0f}%)", "color": config.COLOR_RED, "instr": ""})
-                return
-            
-            self.fake_frames = 0
             if self.state == ValidationState.IDLE: 
                 self.state, self.auth_start = ValidationState.RECOGNIZING, time.time()
                 return
 
-            # 🚨 PERBAIKAN: SAFE BOUNDING BOX (Mencegah Kamera Mengekstrak Tembok/Noise)
             bx, by, bw, bh = face.bbox
             fh, fw = enhanced.shape[:2]
             x1, y1 = max(0, bx), max(0, by)
@@ -201,7 +204,6 @@ class SmartDoorApp:
             raw_emb = self.model.get_embedding(self.model.crop_face(enhanced, safe_bbox))
             if raw_emb is None: return
             
-            # 🚨 PERBAIKAN: FLATTEN & L2 NORM MUTLAK (Mengunci Dimensi Vector)
             emb = np.array(raw_emb, dtype=np.float32).flatten()
             emb = emb / (np.linalg.norm(emb) + 1e-6)
 
@@ -211,11 +213,12 @@ class SmartDoorApp:
                 self.last_name, self.match_score = match["name"], match.get("score", 0.0)
                 self.seq = [random.choice([k for k in self.CHALLENGES if k != "BLINK"]), "BLINK"]
                 self.state, self.step_idx, self.wait_center, self.center_hold = ValidationState.CHALLENGE, 0, True, 0
-                UIHelper.log(f"Wajah {self.last_name} Dikenali (Asli: {self.spoof_score*100:.0f}%). Memulai Liveness...", "SUCCESS")
+                UIHelper.log(f"Wajah {self.last_name} Dikenali. Memulai Liveness...", "SUCCESS")
             else: 
+                # 🚨 PENGHAPUSAN TEKS GANDA: Menghilangkan log sementara, hanya cetak log 1 kali per beberapa detik
                 self.print_counter += 1
-                if self.print_counter % 10 == 0: 
-                    UIHelper.log(f"Ditolak: Skor kemiripan hanya {match.get('score', 0.0):.2f}", "WARNING")
+                if self.print_counter % 20 == 0:
+                    UIHelper.log(f"Wajah TIDAK DIKENAL (Spoofing: {self.spoof_score:.2f})", "WARNING")
                 self.ui.update({"status": "TIDAK DIKENAL", "color": config.COLOR_RED, "instr": ""})
 
         elif self.state == ValidationState.CHALLENGE:
@@ -227,15 +230,15 @@ class SmartDoorApp:
                     self.reg_pose = [curr.get(k, 0) for k in ("yaw", "pitch", "roll")]
                     self.dyn_blink_thr = getattr(config, 'BLINK_EAR_THRESHOLD', 0.21)
                 else:
-                    return self.ui.update({"status": f"{self.last_name} (Asli: {self.spoof_score*100:.0f}%)", "color": config.COLOR_CYAN, "instr": "Tatap LURUS ke kamera dulu..."})
+                    return self.ui.update({"status": f"{self.last_name}", "color": config.COLOR_CYAN, "instr": "Tatap LURUS ke kamera dulu..."})
                 
             act, inst = self.seq[self.step_idx], self.CHALLENGES[self.seq[self.step_idx]]
-            self.ui.update({"status": f"{self.last_name} (Asli: {self.spoof_score*100:.0f}%)", "color": config.COLOR_CYAN, "instr": f"Tahap {self.step_idx+1}/{len(self.seq)}: {inst}"})
+            self.ui.update({"status": f"{self.last_name}", "color": config.COLOR_CYAN, "instr": f"Tahap {self.step_idx+1}/{len(self.seq)}: {inst}"})
             passed, val, tgt = self._check_action(act, face)
             
             self.print_counter += 1
             if self.print_counter % 3 == 0: 
-                print(f"\r[{inst}] {'EAR Mata' if act=='BLINK' else 'Sudut'}: {val:.2f}{'' if act=='BLINK' else '°'} | Target: {tgt:.2f} | Asli: {self.spoof_score*100:.0f}% | Lat: {getattr(self, 'latency', 0):.1f}ms   ", end="", flush=True)
+                print(f"\r[{inst}] {'EAR Mata' if act=='BLINK' else 'Sudut'}: {val:.2f}{'' if act=='BLINK' else '°'} | Target: {tgt:.2f} | Lat: {getattr(self, 'latency', 0):.1f}ms   ", end="", flush=True)
 
             if passed:
                 print(); UIHelper.log(f"✅ {inst} SELESAI", "SUCCESS")
@@ -259,11 +262,12 @@ class SmartDoorApp:
         gray = cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY)
         x, y, w, h = max(0, bbox[0]), max(0, bbox[1]), min(gray.shape[1], bbox[0]+bbox[2]), min(gray.shape[0], bbox[1]+bbox[3])
         
+        gray_blur = cv2.GaussianBlur(gray, (15, 15), 0)
         bg_mask = np.ones(gray.shape, dtype=bool)
         bg_mask[y:y+h, x:x+w] = False
-        bg_pixels = gray[bg_mask]
+        bg_pixels = gray_blur[bg_mask]
         
-        bg_light = np.median(bg_pixels) if len(bg_pixels) > 0 else 100.0
+        bg_light = np.percentile(bg_pixels, 85) if len(bg_pixels) > 0 else 100.0
 
         if bg_light > 160.0: light_cond = f"Backlight (B: {bg_light:.0f})"
         elif bg_light < 80.0: light_cond = f"Low Light (B: {bg_light:.0f})"

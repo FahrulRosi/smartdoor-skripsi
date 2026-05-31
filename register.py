@@ -159,7 +159,6 @@ class FaceRegistrationApp:
         missing = [k for k, v in [("FaceMesh", self.cap_data["facemesh_vector"] is not None), ("Yaw", len(self.cap_data["yaw_snapshots"])>1), ("Pitch", len(self.cap_data["pitch_snapshots"])>1), ("Roll", len(self.cap_data["roll_snapshots"])>1), ("Blink", self.cap_data["blink_closed"] is not None)] if not v]
         if missing: Helpers.show_msg(display, "❌ GAGAL!", f"Kurang: {','.join(missing)}", config.COLOR_RED); time.sleep(4); self.stage = RegistrationStage.COMPLETE; return
 
-        # 🚨 PERBAIKAN: SAFE BOUNDING BOX (Mencegah Kamera Mengekstrak Tembok/Noise)
         bx, by, bw, bh = face.bbox
         fh, fw = frame.shape[:2]
         x1, y1 = max(0, bx), max(0, by)
@@ -168,10 +167,8 @@ class FaceRegistrationApp:
 
         raw_emb = self.model.get_embedding(self.model.crop_face(frame, safe_bbox))
         
-        # 🚨 PERBAIKAN: FLATTEN MUTLAK (Mencegah Kerusakan Dimensi JSON/ARM)
         if raw_emb is not None:
             emb_flat = np.array(raw_emb, dtype=np.float32).flatten()
-            # L2 Normalization Mutlak
             emb_norm = emb_flat / (np.linalg.norm(emb_flat) + 1e-6)
             self.ext_embs.append(emb_norm)
         
@@ -180,13 +177,16 @@ class FaceRegistrationApp:
 
         self.in_ext = True
         avg_emb = np.mean(self.ext_embs, axis=0)
-        avg_emb = avg_emb / (np.linalg.norm(avg_emb) + 1e-6) # L2 Norm Mutlak Akhir
+        avg_emb = avg_emb / (np.linalg.norm(avg_emb) + 1e-6) 
         
+        # 🚨 PERBAIKAN: Gaussian Blur + Percentile 85
         gray = cv2.cvtColor(raw_frame, cv2.COLOR_BGR2GRAY)
-        bg_mask = np.ones(gray.shape, dtype=bool); bg_mask[y1:y2, x1:x2] = False
-        bg_pixels = gray[bg_mask]
+        gray_blur = cv2.GaussianBlur(gray, (15, 15), 0)
         
-        bg_light = np.median(bg_pixels) if len(bg_pixels) > 0 else 100.0
+        bg_mask = np.ones(gray.shape, dtype=bool); bg_mask[y1:y2, x1:x2] = False
+        bg_pixels = gray_blur[bg_mask]
+        
+        bg_light = np.percentile(bg_pixels, 85) if len(bg_pixels) > 0 else 100.0
         
         if bg_light > 160.0: light_cond = f"Backlight (B:{bg_light:>3.0f})"
         elif bg_light < 80.0: light_cond = f"Low Light (B:{bg_light:>3.0f})"
@@ -291,8 +291,11 @@ class FaceRegistrationApp:
                 x1_l, y1_l, x2_l, y2_l = max(0, bx), max(0, by), min(fw_l, bx+bw), min(fh_l, by+bh)
                 bg_mask_live[y1_l:y2_l, x1_l:x2_l] = False
                 
-                bg_pixels_live = cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY)[bg_mask_live]
-                bg_light_live = np.median(bg_pixels_live) if len(bg_pixels_live) > 0 else 100.0
+                # 🚨 PERBAIKAN: Gaussian Blur + Percentile 85 (Live HUD)
+                gray_live = cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY)
+                gray_blur_live = cv2.GaussianBlur(gray_live, (15, 15), 0)
+                bg_pixels_live = gray_blur_live[bg_mask_live]
+                bg_light_live = np.percentile(bg_pixels_live, 85) if len(bg_pixels_live) > 0 else 100.0
 
                 score_txt = self._generate_metric_text(pose, ear_val, sp_score, bg_light_live)
                 

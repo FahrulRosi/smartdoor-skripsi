@@ -65,14 +65,16 @@ class SmartDoorApp:
         self.cam = CameraStream(config.CAMERA_INDEX, config.FRAME_WIDTH, config.FRAME_HEIGHT).start()
         self.detector = FaceMeshDetector(min_detection_confidence=0.5, min_tracking_confidence=0.5)
         self.door = DoorLock(pin=getattr(config, 'LOCK_GPIO_PIN', 18), unlock_duration=getattr(config, 'UNLOCK_DURATION', 5))
-        self.matcher = FaceMatcher(threshold=getattr(config, 'MATCH_THRESHOLD', 0.82))
+        
+        # 🚨 PERBAIKAN: Menurunkan batas Threshold ke 0.65 agar toleran terhadap kamera Raspberry Pi
+        self.matcher = FaceMatcher(threshold=getattr(config, 'MATCH_THRESHOLD', 0.65))
         
         self.lock, self.running, self.shared_frame = threading.Lock(), True, None
         self.ui, self.missed_frames = {"wait": True, "bbox": None, "status": "", "color": config.COLOR_WHITE, "instr": ""}, 0
         
         self._setup_button() 
         self._reset_state()
-        self.fake_frames = 0  # Inisialisasi awal
+        self.fake_frames = 0
         self._load_memory()
         threading.Thread(target=self._ai_worker, daemon=True).start()
 
@@ -102,7 +104,6 @@ class SmartDoorApp:
         except Exception as e: UIHelper.log(f"Gagal muat: {e}", "WARNING")
 
     def _reset_state(self):
-        # 🚨 ANTI-SPAM LOCK: Hanya jalankan kunci kalau pintu memang sedang tidak terkunci
         if hasattr(self, 'door') and not getattr(self.door, 'locked', True):
             self.door.lock()
 
@@ -110,7 +111,6 @@ class SmartDoorApp:
         self.seq, self.step_idx, self.reg_pose, self.pose_hold, self.prev_center = [], 0, [0.0, 0.0, 0.0], 0, None
         self.wait_center, self.center_hold, self.blink_passed, self.blink_hold, self.ear_hist, self.print_counter = False, 0, False, 0, [], 0
         self.spoof_score = 0.98
-        # self.fake_frames DIHAPUS dari sini agar tidak reset berulang kali saat foto tertahan
 
     def _check_action(self, action, face):
         if action == "BLINK": 
@@ -149,7 +149,7 @@ class SmartDoorApp:
                 self.missed_frames += 1 
                 if self.missed_frames >= 5: 
                     self._reset_state()
-                    self.fake_frames = 0 # 🚨 Reset fake_frames secara manual saat tidak ada orang
+                    self.fake_frames = 0 
                     self.ui.update({"wait": True, "bbox": None, "status": "", "instr": ""})
             else: 
                 self.missed_frames = 0
@@ -165,13 +165,13 @@ class SmartDoorApp:
         
         if self.state.value > 1 and self.prev_center and np.hypot(cx - self.prev_center[0], cy - self.prev_center[1]) > max(w, h) * 0.40: 
             self._reset_state()
-            self.fake_frames = 0 # Reset saat wajah berganti
+            self.fake_frames = 0 
             return self.ui.update({"status": "WAJAH BERGANTI", "color": config.COLOR_RED, "instr": "Mulai Ulang"})
         self.prev_center = (cx, cy) 
 
         if h > int(config.FRAME_HEIGHT * 0.50): 
             self._reset_state()
-            self.fake_frames = 0 # Reset saat terlalu dekat
+            self.fake_frames = 0 
             return self.ui.update({"status": "TERLALU DEKAT", "color": config.COLOR_YELLOW, "instr": "Mundur sedikit"})
         
         if self.state in (ValidationState.IDLE, ValidationState.RECOGNIZING):
@@ -180,12 +180,10 @@ class SmartDoorApp:
             
             if not sp.get("real", True):
                 self.fake_frames += 1 
-                # 🚨 ANTI-SPAM SPOOFING: Hanya catat log terminal TEPAT di frame ke-7
                 if self.fake_frames == 7: 
                     self._reset_state()
                     UIHelper.log(f"⚠️ Serangan Spoofing Terdeteksi! Pintu Tetap Terkunci. (Asli: {self.spoof_score*100:.0f}%)", "WARNING")
                 
-                # Jika sudah di atas 7, hanya update HUD layar tanpa mengirim spam ke terminal
                 if self.fake_frames >= 7:
                     self.ui.update({"status": f"FOTO/VIDEO ({self.spoof_score*100:.0f}%)", "color": config.COLOR_RED, "instr": ""})
                 return
@@ -196,12 +194,18 @@ class SmartDoorApp:
                 return
 
             emb = self.model.get_embedding(self.model.crop_face(enhanced, face.bbox))
-            if (match := self.matcher.match(emb)).get("matched", False):
+            match = self.matcher.match(emb)
+            
+            if match.get("matched", False):
                 self.last_name, self.match_score = match["name"], match.get("score", 0.0)
                 self.seq = [random.choice([k for k in self.CHALLENGES if k != "BLINK"]), "BLINK"]
                 self.state, self.step_idx, self.wait_center, self.center_hold = ValidationState.CHALLENGE, 0, True, 0
                 UIHelper.log(f"Wajah {self.last_name} Dikenali (Asli: {self.spoof_score*100:.0f}%). Memulai Liveness...", "SUCCESS")
             else: 
+                # 🚨 PERBAIKAN: Menampilkan log debug skor ke terminal jika ditolak agar mudah dianalisa
+                self.print_counter += 1
+                if self.print_counter % 10 == 0:  # Agar terminal tidak spam
+                    UIHelper.log(f"Ditolak: Skor kemiripan hanya {match.get('score', 0.0):.2f}", "WARNING")
                 self.ui.update({"status": "TIDAK DIKENAL", "color": config.COLOR_RED, "instr": ""})
 
         elif self.state == ValidationState.CHALLENGE:

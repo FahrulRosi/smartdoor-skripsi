@@ -1,6 +1,5 @@
 import os, json, time, threading, traceback, numpy as np
-# Tambahkan import ClientOptions untuk mengatur timeout bawaan SDK Supabase
-from supabase import create_client, Client, ClientOptions
+from supabase import create_client, Client
 import config
 
 # ==============================================================================
@@ -74,20 +73,17 @@ class LocalStorage:
         with self.lock: self._write(data_dict)
 
 # ==============================================================================
-# 3. CLOUD STORAGE (PERBAIKAN UTAMA DI SINI)
+# 3. CLOUD STORAGE
 # ==============================================================================
 class CloudStorage:
     def __init__(self):
         self.url, self.key, self.is_connected = getattr(config, "SUPABASE_URL", ""), getattr(config, "SUPABASE_KEY", ""), False
         if self.url and self.key:
             try:
-                # PERBAIKAN 1: Set opsi timeout HTTP client ke 10 detik agar tidak hang selamanya
-                opts = ClientOptions(postgrest_client_timeout=10)
-                self.client: Client = create_client(self.url, self.key, options=opts)
+                self.client: Client = create_client(self.url, self.key)
                 self.is_connected = True
                 print("[Supabase] Terhubung ke Cloud Database PostgreSQL.")
-            except Exception as e: 
-                print(f"[Supabase WARNING] Gagal inisialisasi: {e}")
+            except Exception as e: print(f"[Supabase WARNING] Gagal inisialisasi: {e}")
 
     def sync_register(self, name, payload, accuracy, light_cond):
         if not self.is_connected: return
@@ -110,6 +106,7 @@ class CloudStorage:
                 data["roll_score"] = liveness_scores.get("roll", "")
                 data["blink_score"] = liveness_scores.get("blink", "")
             
+            # Taruh di belakang sesuai urutan tabel
             data["accuracy"] = float(accuracy)
             data["light_condition"] = light_cond
 
@@ -147,30 +144,10 @@ class CloudStorage:
             print(f"\n[Supabase] 🚨 Peringatan Spoofing (Skor: {score:.2f}) tersimpan ke Cloud!")
         except Exception: pass
 
-    # PERBAIKAN 2: Bungkus fungsi kueri dengan Thread Timeout Wrapper
     def fetch_all_registered_users(self):
         if not self.is_connected: return None
-        
-        container = []
-        def target_worker():
-            try:
-                res = self.client.table("registered_faces").select("*").execute()
-                container.append(res.data)
-            except Exception as e:
-                print(f"\n[Supabase Error] Gagal fetch data dari cloud: {e}")
-                container.append(None)
-
-        # Jalankan penarikan data pada thread terpisah
-        fetch_thread = threading.Thread(target=target_worker, daemon=True)
-        fetch_thread.start()
-        fetch_thread.join(timeout=10.0) # Maksimal toleransi tunggu hanya 10 detik
-
-        if fetch_thread.is_alive():
-            print("\n[Supabase WARNING] Request Timeout! Server Supabase tidak merespons dalam 10 detik.")
-            print("[Supabase] Mengabaikan sinkronisasi cloud demi mencegah program macet total.")
-            return None
-
-        return container[0] if container else None
+        try: return self.client.table("registered_faces").select("*").execute().data
+        except Exception: return None
 
 # ==============================================================================
 # 4. MAIN FACADE

@@ -23,8 +23,9 @@ class DoorLock:
         if GPIO_AVAILABLE:
             GPIO.setmode(GPIO.BCM)
             GPIO.setup(self.pin, GPIO.OUT)
-            GPIO.output(self.pin, GPIO.HIGH)   # HIGH = locked (relay NC)
-            print(f"[DoorLock] GPIO ready on pin {self.pin}.")
+            # 🚨 PERBAIKAN: Set ke LOW agar selenoid TETAP TERKUNCI saat program baru dinyalakan
+            GPIO.output(self.pin, GPIO.LOW)   
+            print(f"[DoorLock] GPIO ready on pin {self.pin}. Status awal: TERKUNCI (LOW).")
 
     # ------------------------------------------------------------------ #
     def unlock(self):
@@ -44,7 +45,8 @@ class DoorLock:
     def _set_lock(self, locked: bool):
         self.locked = locked
         if GPIO_AVAILABLE:
-            GPIO.output(self.pin, GPIO.HIGH if locked else GPIO.LOW)
+            # 🚨 PERBAIKAN: Jika locked (Terkunci) = LOW. Jika tidak locked (Terbuka) = HIGH.
+            GPIO.output(self.pin, GPIO.LOW if locked else GPIO.HIGH)
 
     def status(self) -> str:
         return "LOCKED" if self.locked else "UNLOCKED"
@@ -53,6 +55,7 @@ class DoorLock:
         if self._timer:
             self._timer.cancel()
         if GPIO_AVAILABLE:
+            # Mengembalikan pin ke mode input agar aman saat program dimatikan
             GPIO.cleanup()
         print("[DoorLock] Cleanup done.")
 

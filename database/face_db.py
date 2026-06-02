@@ -30,24 +30,15 @@ class DataTransformer:
             elif snap.get("tag") == "roll_right": roll_right = snap.get("roll", 0.0)
 
         return {
-            "name": name,
-            "embedding": emb_list,
+            "name": name, "embedding": emb_list,
             "liveness_config": {
-                "facemesh_vector": fm_list,
-                "blink_closed": float(ear_c),
-                "blink_open": float(ear_o),
+                "facemesh_vector": fm_list, "blink_closed": float(ear_c), "blink_open": float(ear_o),
                 "headpose_vector": hp_vec,
                 "headpose": {
-                    "neutral_vector": hp_vec,
-                    "yaw_left": float(yaw_left),
-                    "yaw_right": float(yaw_right),
-                    "pitch_up": float(pitch_up),
-                    "pitch_down": float(pitch_down),
-                    "roll_left": float(roll_left),
-                    "roll_right": float(roll_right)
+                    "neutral_vector": hp_vec, "yaw_left": float(yaw_left), "yaw_right": float(yaw_right),
+                    "pitch_up": float(pitch_up), "pitch_down": float(pitch_down), "roll_left": float(roll_left), "roll_right": float(roll_right)
                 }
-            },
-            "registered_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            }, "registered_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         }
 
 # ==============================================================================
@@ -86,10 +77,7 @@ class LocalStorage:
 # ==============================================================================
 class CloudStorage:
     def __init__(self):
-        self.url = getattr(config, "SUPABASE_URL", "")
-        self.key = getattr(config, "SUPABASE_KEY", "")
-        self.is_connected = False
-        
+        self.url, self.key, self.is_connected = getattr(config, "SUPABASE_URL", ""), getattr(config, "SUPABASE_KEY", ""), False
         if self.url and self.key:
             try:
                 self.client: Client = create_client(self.url, self.key)
@@ -101,12 +89,8 @@ class CloudStorage:
         if not self.is_connected: return
         try:
             db_payload = {
-                "name": name,
-                "embedding": payload["embedding"],
-                "liveness_config": payload["liveness_config"],
-                "registration_accuracy": float(accuracy),
-                "light_condition": light_cond,
-                "created_at": payload["registered_at"]
+                "name": name, "embedding": payload["embedding"], "liveness_config": payload["liveness_config"],
+                "registration_accuracy": float(accuracy), "light_condition": light_cond, "created_at": payload["registered_at"]
             }
             self.client.table("registered_faces").upsert(db_payload, on_conflict="name").execute()
             print(f"\n[Supabase] ✅ Data wajah '{name}' berhasil disimpan ke Cloud!")
@@ -115,18 +99,14 @@ class CloudStorage:
     def push_register_log(self, name, status, accuracy, light_cond, message, liveness_scores=None):
         if not self.is_connected: return
         try:
-            data = {
-                "name": name, 
-                "status": status, 
-                "message": message
-            }
+            data = {"name": name, "status": status, "message": message}
             if liveness_scores:
                 data["yaw_score"] = liveness_scores.get("yaw", "")
                 data["pitch_score"] = liveness_scores.get("pitch", "")
                 data["roll_score"] = liveness_scores.get("roll", "")
                 data["blink_score"] = liveness_scores.get("blink", "")
             
-            # Akurasi dan Cahaya di urutan terakhir JSON payload
+            # Taruh di belakang sesuai urutan tabel
             data["accuracy"] = float(accuracy)
             data["light_condition"] = light_cond
 
@@ -137,49 +117,30 @@ class CloudStorage:
     def push_access_log(self, user_name, status, accuracy, light_cond, access_details=None):
         if not self.is_connected: return
         try:
-            yaw_str = ""
-            pitch_str = ""
-            roll_str = ""
-            blink_str = ""
-
+            headpose_str, blink_str = "", ""
             if access_details:
-                for detail in access_details:
-                    nama_tantangan = detail.get("tantangan", "").lower()
-                    info = f"{detail.get('tantangan')}: {float(detail.get('skor_asli', 0)):.2f} (Tgt: {float(detail.get('target', 0)):.2f}, Lat: {float(detail.get('latensi_ms', 0)):.0f}ms)"
+                for d in access_details:
+                    t = d.get("tantangan", "")
+                    info = f"{t}: {float(d.get('skor_asli', 0)):.2f} (Tgt: {float(d.get('target', 0)):.2f}, Lat: {float(d.get('latensi_ms', 0)):.0f}ms)"
                     
-                    if "toleh" in nama_tantangan:
-                        yaw_str += info + " | "
-                    elif "dongak" in nama_tantangan or "tunduk" in nama_tantangan:
-                        pitch_str += info + " | "
-                    elif "miring" in nama_tantangan:
-                        roll_str += info + " | "
-                    elif "kedip" in nama_tantangan or "mata" in nama_tantangan:
-                        blink_str += info + " | "
+                    tl = t.lower()
+                    if any(x in tl for x in ["toleh", "dongak", "tunduk", "miring"]): headpose_str += info + " | "
+                    elif "kedip" in tl or "mata" in tl: blink_str += info + " | "
 
             data = {
-                "name": user_name, 
-                "status": status, 
-                "yaw_score": yaw_str.strip(" | "),       
-                "pitch_score": pitch_str.strip(" | "), 
-                "roll_score": roll_str.strip(" | "),  
-                "blink_score": blink_str.strip(" | "),
-                # Akurasi dan Cahaya di urutan terakhir JSON payload
-                "accuracy": float(accuracy), 
-                "light_condition": light_cond
+                "name": user_name, "status": status, 
+                "headpose_score": headpose_str.strip(" | "), "blink_score": blink_str.strip(" | "),
+                "accuracy": float(accuracy), "light_condition": light_cond
             }
-            
             self.client.table("access_logs").insert(data).execute()
-            print(f"\n[Supabase] 📝 Log Akses Pintu '{user_name}' beserta detail skor liveness tersimpan ke Cloud!")
-            
+            print(f"\n[Supabase] 📝 Log Akses Pintu '{user_name}' beserta detail liveness tersimpan ke Cloud!")
         except Exception as e: 
             print(f"\n[Supabase Error] Gagal merekam log akses pintu: {e}")
 
     def push_spoofing_log(self, score, message):
         if not self.is_connected: return
         try:
-            self.client.table("spoofing_logs").insert({
-                "spoof_score": float(score), "message": message
-            }).execute()
+            self.client.table("spoofing_logs").insert({"spoof_score": float(score), "message": message}).execute()
             print(f"\n[Supabase] 🚨 Peringatan Spoofing (Skor: {score:.2f}) tersimpan ke Cloud!")
         except Exception: pass
 
@@ -193,35 +154,31 @@ class CloudStorage:
 # ==============================================================================
 class FaceDatabase:
     def __init__(self, local_db_path="local_faces.json"):
-        self.local = LocalStorage(local_db_path)
-        self.cloud = CloudStorage()
+        self.local, self.cloud = LocalStorage(local_db_path), CloudStorage()
 
-    def check_user_exists(self, name):
-        return self.local.exists(name)
+    def check_user_exists(self, name): return self.local.exists(name)
+
+    def _get_liveness_dict(self, hp, ear_o, ear_c):
+        return {
+            "yaw": f"L:{hp['yaw_left']:.1f}° R:{hp['yaw_right']:.1f}°",
+            "pitch": f"U:{hp['pitch_up']:.1f}° D:{hp['pitch_down']:.1f}°",
+            "roll": f"L:{hp['roll_left']:.1f}° R:{hp['roll_right']:.1f}°",
+            "blink": f"Buka:{ear_o:.2f} Kedip:{ear_c:.2f}"
+        }
 
     def save_face(self, name, embedding, cap_data):
         try:
             payload = DataTransformer.prepare_payload(name, embedding, cap_data)
             self.local.save_user(name, payload)
-            accuracy = cap_data.get("registration_accuracy", 0.0)
-            light_cond = cap_data.get("light_condition", "N/A")
+            acc, lc = cap_data.get("registration_accuracy", 0.0), cap_data.get("light_condition", "N/A")
             
             if self.cloud.is_connected:
-                threading.Thread(target=self.cloud.sync_register, args=(name, payload, accuracy, light_cond), daemon=True).start()
+                threading.Thread(target=self.cloud.sync_register, args=(name, payload, acc, lc), daemon=True).start()
                 
                 hp = payload["liveness_config"]["headpose"]
-                ear_o = payload["liveness_config"]["blink_open"]
-                ear_c = payload["liveness_config"]["blink_closed"]
+                scores = self._get_liveness_dict(hp, payload["liveness_config"]["blink_open"], payload["liveness_config"]["blink_closed"])
                 
-                liveness_scores = {
-                    "yaw": f"L:{hp['yaw_left']:.1f}° R:{hp['yaw_right']:.1f}°",
-                    "pitch": f"U:{hp['pitch_up']:.1f}° D:{hp['pitch_down']:.1f}°",
-                    "roll": f"L:{hp['roll_left']:.1f}° R:{hp['roll_right']:.1f}°",
-                    "blink": f"Buka:{ear_o:.2f} Kedip:{ear_c:.2f}"
-                }
-                
-                msg = "Berhasil didaftarkan"
-                threading.Thread(target=self.cloud.push_register_log, args=(name, "SUCCESS", accuracy, light_cond, msg, liveness_scores), daemon=True).start()
+                threading.Thread(target=self.cloud.push_register_log, args=(name, "SUCCESS", acc, lc, "Berhasil didaftarkan", scores), daemon=True).start()
             return True
         except Exception: 
             traceback.print_exc()
@@ -233,40 +190,22 @@ class FaceDatabase:
         faces = self.local.load_all()
         if not faces and self.cloud.is_connected:
             if not silent: print("[Hybrid Sync] Memori lokal kosong. Menarik data vektor dari Supabase...")
-            cloud_data = self.cloud.fetch_all_registered_users()
-            if cloud_data:
-                faces = {
-                    row["name"]: {
-                        "name": row["name"],
-                        "embedding": row["embedding"],
-                        "liveness_config": row.get("liveness_config", {}),
-                        "registered_at": row.get("created_at", "")
-                    } for row in cloud_data
-                }
+            if cloud_data := self.cloud.fetch_all_registered_users():
+                faces = {r["name"]: {"name": r["name"], "embedding": r["embedding"], "liveness_config": r.get("liveness_config", {}), "registered_at": r.get("created_at", "")} for r in cloud_data}
                 self.local.overwrite_all(faces)
                 if not silent: print(f"[Hybrid Sync] Berhasil memulihkan {len(faces)} identitas wajah.")
         return faces
 
     def log_register_async(self, name, status, accuracy, message, light_cond="N/A", cap_data=None):
         if self.cloud.is_connected:
-            liveness_scores = None
+            scores = None
             if cap_data:
                 try:
-                    payload = DataTransformer.prepare_payload(name, np.zeros(128), cap_data)
-                    hp = payload["liveness_config"]["headpose"]
-                    ear_o = payload["liveness_config"]["blink_open"]
-                    ear_c = payload["liveness_config"]["blink_closed"]
+                    p = DataTransformer.prepare_payload(name, np.zeros(128), cap_data)
+                    scores = self._get_liveness_dict(p["liveness_config"]["headpose"], p["liveness_config"]["blink_open"], p["liveness_config"]["blink_closed"])
                     light_cond = cap_data.get("light_condition", light_cond)
-                    
-                    liveness_scores = {
-                        "yaw": f"L:{hp['yaw_left']:.1f}° R:{hp['yaw_right']:.1f}°",
-                        "pitch": f"U:{hp['pitch_up']:.1f}° D:{hp['pitch_down']:.1f}°",
-                        "roll": f"L:{hp['roll_left']:.1f}° R:{hp['roll_right']:.1f}°",
-                        "blink": f"Buka:{ear_o:.2f} Kedip:{ear_c:.2f}"
-                    }
                 except Exception: pass
-
-            threading.Thread(target=self.cloud.push_register_log, args=(name, status, accuracy, light_cond, message, liveness_scores), daemon=True).start()
+            threading.Thread(target=self.cloud.push_register_log, args=(name, status, accuracy, light_cond, message, scores), daemon=True).start()
 
     def push_access_log_async(self, user_name, status, accuracy, light_cond="N/A", access_details=None):
         if self.cloud.is_connected:

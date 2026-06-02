@@ -226,19 +226,36 @@ class SmartDoorApp:
         if hasattr(self.db, 'push_access_log_async'): self.db.push_access_log_async(self.last_name, "UNLOCKED", final_acc, light_cond, self.access_details)
 
     def run(self):
+        window_name = "Smart Door Lock"
         try:
+            # 1. ATUR JENDELA MENJADI FULLSCREEN
+            cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+            cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+            
             while self.running:
-                if not (ret := self.cam.read())[0]: continue
-                with self.lock: self.shared_frame = ret[1].copy()
-                display = cv2.flip(ret[1], 1)
-                UIHelper.draw_ui(display, self.ui, self.door.locked)
-                cv2.imshow("Smart Door Lock", display)
-                if cv2.waitKey(1) & 0xFF == ord("q"): self.running = False; break
+                ret, frame = self.cam.read()
+                if ret:
+                    with self.lock: 
+                        self.shared_frame = frame.copy()
+                    display = cv2.flip(frame, 1)
+                    UIHelper.draw_ui(display, self.ui, self.door.locked)
+                    cv2.imshow(window_name, display)
+                
+                # 2. PERBAIKAN: waitKey ditaruh di luar blok 'if ret' agar penekanan 'q' selalu terbaca langsung tanpa delay
+                key = cv2.waitKey(10) & 0xFF
+                if key in [ord("q"), ord("Q"), ord("1")]: 
+                    self.running = False
+                    break
         finally: 
-            self.running = False; time.sleep(0.5); self.cam.stop(); self.door.cleanup(); cv2.destroyAllWindows()
+            self.running = False
+            time.sleep(0.5)
+            self.cam.stop()
+            self.door.cleanup()
+            cv2.destroyAllWindows()
             if GPIO_AVAILABLE: 
                 try: GPIO.remove_event_detect(getattr(config, 'BUTTON_PIN', 23))
                 except: pass
                 GPIO.cleanup()
 
-if __name__ == "__main__": SmartDoorApp().run()
+if __name__ == "__main__": 
+    SmartDoorApp().run()

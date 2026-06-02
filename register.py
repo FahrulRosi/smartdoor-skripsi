@@ -215,8 +215,11 @@ class FaceRegistrationApp:
             msg_sub = f"User: {match['name']} ({match['score']:.2f}) | Akurasi: {self.reg_accuracy:.2f}% | Kecerahan: {light_cond}"
             Helpers.show_msg(display, "❌ WAJAH SUDAH TERDAFTAR!", msg_sub, config.COLOR_RED)
             _log(f"GAGAL: Terdeteksi duplikat dgn {match['name']} (Sim: {match['score']:.2f}) | Akurasi: {self.reg_accuracy:.2f}% | Kondisi: {light_cond}", "ERROR")
-            if hasattr(self.db, 'log_register_async'):
-                self.db.log_register_async(self.name, "FAILED", self.reg_accuracy, f"Duplikat dengan {match['name']}")
+            
+            # --- BAGIAN YANG DIUBAH ---
+            # Pemanggilan fungsi self.db.log_register_async dihapus dari sini agar 
+            # wajah yang sama dengan nama orang berbeda TIDAK dimasukkan ke dalam register_lognya.
+            
         elif self.db.save_face(self.name, avg_emb, self.cap_data): 
             Helpers.show_msg(display, "✅ REGISTRASI BERHASIL!", f"User Baru: {self.name} | Akurasi: {self.reg_accuracy:.2f}% | Kecerahan: {light_cond}", config.COLOR_GREEN)
             _log(f"SUKSES: {self.name} | Akurasi: {self.reg_accuracy:.2f}% | Kondisi: {light_cond}", "SUCCESS")
@@ -236,8 +239,8 @@ class FaceRegistrationApp:
         elif old_stage == RegistrationStage.EXTRACTION:
             _log("📊 RANGKUMAN REGISTRASI KOMPREHENSIF", "SYSTEM")
             _log(f"  • Kemiripan DB (Max Tol: {getattr(config, 'MATCH_THRESHOLD', 0.68)}): {self.last_match_score:.2%}", "SUCCESS")
-            _log(f"  • Akurasi Akhir (Matematika Murni): {self.reg_accuracy:.2f}%", "SUCCESS")
-            _log(f"  • Kondisi Cahaya Tercatat: {self.cap_data.get('light_condition', 'N/A')}", "SUCCESS")
+            _log(f"  • Akurasi: {self.reg_accuracy:.2f}%", "SUCCESS")
+            _log(f"  • Kondisi Cahaya: {self.cap_data.get('light_condition', 'N/A')}", "SUCCESS")
 
     def _process_thread(self):
         try:
@@ -335,6 +338,9 @@ class FaceRegistrationApp:
         if self.stage == RegistrationStage.COMPLETE: return
         threading.Thread(target=self._process_thread, daemon=True).start()
         try:
+            cv2.namedWindow("Register", cv2.WINDOW_NORMAL)
+            cv2.setWindowProperty("Register", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+
             while self.is_running and self.stage != RegistrationStage.COMPLETE:
                 with self.frame_lock: 
                     frame = self.display_frame.copy() if self.display_frame is not None else None

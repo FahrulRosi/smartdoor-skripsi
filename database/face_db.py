@@ -93,8 +93,9 @@ class CloudStorage:
                 "registration_accuracy": float(accuracy), "light_condition": light_cond, "created_at": payload["registered_at"]
             }
             self.client.table("registered_faces").upsert(db_payload, on_conflict="name").execute()
-            print(f"\n[Supabase] ✅ Data wajah '{name}' berhasil disimpan ke Cloud!")
-        except Exception as e: print(f"\n[Cloud Error] Gagal sinkronisasi vektor: {e}")
+            print(f"[Supabase] ✅ Data wajah '{name}' berhasil disimpan ke Cloud!")
+        except Exception as e: 
+            print(f"[Cloud Error] Gagal sinkronisasi registered_faces untuk '{name}': {e}")
 
     def push_register_log(self, name, status, accuracy, light_cond, message, liveness_scores=None):
         if not self.is_connected: return
@@ -106,13 +107,13 @@ class CloudStorage:
                 data["roll_score"] = liveness_scores.get("roll", "")
                 data["blink_score"] = liveness_scores.get("blink", "")
             
-            # Taruh di belakang sesuai urutan tabel
             data["accuracy"] = float(accuracy)
             data["light_condition"] = light_cond
 
             self.client.table("register_logs").insert(data).execute()
-            print(f"\n[Supabase] 📝 Log Registrasi '{name}' ({status}) tersimpan ke Cloud!")
-        except Exception: pass
+            print(f"[Supabase] 📝 Log Registrasi '{name}' ({status}) tersimpan ke Cloud!")
+        except Exception as e: 
+            print(f"[Cloud Error] Gagal menyimpan register_logs untuk '{name}': {e}")
 
     def push_access_log(self, user_name, status, accuracy, light_cond, access_details=None):
         if not self.is_connected: return
@@ -133,21 +134,33 @@ class CloudStorage:
                 "accuracy": float(accuracy), "light_condition": light_cond
             }
             self.client.table("access_logs").insert(data).execute()
-            print(f"\n[Supabase] 📝 Log Akses Pintu '{user_name}' beserta detail liveness tersimpan ke Cloud!")
+            print(f"[Supabase] 📝 Log Akses Pintu '{user_name}' tersimpan ke Cloud!")
         except Exception as e: 
-            print(f"\n[Supabase Error] Gagal merekam log akses pintu: {e}")
+            print(f"[Cloud Error] Gagal merekam log akses pintu: {e}")
 
     def push_spoofing_log(self, score, message):
         if not self.is_connected: return
         try:
             self.client.table("spoofing_logs").insert({"spoof_score": float(score), "message": message}).execute()
-            print(f"\n[Supabase] 🚨 Peringatan Spoofing (Skor: {score:.2f}) tersimpan ke Cloud!")
-        except Exception: pass
+            print(f"[Supabase] 🚨 Peringatan Spoofing (Skor: {score:.2f}) tersimpan ke Cloud!")
+        except Exception as e: 
+            print(f"[Cloud Error] Gagal menyimpan spoofing log: {e}")
 
     def fetch_all_registered_users(self):
         if not self.is_connected: return None
-        try: return self.client.table("registered_faces").select("*").execute().data
-        except Exception: return None
+        container = []
+        def target_worker():
+            try: 
+                res = self.client.table("registered_faces").select("*").execute()
+                container.append(res.data)
+            except Exception as e:
+                print(f"[Supabase Error] Gagal mengambil data: {e}")
+
+        # Proteksi agar tidak membuat Raspberry Pi stuck total jika jaringan putus
+        t = threading.Thread(target=target_worker, daemon=True)
+        t.start()
+        t.join(timeout=5.0)
+        return container[0] if container else None
 
 # ==============================================================================
 # 4. MAIN FACADE
@@ -173,12 +186,25 @@ class FaceDatabase:
             acc, lc = cap_data.get("registration_accuracy", 0.0), cap_data.get("light_condition", "N/A")
             
             if self.cloud.is_connected:
-                threading.Thread(target=self.cloud.sync_register, args=(name, payload, acc, lc), daemon=True).start()
-                
                 hp = payload["liveness_config"]["headpose"]
                 scores = self._get_liveness_dict(hp, payload["liveness_config"]["blink_open"], payload["liveness_config"]["blink_closed"])
                 
-                threading.Thread(target=self.cloud.push_register_log, args=(name, "SUCCESS", acc, lc, "Berhasil didaftarkan", scores), daemon=True).start()
+                # Fungsi tunggal untuk memproses urutan unggahan ke cloud secara berurutan
+                def cloud_upload_sequence():
+                    # 1. Daftarkan master wajah
+                    self.cloud.sync_register(name, payload, acc, lc)
+                    # 2. Daftarkan log sukses
+                    self.cloud.push_register_log(name, "SUCCESS", acc, lc, "Berhasil didaftarkan", scores)
+
+                print(f"\n[Supabase] ⏳ Sedang menyinkronkan data '{name}' ke Cloud database...")
+                upload_thread = threading.Thread(target=cloud_upload_sequence)
+                upload_thread.start()
+                
+                # SANGAT PENTING: Tunggu proses unggah maksimal 6 detik sebelum mengizinkan script ditutup
+                upload_thread.join(timeout=6.0)
+                
+                if upload_thread.is_alive():
+                    print("[Supabase WARNING] Unggah data memakan waktu terlalu lama. Dilanjutkan di background.")
             return True
         except Exception: 
             traceback.print_exc()

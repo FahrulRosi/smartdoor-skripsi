@@ -10,7 +10,7 @@ CLAHE_TILE_GRID_SIZE     = (8, 8)
 
 # ── Database Supabase ────────────────────────────────────────────────────────
 SUPABASE_URL = "https://gwwxebdmavlmxxcdrlge.supabase.co"
-SUPABASE_KEY = "sb_secret_pWqaIuHg8Knp5O4lwP-2Aw_JVYd7I7L"
+SUPABASE_KEY = "sb_publishable_tUsmI6J1BubOlRf9YhtNPQ_F9dWIyOv"
 
 # ── FaceMesh ─────────────────────────────────────────────────────────────────
 MIN_DETECTION_CONFIDENCE = 0.5
@@ -59,7 +59,7 @@ MOBILEFACENET_PATH      = "recognition/mobilefacenet.onnx"
 # ── Door Lock & UI ───────────────────────────────────────────────────────────
 LOCK_GPIO_PIN   = 18
 BUTTON_PIN      = 20
-UNLOCK_DURATION = 15   
+UNLOCK_DURATION = 5   
 
 # Definisi Warna BGR untuk OpenCV
 COLOR_GREEN  = (0,   220,   0)

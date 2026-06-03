@@ -59,30 +59,31 @@ class SmartDoorApp:
         UIHelper.log("Sistem Smart Door Lock diaktifkan", "SYSTEM")
         self.lock, self.running, self.shared_frame = threading.Lock(), True, None
         self.ui, self.missed_frames, self.spoof_score = {"wait": True, "bbox": None, "status": "", "color": config.COLOR_WHITE, "instr": ""}, 0, 1.0
-        self.is_loading = True 
         
         if GPIO_AVAILABLE:
             self.btn_pin = getattr(config, 'BUTTON_PIN', 23) 
             try:
                 GPIO.setmode(GPIO.BCM); GPIO.setup(self.btn_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP) 
                 GPIO.add_event_detect(self.btn_pin, GPIO.FALLING, callback=self._manual_unlock, bouncetime=500)
-                UIHelper.log(f"Tombol Manual Keluar aktif di GPIO {self.btn_pin}", "SYSTEM")
             except Exception as e: UIHelper.log(f"Gagal init tombol: {e}", "WARNING")
         
         self._reset_state(); self.fake_frames = 0
-        threading.Thread(target=self._init_heavy_models, daemon=True).start()
+        self._init_heavy_models()
 
     def _init_heavy_models(self):
-        self.db, self.model, self.pose_estimator, self.anti_spoof = FaceDatabase(), MobileFaceNet(), HeadPoseEstimator(), SilentAntiSpoofing()
+        self.db, self.model, self.pose_estimator = FaceDatabase(), MobileFaceNet(), HeadPoseEstimator()
+        spoof_thr = getattr(config, 'ANTI_SPOOFING_THRESHOLD', 0.50)
+        self.anti_spoof = SilentAntiSpoofing(getattr(config, 'ANTI_SPOOFING_MODEL', "liveness/antispoofing.onnx"), spoof_thr)
         self.detector = FaceMeshDetector(min_detection_confidence=0.5, min_tracking_confidence=0.5)
-        self.door, self.matcher = DoorLock(getattr(config, 'LOCK_GPIO_PIN', 18), getattr(config, 'UNLOCK_DURATION', 5)), FaceMatcher(getattr(config, 'MATCH_THRESHOLD', 0.65))
+        self.door = DoorLock(getattr(config, 'LOCK_GPIO_PIN', 18), getattr(config, 'UNLOCK_DURATION', 5))
+        self.matcher = FaceMatcher(getattr(config, 'MATCH_THRESHOLD', 0.65))
         try:
             if (raw := self.db.load_all_faces()):
                 faces = {k: np.array(v.get('embedding', v.get('mobilefacenet_embedding')), dtype=np.float32) for k, v in raw.items() if isinstance(v, dict) and v.get('embedding') is not None}
                 self.matcher.load_faces(faces) if hasattr(self.matcher, 'load_faces') else setattr(self.matcher, 'known_faces', faces)
                 UIHelper.log(f"Memori dimuat: {len(faces)} wajah siap.", "SUCCESS")
         except Exception as e: UIHelper.log(f"Gagal muat memori: {e}", "WARNING")
-        self.cam, self.is_loading = CameraStream(config.CAMERA_INDEX, config.FRAME_WIDTH, config.FRAME_HEIGHT).start(), False
+        self.cam = CameraStream(config.CAMERA_INDEX, config.FRAME_WIDTH, config.FRAME_HEIGHT).start()
         threading.Thread(target=self._ai_worker, daemon=True).start()
 
     def _manual_unlock(self, channel):
@@ -90,7 +91,7 @@ class SmartDoorApp:
             UIHelper.log("🔘 Tombol Manual Ditekan! Pintu Terbuka.", "SUCCESS")
             self.ui.update({"status": "DIBUKA MANUAL", "color": config.COLOR_GREEN, "instr": ""})
             threading.Thread(target=self.door.unlock, daemon=True).start()
-            if hasattr(self.db, 'push_access_log_async'): self.db.push_access_log_async("Manual (Tombol Dalam)", "UNLOCKED", 100.0)
+            if hasattr(self.db, 'push_access_log_async'): self.db.push_access_log_async("Manual", "UNLOCKED", 100.0)
 
     def _reset_state(self):
         self.state, self.last_name, self.match_score, self.auth_start = ValidationState.IDLE, "", 0.0, 0.0
@@ -146,10 +147,10 @@ class SmartDoorApp:
         self.spoof_score = sp.get("score", 1.0)
         if not sp.get("real", True):
             self.fake_frames += 1 
-            if self.fake_frames < 7: print(f"\r\033[K[Memeriksa] INDIKASI PALSU! | Spoofing: {self.spoof_score:.2f}", end="", flush=True)
-            elif self.fake_frames == 7: 
-                print(); UIHelper.log(f"⚠️ Serangan Spoofing Terdeteksi! Pintu Tetap Terkunci. (Spoofing: {self.spoof_score:.2f})", "WARNING")
-                if hasattr(self.db, 'log_spoofing_async'): self.db.log_spoofing_async(self.spoof_score, f"Serangan ditolak | Skor AI: {self.spoof_score:.2f} | Latensi: {getattr(self, 'latency', 0):.1f}ms")
+            if self.fake_frames < 10: print(f"\r\033[K[Memeriksa] INDIKASI PALSU! | Spoofing: {self.spoof_score:.2f}", end="", flush=True)
+            elif self.fake_frames == 10: 
+                print(); UIHelper.log(f"⚠️ Serangan Spoofing Terdeteksi! (Spoofing: {self.spoof_score:.2f})", "WARNING")
+                if hasattr(self.db, 'log_spoofing_async'): self.db.log_spoofing_async(self.spoof_score, f"Skor AI: {self.spoof_score:.2f}")
                 self._fail(f"FOTO/VIDEO (Spoof: {self.spoof_score:.2f})"); self.spoof_score = sp.get("score", 1.0) 
             return
         
@@ -195,14 +196,23 @@ class SmartDoorApp:
 
     def _finalize_unlock(self, raw, bbox):
         gray = cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY)
-        x, y, w, h = max(0, bbox[0]), max(0, bbox[1]), min(gray.shape[1], bbox[0]+bbox[2]), min(gray.shape[0], bbox[1]+bbox[3])
-        bg_mask = np.ones(gray.shape, dtype=bool); bg_mask[y:y+h, x:x+w] = False
-        bg_light = np.percentile(cv2.GaussianBlur(gray, (15, 15), 0)[bg_mask], 85) if np.any(bg_mask) else 100.0
-        light_cond = f"Backlight (B: {bg_light:.0f})" if bg_light > 160.0 else f"Low Light (B: {bg_light:.0f})" if bg_light < 80.0 else f"Normal (B: {bg_light:.0f})"
+        fh_raw, fw_raw = raw.shape[:2]
+        x1, y1, x2, y2 = max(0, bbox[0]), max(0, bbox[1]), min(fw_raw, bbox[0]+bbox[2]), min(fh_raw, bbox[1]+bbox[3])
+        
+        face_roi = gray[y1:y2, x1:x2]
+        L = np.mean(face_roi) if face_roi.size > 0 else 100.0
 
-        raw_average = (getattr(self, 'spoof_score', 0.98) + 1.0 + min(1.0, self.match_score / 0.88)) / 3.0
-        deviation = (bg_light / 255.0) - 0.5  
-        final_acc = min(100.0, (raw_average * (1.0 - (abs(deviation) * (0.40 if deviation > 0 else 0.24)))) * 100.0)
+        if L < 60: light_cond = f"Low Light (L:{L:.0f})"
+        elif L > 210: light_cond = f"Silau (L:{L:.0f})"
+        else: light_cond = f"Normal (L:{L:.0f})"
+
+        # 🚨 RUMUS AKURASI MENTAH DAN MURNI AI (SAMA PERSIS DENGAN REGISTER)
+        pure_ai_score = (self.spoof_score + self.match_score) / 2.0
+        deviation = abs(L - 130.0) / 255.0  
+        optical_quality = 1.0 - (deviation * 0.25)
+        
+        final_acc = (pure_ai_score * optical_quality) * 100.0
+        final_acc = min(100.0, max(0.0, final_acc))
         
         self.ui.update({"status": f"SELAMAT DATANG, {self.last_name}", "color": config.COLOR_GREEN, "instr": ""})
         UIHelper.log(f"🔓 AKSES DIBERIKAN. Waktu: {time.time() - self.auth_start:.2f}s", "SUCCESS")
@@ -213,26 +223,19 @@ class SmartDoorApp:
         window_name = "Smart Door Lock"
         try:
             cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-            # 🚨 PERBAIKAN: Mode Jendela Full Screen dikembalikan
             cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
             
             while self.running:
-                if getattr(self, 'is_loading', True):
-                    display = np.zeros((getattr(config, 'FRAME_HEIGHT', 480), getattr(config, 'FRAME_WIDTH', 640), 3), dtype=np.uint8)
-                    cv2.putText(display, "MEMUAT SISTEM KEAMANAN AI...", (40, 220), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
-                    cv2.putText(display, "Harap Tunggu Sedikit...", (40, 260), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-                    cv2.imshow(window_name, display)
-                    if cv2.waitKey(10) & 0xFF in [ord("q"), ord("Q"), ord("1")]: self.running = False; break
-                    continue
-
                 ret, frame = self.cam.read()
                 if ret:
                     with self.lock: self.shared_frame = frame.copy()
                     display = cv2.flip(frame, 1)
-                    UIHelper.draw_ui(display, self.ui, getattr(self, 'door', None) and self.door.locked)
+                    is_door_locked = getattr(self.door, 'locked', True) if hasattr(self, 'door') and self.door else True
+                    UIHelper.draw_ui(display, self.ui, is_door_locked)
                     cv2.imshow(window_name, display)
                 
-                if cv2.waitKey(10) & 0xFF in [ord("q"), ord("Q"), ord("1")]: self.running = False; break
+                key = cv2.waitKey(10) & 0xFF
+                if key in [ord("q"), ord("Q"), ord("1")]: self.running = False; break
         finally: 
             self.running = False; time.sleep(0.5)
             if hasattr(self, 'cam') and self.cam: self.cam.stop()

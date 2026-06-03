@@ -10,7 +10,7 @@ CLAHE_TILE_GRID_SIZE     = (8, 8)
 
 # ── Database Supabase ────────────────────────────────────────────────────────
 SUPABASE_URL = "https://gwwxebdmavlmxxcdrlge.supabase.co"
-
+SUPABASE_KEY = "sb_publishable_tUsmI6J1BubOlRf9YhtNPQ_F9dWIyOv"
 
 # ── FaceMesh ─────────────────────────────────────────────────────────────────
 MIN_DETECTION_CONFIDENCE = 0.5

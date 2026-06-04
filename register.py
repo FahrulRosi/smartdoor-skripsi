@@ -116,13 +116,13 @@ class FaceRegistrationApp:
                 if self.hold_frames >= 6 and (tag not in buf or abs(val) > abs(buf[tag][axis])): 
                     buf[tag] = {k: float(pose.get(k, 0.0)) for k in ("yaw", "pitch", "roll")}
                     buf[tag]["tag"] = tag
-                    buf[tag]["latency_ms"] = self.latency # Latensi dicatat
+                    buf[tag]["latency_ms"] = self.latency 
             else: self.hold_frames = 0
 
         if self.stage == RegistrationStage.BLINK:
             bv = Helpers.capture_blink(face)
             if bv:
-                bv["latency_ms"] = self.latency # Latensi dicatat
+                bv["latency_ms"] = self.latency 
                 if not self._blink_buf["closed"] or bv["avg_ear"] < self._blink_buf["closed"]["avg_ear"]: self._blink_buf["closed"] = bv
                 if not self._blink_buf["open"] or bv["avg_ear"] > self._blink_buf["open"]["avg_ear"]: self._blink_buf["open"] = bv
 
@@ -181,13 +181,20 @@ class FaceRegistrationApp:
         avg_emb = np.mean(self.ext_embs, axis=0)
         avg_emb = avg_emb / (np.linalg.norm(avg_emb) + 1e-6) 
         
+        # 🛠️ PERBAIKAN LOGIKA PENCAHAYAAN SAAT EKSTRAKSI (MENDUKUNG BACKLIGHT REAL LIVE)
         gray = cv2.cvtColor(raw_frame, cv2.COLOR_BGR2GRAY)
         face_roi = gray[y1:y2, x1:x2]
         L = np.mean(face_roi) if face_roi.size > 0 else 100.0
+        L_frame = np.mean(gray) # Rata-rata kecerahan keseluruhan layar background
         
-        if L < 60: light_cond = f"Low Light (L:{L:.0f})"
-        elif L > 210: light_cond = f"Silau (L:{L:.0f})"
-        else: light_cond = f"Normal (L:{L:.0f})"
+        if L_frame > 135 and (L_frame - L) > 35: 
+            light_cond = f"Backlight (F:{L:.0f}/B:{L_frame:.0f})"
+        elif L > 210: 
+            light_cond = f"Silau (L:{L:.0f})"
+        elif L < 60: 
+            light_cond = f"Low Light (L:{L:.0f})"
+        else: 
+            light_cond = f"Normal (L:{L:.0f})"
             
         raw_match_score = float(np.dot(self.ext_embs[0], self.ext_embs[-1]))
         simulated_real_world_score = raw_match_score - 0.15 
@@ -220,29 +227,21 @@ class FaceRegistrationApp:
         with self.frame_lock: self.display_frame = display.copy()
         time.sleep(1.5); self.stage = RegistrationStage.COMPLETE 
 
-    # 🛠️ PERBAIKAN: Output log terminal menampilkan hasil skor/latensi dinamis!
     def _log_transition(self, old_stage):
-        # Helper untuk mengambil nilai derajat
         gs_val = lambda k, t, v: next((s.get(v, 0.0) for s in self.cap_data.get(f"{k}_snapshots", []) if s.get("tag") == t), 0.0)
-        # Helper untuk mengambil nilai latensi (latency_ms)
         gs_lat = lambda k, t: next((s.get("latency_ms", 0.0) for s in self.cap_data.get(f"{k}_snapshots", []) if s.get("tag") == t), 0.0)
         
         if old_stage == RegistrationStage.FACEMESH: 
             _log(f"✅ TAHAP 1: FaceMesh 3D Terekam", "SUCCESS")
-            
         elif old_stage == RegistrationStage.YAW: 
             _log(f"✅ TAHAP 2a: Yaw Selesai -> L:{gs_val('yaw','yaw_left','yaw'):.1f}° ({gs_lat('yaw','yaw_left'):.1f}ms) R:{gs_val('yaw','yaw_right','yaw'):.1f}° ({gs_lat('yaw','yaw_right'):.1f}ms)", "SUCCESS")
-            
         elif old_stage == RegistrationStage.PITCH: 
             _log(f"✅ TAHAP 2b: Pitch Selesai -> U:{gs_val('pitch','pitch_up','pitch'):.1f}° ({gs_lat('pitch','pitch_up'):.1f}ms) D:{gs_val('pitch','pitch_down','pitch'):.1f}° ({gs_lat('pitch','pitch_down'):.1f}ms)", "SUCCESS")
-            
         elif old_stage == RegistrationStage.ROLL: 
             _log(f"✅ TAHAP 2c: Roll Selesai -> L:{gs_val('roll','roll_left','roll'):.1f}° ({gs_lat('roll','roll_left'):.1f}ms) R:{gs_val('roll','roll_right','roll'):.1f}° ({gs_lat('roll','roll_right'):.1f}ms)", "SUCCESS")
-            
         elif old_stage == RegistrationStage.BLINK: 
             bo, bc = self.cap_data.get('blink_open') or {}, self.cap_data.get('blink_closed') or {}
             _log(f"✅ TAHAP 3: Blink Selesai -> EAR Buka: {bo.get('avg_ear',0):.2f} ({bo.get('latency_ms',0):.1f}ms) | Kedip: {bc.get('avg_ear',0):.2f} ({bc.get('latency_ms',0):.1f}ms)", "SUCCESS")
-            
         elif old_stage == RegistrationStage.EXTRACTION:
             _log("📊 RANGKUMAN REGISTRASI KOMPREHENSIF", "SYSTEM")
             _log(f"   • Kemiripan DB (Max Tol: {getattr(config, 'MATCH_THRESHOLD', 0.68)}): {self.last_match_score:.2%}", "SUCCESS")
@@ -302,13 +301,21 @@ class FaceRegistrationApp:
                 fh_l, fw_l = raw.shape[:2]
                 x1_l, y1_l, x2_l, y2_l = max(0, bx), max(0, by), min(fw_l, bx+bw), min(fh_l, by+bh)
                 
+                # 🛠️ PERBAIKAN LOGIKA PENCAHAYAAN REAL LIVE (MENDUKUNG DETEKSI BACKLIGHT DI THREAD PROSES)
                 gray_live = cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY)
                 face_roi_live = gray_live[y1_l:y2_l, x1_l:x2_l]
                 L_live = np.mean(face_roi_live) if face_roi_live.size > 0 else 100.0
+                L_frame_live = np.mean(gray_live) # Membaca cahaya rata-rata total layar lingkungan sekitar
 
-                if L_live < 60: l_str = f"Low Light (L:{L_live:.0f})"
-                elif L_live > 210: l_str = f"Silau (L:{L_live:.0f})"
-                else: l_str = f"Normal (L:{L_live:.0f})"
+                # Cek Backlight diletakkan di urutan pertama karena krusial untuk kondisi outdoor/indoor jendela
+                if L_frame_live > 135 and (L_frame_live - L_live) > 35: 
+                    l_str = f"Backlight (F:{L_live:.0f}/B:{L_frame_live:.0f})"
+                elif L_live > 210: 
+                    l_str = f"Silau (L:{L_live:.0f})"
+                elif L_live < 60: 
+                    l_str = f"Low Light (L:{L_live:.0f})"
+                else: 
+                    l_str = f"Normal (L:{L_live:.0f})"
 
                 hud_txt, term_txt = self._generate_metric_text(pose, ear_val, sp_score, l_str)
                 

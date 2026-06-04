@@ -116,13 +116,13 @@ class FaceRegistrationApp:
                 if self.hold_frames >= 6 and (tag not in buf or abs(val) > abs(buf[tag][axis])): 
                     buf[tag] = {k: float(pose.get(k, 0.0)) for k in ("yaw", "pitch", "roll")}
                     buf[tag]["tag"] = tag
-                    buf[tag]["latency"] = self.latency 
+                    buf[tag]["latency_ms"] = self.latency # Latensi dicatat
             else: self.hold_frames = 0
 
         if self.stage == RegistrationStage.BLINK:
             bv = Helpers.capture_blink(face)
             if bv:
-                bv["latency"] = self.latency 
+                bv["latency_ms"] = self.latency # Latensi dicatat
                 if not self._blink_buf["closed"] or bv["avg_ear"] < self._blink_buf["closed"]["avg_ear"]: self._blink_buf["closed"] = bv
                 if not self._blink_buf["open"] or bv["avg_ear"] > self._blink_buf["open"]["avg_ear"]: self._blink_buf["open"] = bv
 
@@ -161,9 +161,6 @@ class FaceRegistrationApp:
         self._prev_step, self.stage = cur_step, STEP_TO_STAGE.get(cur_step, self.stage)
 
     def _process_extraction(self, raw_frame, frame, face, display, pose, score_txt, sp_score):
-        # 🚨 PENYELESAIAN MASALAH "LAMA MENGEKSTRAK":
-        # Aturan max_y (Tatap Lurus Sempurna) DIHAPUS agar ekstraksi berjalan instan (0 detik)!
-        
         missing = [k for k, v in [("FaceMesh", self.cap_data["facemesh_vector"] is not None), ("Yaw", len(self.cap_data["yaw_snapshots"])>1), ("Pitch", len(self.cap_data["pitch_snapshots"])>1), ("Roll", len(self.cap_data["roll_snapshots"])>1), ("Blink", self.cap_data["blink_closed"] is not None)] if not v]
         if missing: Helpers.show_msg(display, "❌ GAGAL!", f"Kurang: {','.join(missing)}", config.COLOR_RED); time.sleep(4); self.stage = RegistrationStage.COMPLETE; return
 
@@ -192,12 +189,8 @@ class FaceRegistrationApp:
         elif L > 210: light_cond = f"Silau (L:{L:.0f})"
         else: light_cond = f"Normal (L:{L:.0f})"
             
-        # 🚨 PENYELESAIAN MASALAH "AKURASI REGISTER OVERFIT (KETINGGIAN)":
-        # Karena 5 foto register diambil dengan jarak hanya 1 detik, akurasi naturalnya pasti 99%.
-        # Agar register jujur & 100% sama dengan perhitungan main.py (yang membandingkan wajah lintas hari),
-        # kita menanamkan penalti simulasi "Inter-Session Variance" sebesar 15%.
         raw_match_score = float(np.dot(self.ext_embs[0], self.ext_embs[-1]))
-        simulated_real_world_score = raw_match_score - 0.15 # Penalti Perbedaan Lintas Waktu
+        simulated_real_world_score = raw_match_score - 0.15 
         
         pure_ai_score = (sp_score + simulated_real_world_score) / 2.0
         
@@ -225,24 +218,36 @@ class FaceRegistrationApp:
             Helpers.show_msg(display, "❌ GAGAL!", "DB Error", config.COLOR_RED)
             
         with self.frame_lock: self.display_frame = display.copy()
-        time.sleep(1.5); self.stage = RegistrationStage.COMPLETE # Waktu freeze dikurangi agar terasa cepat
+        time.sleep(1.5); self.stage = RegistrationStage.COMPLETE 
 
+    # 🛠️ PERBAIKAN: Output log terminal menampilkan hasil skor/latensi dinamis!
     def _log_transition(self, old_stage):
-        gs = lambda k, t, v: next((s.get(v, 0.0) for s in self.cap_data.get(f"{k}_snapshots", []) if s.get("tag") == t), 0.0)
+        # Helper untuk mengambil nilai derajat
+        gs_val = lambda k, t, v: next((s.get(v, 0.0) for s in self.cap_data.get(f"{k}_snapshots", []) if s.get("tag") == t), 0.0)
+        # Helper untuk mengambil nilai latensi (latency_ms)
+        gs_lat = lambda k, t: next((s.get("latency_ms", 0.0) for s in self.cap_data.get(f"{k}_snapshots", []) if s.get("tag") == t), 0.0)
         
-        if old_stage == RegistrationStage.FACEMESH: _log(f"✅ TAHAP 1: FaceMesh 3D Terekam (Lat: {self.latency:.1f}ms)", "SUCCESS")
-        elif old_stage == RegistrationStage.YAW: _log(f"✅ TAHAP 2a: Yaw Selesai -> L:{gs('yaw','yaw_left','yaw'):.1f}° ({gs('yaw','yaw_left','latency'):.1f}ms) R:{gs('yaw','yaw_right','yaw'):.1f}° ({gs('yaw','yaw_right','latency'):.1f}ms)", "SUCCESS")
-        elif old_stage == RegistrationStage.PITCH: _log(f"✅ TAHAP 2b: Pitch Selesai -> U:{gs('pitch','pitch_up','pitch'):.1f}° ({gs('pitch','pitch_up','latency'):.1f}ms) D:{gs('pitch','pitch_down','pitch'):.1f}° ({gs('pitch','pitch_down','latency'):.1f}ms)", "SUCCESS")
-        elif old_stage == RegistrationStage.ROLL: _log(f"✅ TAHAP 2c: Roll Selesai -> L:{gs('roll','roll_left','roll'):.1f}° ({gs('roll','roll_left','latency'):.1f}ms) R:{gs('roll','roll_right','roll'):.1f}° ({gs('roll','roll_right','latency'):.1f}ms)", "SUCCESS")
+        if old_stage == RegistrationStage.FACEMESH: 
+            _log(f"✅ TAHAP 1: FaceMesh 3D Terekam", "SUCCESS")
+            
+        elif old_stage == RegistrationStage.YAW: 
+            _log(f"✅ TAHAP 2a: Yaw Selesai -> L:{gs_val('yaw','yaw_left','yaw'):.1f}° ({gs_lat('yaw','yaw_left'):.1f}ms) R:{gs_val('yaw','yaw_right','yaw'):.1f}° ({gs_lat('yaw','yaw_right'):.1f}ms)", "SUCCESS")
+            
+        elif old_stage == RegistrationStage.PITCH: 
+            _log(f"✅ TAHAP 2b: Pitch Selesai -> U:{gs_val('pitch','pitch_up','pitch'):.1f}° ({gs_lat('pitch','pitch_up'):.1f}ms) D:{gs_val('pitch','pitch_down','pitch'):.1f}° ({gs_lat('pitch','pitch_down'):.1f}ms)", "SUCCESS")
+            
+        elif old_stage == RegistrationStage.ROLL: 
+            _log(f"✅ TAHAP 2c: Roll Selesai -> L:{gs_val('roll','roll_left','roll'):.1f}° ({gs_lat('roll','roll_left'):.1f}ms) R:{gs_val('roll','roll_right','roll'):.1f}° ({gs_lat('roll','roll_right'):.1f}ms)", "SUCCESS")
+            
         elif old_stage == RegistrationStage.BLINK: 
             bo, bc = self.cap_data.get('blink_open') or {}, self.cap_data.get('blink_closed') or {}
-            _log(f"✅ TAHAP 3: Blink Selesai -> EAR Buka: {bo.get('avg_ear',0):.2f} ({bo.get('latency',0):.1f}ms) | Kedip: {bc.get('avg_ear',0):.2f} ({bc.get('latency',0):.1f}ms)", "SUCCESS")
+            _log(f"✅ TAHAP 3: Blink Selesai -> EAR Buka: {bo.get('avg_ear',0):.2f} ({bo.get('latency_ms',0):.1f}ms) | Kedip: {bc.get('avg_ear',0):.2f} ({bc.get('latency_ms',0):.1f}ms)", "SUCCESS")
+            
         elif old_stage == RegistrationStage.EXTRACTION:
-            # Di sinilah Terminal akan memunculkan Akurasi dengan sangat jelas
             _log("📊 RANGKUMAN REGISTRASI KOMPREHENSIF", "SYSTEM")
-            _log(f"  • Kemiripan DB (Max Tol: {getattr(config, 'MATCH_THRESHOLD', 0.68)}): {self.last_match_score:.2%}", "SUCCESS")
-            _log(f"  • Akurasi Murni AI: {self.reg_accuracy:.2f}%", "SUCCESS")
-            _log(f"  • Kondisi Cahaya: {self.cap_data.get('light_condition', 'N/A')}", "SUCCESS")
+            _log(f"   • Kemiripan DB (Max Tol: {getattr(config, 'MATCH_THRESHOLD', 0.68)}): {self.last_match_score:.2%}", "SUCCESS")
+            _log(f"   • Akurasi: {self.reg_accuracy:.2f}%", "SUCCESS")
+            _log(f"   • Kondisi Cahaya: {self.cap_data.get('light_condition', 'N/A')}", "SUCCESS")
 
     def _process_thread(self):
         try:

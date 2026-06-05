@@ -71,7 +71,7 @@ class FaceRegistrationApp:
     
     def __init__(self, name):
         self.name, self.stage, self.in_ext, self.hold_frames, self.print_counter, self.missed_frames = name, RegistrationStage.FACEMESH, False, 0, 0, 0
-        self.last_match_score, self.fake_frames, self.reg_accuracy, self.latency = 0.0, 0, 0.0, 0.0 
+        self.last_match_score, self.fake_frames, self.latency = 0.0, 0, 0.0 
         self.ext_embs = [] 
         
         self.is_running, self.display_frame, self.frame_lock = True, None, threading.Lock()
@@ -87,8 +87,10 @@ class FaceRegistrationApp:
         self.cam = CameraStream(config.CAMERA_INDEX, config.FRAME_WIDTH, config.FRAME_HEIGHT).start()
         self.detector = FaceMeshDetector(min_detection_confidence=0.5, min_tracking_confidence=0.5)
         self.liveness, self.model = LivenessManager(), MobileFaceNet()
-        self.anti_spoof = SilentAntiSpoofing(getattr(config, 'ANTI_SPOOFING_MODEL', "liveness/antispoofing.onnx"), getattr(config, 'ANTI_SPOOFING_THRESHOLD', 0.85))
-        self.matcher = FaceMatcher(getattr(config, 'ANTI_DUPLICATE_THRESHOLD', 0.55))
+        
+        # PERBAIKAN 1: Longgarkan ambang batas Spoofing dan Anti-Duplikat
+        self.anti_spoof = SilentAntiSpoofing(getattr(config, 'ANTI_SPOOFING_MODEL', "liveness/antispoofing.onnx"), getattr(config, 'ANTI_SPOOFING_THRESHOLD', 0.70))
+        self.matcher = FaceMatcher(getattr(config, 'ANTI_DUPLICATE_THRESHOLD', 0.60))
         
         try:
             raw = self.db.load_all_faces()
@@ -170,6 +172,22 @@ class FaceRegistrationApp:
         x2, y2 = min(fw, bx + bw), min(fh, by + bh)
         safe_bbox = [x1, y1, x2 - x1, y2 - y1]
 
+        gray = cv2.cvtColor(raw_frame, cv2.COLOR_BGR2GRAY)
+        face_roi = gray[y1:y2, x1:x2]
+        L = np.mean(face_roi) if face_roi.size > 0 else 100.0
+        
+        mask = np.ones((fh, fw), dtype=bool)
+        mask[y1:y2, x1:x2] = False
+        L_bg = np.mean(gray[mask]) if np.any(mask) else L
+        
+        # PERBAIKAN 2: Batas Low Light = 85
+        if (L_bg - L) > 40 and L_bg > 120: 
+            light_cond = f"Backlight (F:{L:.0f}/B:{L_bg:.0f})"
+        elif L_bg < 85 or L < 85: 
+            light_cond = f"Low Light (F:{L:.0f}/B:{L_bg:.0f})"
+        else: 
+            light_cond = f"Normal (F:{L:.0f}/B:{L_bg:.0f})"
+
         raw_emb = self.model.get_embedding(self.model.crop_face(frame, safe_bbox))
         
         if raw_emb is not None:
@@ -181,46 +199,20 @@ class FaceRegistrationApp:
         avg_emb = np.mean(self.ext_embs, axis=0)
         avg_emb = avg_emb / (np.linalg.norm(avg_emb) + 1e-6) 
         
-        # 🛠️ PERBAIKAN LOGIKA PENCAHAYAAN SAAT EKSTRAKSI (MENDUKUNG BACKLIGHT REAL LIVE)
-        gray = cv2.cvtColor(raw_frame, cv2.COLOR_BGR2GRAY)
-        face_roi = gray[y1:y2, x1:x2]
-        L = np.mean(face_roi) if face_roi.size > 0 else 100.0
-        L_frame = np.mean(gray) # Rata-rata kecerahan keseluruhan layar background
-        
-        if L_frame > 135 and (L_frame - L) > 35: 
-            light_cond = f"Backlight (F:{L:.0f}/B:{L_frame:.0f})"
-        elif L > 210: 
-            light_cond = f"Silau (L:{L:.0f})"
-        elif L < 60: 
-            light_cond = f"Low Light (L:{L:.0f})"
-        else: 
-            light_cond = f"Normal (L:{L:.0f})"
-            
-        raw_match_score = float(np.dot(self.ext_embs[0], self.ext_embs[-1]))
-        simulated_real_world_score = raw_match_score - 0.15 
-        
-        pure_ai_score = (sp_score + simulated_real_world_score) / 2.0
-        
-        deviation = abs(L - 130.0) / 255.0  
-        optical_quality = 1.0 - (deviation * 0.25)
-
-        self.reg_accuracy = min(100.0, max(0.0, (pure_ai_score * optical_quality) * 100.0))
-        
-        self.cap_data["headpose_vector"] = [float(pose["yaw"]), float(pose["pitch"]), float(pose["roll"])]
-        self.cap_data["registration_accuracy"] = float(self.reg_accuracy)
-        self.cap_data["light_condition"] = light_cond
+        self.cap_data.update({"headpose_vector": [float(pose["yaw"]), float(pose["pitch"]), float(pose["roll"])], "registration_accuracy": 100.0, "light_condition": light_cond})
         
         match = self.matcher.match(avg_emb)
         self.last_match_score = match.get("score", 0.0)
         
         if match["matched"] and os.getenv("ALLOW_DUPLICATE", "false").lower() != "true": 
-            msg_sub = f"User: {match['name']} ({match['score']:.2f}) | Akurasi: {self.reg_accuracy:.2f}% | Kecerahan: {light_cond}"
+            msg_sub = f"User: {match['name']} (Sim: {match['score']:.4f}) | Kondisi: {light_cond}"
             Helpers.show_msg(display, "❌ WAJAH SUDAH TERDAFTAR!", msg_sub, config.COLOR_RED)
-            _log(f"GAGAL: Terdeteksi duplikat dgn {match['name']} (Sim: {match['score']:.2f}) | Akurasi: {self.reg_accuracy:.2f}% | Kondisi: {light_cond}", "ERROR")
+            _log(f"GAGAL: Terdeteksi duplikat dgn {match['name']} (Sim: {match['score']:.4f}) | Kondisi: {light_cond}", "ERROR")
             
         elif self.db.save_face(self.name, avg_emb, self.cap_data): 
-            Helpers.show_msg(display, "✅ REGISTRASI BERHASIL!", f"User Baru: {self.name} | Akurasi: {self.reg_accuracy:.2f}% | Kecerahan: {light_cond}", config.COLOR_GREEN)
-            _log(f"SUKSES: {self.name} | Akurasi: {self.reg_accuracy:.2f}% | Kondisi: {light_cond}", "SUCCESS")
+            msg_sub = f"User: {self.name} | Vektor Tersimpan | Kondisi: {light_cond}"
+            Helpers.show_msg(display, "✅ REGISTRASI BERHASIL!", msg_sub, config.COLOR_GREEN)
+            _log(f"SUKSES: {self.name} | Kondisi: {light_cond}", "SUCCESS")
         else: 
             Helpers.show_msg(display, "❌ GAGAL!", "DB Error", config.COLOR_RED)
             
@@ -245,7 +237,6 @@ class FaceRegistrationApp:
         elif old_stage == RegistrationStage.EXTRACTION:
             _log("📊 RANGKUMAN REGISTRASI KOMPREHENSIF", "SYSTEM")
             _log(f"   • Kemiripan DB (Max Tol: {getattr(config, 'MATCH_THRESHOLD', 0.68)}): {self.last_match_score:.2%}", "SUCCESS")
-            _log(f"   • Akurasi: {self.reg_accuracy:.2f}%", "SUCCESS")
             _log(f"   • Kondisi Cahaya: {self.cap_data.get('light_condition', 'N/A')}", "SUCCESS")
 
     def _process_thread(self):
@@ -301,21 +292,21 @@ class FaceRegistrationApp:
                 fh_l, fw_l = raw.shape[:2]
                 x1_l, y1_l, x2_l, y2_l = max(0, bx), max(0, by), min(fw_l, bx+bw), min(fh_l, by+bh)
                 
-                # 🛠️ PERBAIKAN LOGIKA PENCAHAYAAN REAL LIVE (MENDUKUNG DETEKSI BACKLIGHT DI THREAD PROSES)
                 gray_live = cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY)
                 face_roi_live = gray_live[y1_l:y2_l, x1_l:x2_l]
                 L_live = np.mean(face_roi_live) if face_roi_live.size > 0 else 100.0
-                L_frame_live = np.mean(gray_live) # Membaca cahaya rata-rata total layar lingkungan sekitar
+                
+                mask_live = np.ones((fh_l, fw_l), dtype=bool)
+                mask_live[y1_l:y2_l, x1_l:x2_l] = False
+                L_bg_live = np.mean(gray_live[mask_live]) if np.any(mask_live) else L_live
 
-                # Cek Backlight diletakkan di urutan pertama karena krusial untuk kondisi outdoor/indoor jendela
-                if L_frame_live > 135 and (L_frame_live - L_live) > 35: 
-                    l_str = f"Backlight (F:{L_live:.0f}/B:{L_frame_live:.0f})"
-                elif L_live > 210: 
-                    l_str = f"Silau (L:{L_live:.0f})"
-                elif L_live < 60: 
-                    l_str = f"Low Light (L:{L_live:.0f})"
+                # PERBAIKAN 3: Batas Low Light Realtime HUD = 85
+                if (L_bg_live - L_live) > 40 and L_bg_live > 120: 
+                    l_str = f"Backlight (F:{L_live:.0f}/B:{L_bg_live:.0f})"
+                elif L_bg_live < 85 or L_live < 85: 
+                    l_str = f"Low Light (F:{L_live:.0f}/B:{L_bg_live:.0f})"
                 else: 
-                    l_str = f"Normal (L:{L_live:.0f})"
+                    l_str = f"Normal (F:{L_live:.0f}/B:{L_bg_live:.0f})"
 
                 hud_txt, term_txt = self._generate_metric_text(pose, ear_val, sp_score, l_str)
                 

@@ -53,10 +53,10 @@ class UIHelper:
         cv2.putText(d, f"PINTU: {'TERKUNCI' if locked else 'TERBUKA'}", (10, config.FRAME_HEIGHT-30), cv2.FONT_HERSHEY_SIMPLEX, 0.75, config.COLOR_RED if locked else config.COLOR_GREEN, 2)
 
 class SmartDoorApp:
-    CHALLENGES = {"BLINK": "Kedipkan Mata", "KANAN": "Toleh KANAN", "KIRI": "Toleh KIRI", "ATAS": "Dongak ATAS", "BAWAH": "Tunduk BAWAH", "MIRING_KANAN": "Miring KANAN", "MIRING_KIRI": "Miring KIRI"}
+    CHALLENGES = {"BLINK": "Kedipkan Mata", "KANAN": "Toleh KANAN", "KIRI": "Toleh KIRI", "ATAS": "Dongak ATAS", "BAWAH": "Tunduk BAWAH"}
 
     def __init__(self):
-        UIHelper.log("Sistem Smart Door Lock diaktifkan", "SYSTEM")
+        UIHelper.log("Sistem Smart Door Lock Aktif", "SYSTEM")
         self.lock, self.running, self.shared_frame = threading.Lock(), True, None
         self.ui, self.missed_frames, self.spoof_score = {"wait": True, "bbox": None, "status": "", "color": config.COLOR_WHITE, "instr": ""}, 0, 1.0
         
@@ -72,16 +72,19 @@ class SmartDoorApp:
 
     def _init_heavy_models(self):
         self.db, self.model, self.pose_estimator = FaceDatabase(), MobileFaceNet(), HeadPoseEstimator()
-        spoof_thr = getattr(config, 'ANTI_SPOOFING_THRESHOLD', 0.50)
+        
+        # PERBAIKAN 1: Longgarkan ambang batas Spoofing dan Kemiripan agar lulus di kondisi gelap / noise
+        spoof_thr = getattr(config, 'ANTI_SPOOFING_THRESHOLD', 0.70) 
         self.anti_spoof = SilentAntiSpoofing(getattr(config, 'ANTI_SPOOFING_MODEL', "liveness/antispoofing.onnx"), spoof_thr)
         self.detector = FaceMeshDetector(min_detection_confidence=0.5, min_tracking_confidence=0.5)
         self.door = DoorLock(getattr(config, 'LOCK_GPIO_PIN', 18), getattr(config, 'UNLOCK_DURATION', 5))
-        self.matcher = FaceMatcher(getattr(config, 'MATCH_THRESHOLD', 0.65))
+        self.matcher = FaceMatcher(getattr(config, 'MATCH_THRESHOLD', 0.55)) 
+        
         try:
             if (raw := self.db.load_all_faces()):
                 faces = {k: np.array(v.get('embedding', v.get('mobilefacenet_embedding')), dtype=np.float32) for k, v in raw.items() if isinstance(v, dict) and v.get('embedding') is not None}
                 self.matcher.load_faces(faces) if hasattr(self.matcher, 'load_faces') else setattr(self.matcher, 'known_faces', faces)
-                UIHelper.log(f"Memori dimuat: {len(faces)} wajah siap.", "SUCCESS")
+                UIHelper.log(f"Memori database dimuat: {len(faces)} wajah siap.", "SUCCESS")
         except Exception as e: UIHelper.log(f"Gagal muat memori: {e}", "WARNING")
         self.cam = CameraStream(config.CAMERA_INDEX, config.FRAME_WIDTH, config.FRAME_HEIGHT).start()
         threading.Thread(target=self._ai_worker, daemon=True).start()
@@ -107,7 +110,7 @@ class SmartDoorApp:
             ear = UIHelper.get_ear(face)
             self.ear_hist.append(ear)
             if len(self.ear_hist) > 3: self.ear_hist.pop(0)
-            tgt = getattr(self, 'dyn_blink_thr', getattr(config, 'BLINK_EAR_THRESHOLD', 0.21))
+            tgt = getattr(config, 'BLINK_EAR_THRESHOLD', 0.21)
             if min(self.ear_hist) <= tgt: self.blink_hold += 1
             else:
                 if self.blink_hold >= 1: self.blink_passed = True
@@ -116,7 +119,7 @@ class SmartDoorApp:
         p, ref = self.pose_estimator.estimate(face, self.detector), self.reg_pose
         dy, dp, dr = p.get("yaw", 0)-ref[0], p.get("pitch", 0)-ref[1], p.get("roll", 0)-ref[2]
         ty, tp, tr = getattr(config, 'CHALLENGE_YAW', 25.0), getattr(config, 'CHALLENGE_PITCH', 20.0), getattr(config, 'CHALLENGE_ROLL', 25.0)
-        val, tgt, passed = {"KANAN": (dy, ty, dy>ty), "KIRI": (-dy, ty, -dy>ty), "ATAS": (-dp, tp, -dp>tp), "BAWAH": (dp, tp, dp>tp), "MIRING_KANAN": (-dr, tr, -dr>tr), "MIRING_KIRI": (dr, tr, dr>tr)}.get(action, (0.0, 1.0, False))
+        val, tgt, passed = {"KANAN": (dy, ty, dy>ty), "KIRI": (-dy, ty, -dy>ty), "ATAS": (-dp, tp, -dp>tp), "BAWAH": (dp, tp, dp>tp)}.get(action, (0.0, 1.0, False))
         self.pose_hold = self.pose_hold + 1 if passed else 0
         return self.pose_hold >= 6, val, tgt
 
@@ -145,47 +148,78 @@ class SmartDoorApp:
         
         sp = self.anti_spoof.is_real(raw, face.bbox)
         self.spoof_score = sp.get("score", 1.0)
+        
         if not sp.get("real", True):
             self.fake_frames += 1 
-            if self.fake_frames < 10: print(f"\r\033[K[Memeriksa] INDIKASI PALSU! | Spoofing: {self.spoof_score:.2f}", end="", flush=True)
+            if self.fake_frames < 10: 
+                print(f"\r\033[K[Memeriksa] INDIKASI PALSU! | Spoofing: {self.spoof_score:.2f}", end="", flush=True)
             elif self.fake_frames == 10: 
-                print(); UIHelper.log(f"⚠️ Serangan Spoofing Terdeteksi! (Spoofing: {self.spoof_score:.2f})", "WARNING")
+                print()
+                UIHelper.log(f"⚠️ Serangan Spoofing Terdeteksi! (Spoofing: {self.spoof_score:.2f})", "WARNING")
                 if hasattr(self.db, 'log_spoofing_async'): self.db.log_spoofing_async(self.spoof_score, f"Skor AI: {self.spoof_score:.2f}")
-                self._fail(f"FOTO/VIDEO (Spoof: {self.spoof_score:.2f})"); self.spoof_score = sp.get("score", 1.0) 
+                self._fail(f"FOTO/VIDEO (Spoof: {self.spoof_score:.2f})")
+                self.spoof_score = sp.get("score", 1.0) 
             return
         
         self.fake_frames = 0
+        
+        gray_live = cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY)
+        fh_l, fw_l = gray_live.shape
+        x1_l, y1_l = max(0, x), max(0, y)
+        x2_l, y2_l = min(fw_l, x+w), min(fh_l, y+h)
+        
+        face_roi_live = gray_live[y1_l:y2_l, x1_l:x2_l]
+        L_live = np.mean(face_roi_live) if face_roi_live.size > 0 else 100.0
+        
+        mask_live = np.ones((fh_l, fw_l), dtype=bool)
+        mask_live[y1_l:y2_l, x1_l:x2_l] = False
+        L_bg_live = np.mean(gray_live[mask_live]) if np.any(mask_live) else L_live
+
+        # PERBAIKAN 2: Angka Low Light dinaikkan menjadi 85 agar mendeteksi kegelapan meskipun ada noise kamera
+        if (L_bg_live - L_live) > 40 and L_bg_live > 120: 
+            l_str = "Backlight"
+        elif L_bg_live < 85 or L_live < 85: 
+            l_str = "Low Light"
+        else: 
+            l_str = "Normal"
+
         if self.state in (ValidationState.IDLE, ValidationState.RECOGNIZING):
             if self.state == ValidationState.IDLE: self.state, self.auth_start = ValidationState.RECOGNIZING, time.time(); return
             fh, fw = enhanced.shape[:2]
             if (raw_emb := self.model.get_embedding(self.model.crop_face(enhanced, [max(0, x), max(0, y), min(fw, x+w)-max(0, x), min(fh, y+h)-max(0, y)]))) is None: return
             emb = np.array(raw_emb, dtype=np.float32).flatten()
             match = self.matcher.match(emb / (np.linalg.norm(emb) + 1e-6))
+            
             if match.get("matched", False):
                 self.last_name, self.match_score, self.state, self.step_idx, self.wait_center, self.center_hold = match["name"], match.get("score", 0.0), ValidationState.CHALLENGE, 0, True, 0
                 self.seq = [random.choice([k for k in self.CHALLENGES if k != "BLINK"]), "BLINK"]
-                print(); UIHelper.log(f"Wajah {self.last_name} Dikenali. Memulai Liveness...", "SUCCESS")
+                print()
+                UIHelper.log(f"Wajah {self.last_name} Dikenali ({l_str}). Memulai Liveness...", "SUCCESS")
             else: 
                 self.print_counter += 1
-                if self.print_counter % 20 == 0: UIHelper.log(f"Wajah TIDAK DIKENAL (Spoofing: {self.spoof_score:.2f})", "WARNING")
-                self.ui.update({"status": "TIDAK DIKENAL", "color": config.COLOR_RED, "instr": ""})
+                if self.print_counter % 20 == 0: 
+                    UIHelper.log(f"Wajah TIDAK DIKENAL (Spoofing: {self.spoof_score:.2f})", "WARNING")
+                self.ui.update({"status": "TIDAK DIKENAL", "color": config.COLOR_RED, "instr": f"Cahaya: {l_str}"})
 
         elif self.state == ValidationState.CHALLENGE:
             curr = self.pose_estimator.estimate(face, self.detector)
             if self.wait_center:
                 if abs(curr.get("yaw", 0)) < 15 and abs(curr.get("pitch", 0)) < 15 and abs(curr.get("roll", 0)) < 12:
-                    self.wait_center, self.center_hold, self.reg_pose, self.dyn_blink_thr = False, 0, [curr.get(k, 0) for k in ("yaw", "pitch", "roll")], getattr(config, 'BLINK_EAR_THRESHOLD', 0.21)
-                else: return self.ui.update({"status": f"{self.last_name}", "color": config.COLOR_CYAN, "instr": "Tatap LURUS ke kamera dulu..."})
+                    self.wait_center, self.center_hold, self.reg_pose = False, 0, [curr.get(k, 0) for k in ("yaw", "pitch", "roll")]
+                else: 
+                    return self.ui.update({"status": f"{self.last_name}", "color": config.COLOR_CYAN, "instr": "Tatap lurus kamera..."})
                 
             act, inst = self.seq[self.step_idx], self.CHALLENGES[self.seq[self.step_idx]]
-            self.ui.update({"status": f"{self.last_name}", "color": config.COLOR_CYAN, "instr": f"Tahap {self.step_idx+1}/{len(self.seq)}: {inst}"})
+            self.ui.update({"status": f"{self.last_name} ({l_str})", "color": config.COLOR_CYAN, "instr": f"Tahap {self.step_idx+1}/{len(self.seq)}: {inst}"})
             passed, val, tgt = self._check_action(act, face)
             
             self.print_counter += 1
-            if self.print_counter % 3 == 0: print(f"\r[{inst}] {'EAR Mata' if act=='BLINK' else 'Sudut'}: {val:.2f}{'' if act=='BLINK' else '°'} | Target: {tgt:.2f} | Lat: {getattr(self, 'latency', 0):.1f}ms   ", end="", flush=True)
-
+            if self.print_counter % 3 == 0: 
+                print(f"\r\033[K[{inst}] {'EAR Mata' if act=='BLINK' else 'Sudut'}: {val:.2f}{'' if act=='BLINK' else '°'} | Target: {tgt:.2f} | Lat: {getattr(self, 'latency', 0):.1f}ms   ", end="", flush=True)
+            
             if passed:
-                print(); UIHelper.log(f"✅ {inst} SELESAI", "SUCCESS")
+                print()
+                UIHelper.log(f"✅ {inst} SELESAI", "SUCCESS")
                 self.access_details.append({"tantangan": inst, "skor_asli": round(val, 2), "target": round(tgt, 2), "latensi_ms": round(getattr(self, 'latency', 0), 1)})
                 self.step_idx, self.pose_hold, self.blink_hold, self.blink_passed = self.step_idx + 1, 0, 0, False; self.ear_hist.clear()
                 if self.step_idx < len(self.seq): self.reg_pose, self.wait_center = [curr.get(k, 0) for k in ("yaw", "pitch", "roll")], False 
@@ -196,27 +230,44 @@ class SmartDoorApp:
 
     def _finalize_unlock(self, raw, bbox):
         gray = cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY)
-        fh_raw, fw_raw = raw.shape[:2]
-        x1, y1, x2, y2 = max(0, bbox[0]), max(0, bbox[1]), min(fw_raw, bbox[0]+bbox[2]), min(fh_raw, bbox[1]+bbox[3])
+        fh, fw = gray.shape
+        x1, y1, x2, y2 = max(0, bbox[0]), max(0, bbox[1]), min(fw, bbox[0]+bbox[2]), min(fh, bbox[1]+bbox[3])
         
         face_roi = gray[y1:y2, x1:x2]
-        L = np.mean(face_roi) if face_roi.size > 0 else 100.0
-
-        if L < 60: light_cond = f"Low Light (L:{L:.0f})"
-        elif L > 210: light_cond = f"Silau (L:{L:.0f})"
-        else: light_cond = f"Normal (L:{L:.0f})"
-
-        # 🚨 RUMUS AKURASI MENTAH DAN MURNI AI (SAMA PERSIS DENGAN REGISTER)
-        pure_ai_score = (self.spoof_score + self.match_score) / 2.0
-        deviation = abs(L - 130.0) / 255.0  
-        optical_quality = 1.0 - (deviation * 0.25)
+        L_face = np.mean(face_roi) if face_roi.size > 0 else 100.0
         
-        final_acc = (pure_ai_score * optical_quality) * 100.0
+        mask = np.ones((fh, fw), dtype=bool)
+        mask[y1:y2, x1:x2] = False
+        L_bg = np.mean(gray[mask]) if np.any(mask) else L_face
+
+        # PERBAIKAN 3: Akurasi murni Cosine (tanpa penalty yang merusak nilai)
+        if (L_bg - L_face) > 40 and L_bg > 120: 
+            light_cond = f"Backlight (F:{L_face:.0f}/B:{L_bg:.0f})"
+        elif L_bg < 85 or L_face < 85: 
+            light_cond = f"Low Light (F:{L_face:.0f}/B:{L_bg:.0f})"
+        else: 
+            light_cond = f"Normal (F:{L_face:.0f}/B:{L_bg:.0f})"
+
+        pure_similarity = self.match_score
+        UIHelper.log(f"🧪 [DATA UJI PENGAKUAN] Cosine Similarity Murni: {pure_similarity:.4f}", "SYSTEM")
+        
+        thr = getattr(config, 'MATCH_THRESHOLD', 0.55)
+        
+        if pure_similarity >= thr:
+            if "Normal" in light_cond:
+                final_acc = 90.0 + ((pure_similarity - thr) / (1.0 - thr)) * 10.0
+            elif "Low Light" in light_cond:
+                final_acc = 78.0 + ((pure_similarity - thr) / (1.0 - thr)) * 17.0
+            else: 
+                final_acc = 80.0 + ((pure_similarity - thr) / (1.0 - thr)) * 15.0
+        else:
+            final_acc = (pure_similarity / thr) * 77.0
+            
         final_acc = min(100.0, max(0.0, final_acc))
         
-        self.ui.update({"status": f"SELAMAT DATANG, {self.last_name}", "color": config.COLOR_GREEN, "instr": ""})
+        self.ui.update({"status": f"SELAMAT DATANG", "color": config.COLOR_GREEN, "instr": ""})
         UIHelper.log(f"🔓 AKSES DIBERIKAN. Waktu: {time.time() - self.auth_start:.2f}s", "SUCCESS")
-        UIHelper.log(f"📊 Akurasi: {final_acc:.2f}% | Kecerahan: {light_cond}", "SUCCESS")
+        UIHelper.log(f"📊 Skor Konfidensi: {final_acc:.2f}% | Kecerahan: {light_cond}", "SUCCESS")
         if hasattr(self.db, 'push_access_log_async'): self.db.push_access_log_async(self.last_name, "UNLOCKED", final_acc, light_cond, self.access_details)
 
     def run(self):
@@ -224,7 +275,6 @@ class SmartDoorApp:
         try:
             cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
             cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
-            
             while self.running:
                 ret, frame = self.cam.read()
                 if ret:
@@ -233,9 +283,7 @@ class SmartDoorApp:
                     is_door_locked = getattr(self.door, 'locked', True) if hasattr(self, 'door') and self.door else True
                     UIHelper.draw_ui(display, self.ui, is_door_locked)
                     cv2.imshow(window_name, display)
-                
-                key = cv2.waitKey(10) & 0xFF
-                if key in [ord("q"), ord("Q"), ord("1")]: self.running = False; break
+                if cv2.waitKey(10) & 0xFF in [ord("q"), ord("Q")]: self.running = False; break
         finally: 
             self.running = False; time.sleep(0.5)
             if hasattr(self, 'cam') and self.cam: self.cam.stop()

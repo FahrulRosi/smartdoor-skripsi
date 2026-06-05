@@ -1,5 +1,6 @@
 import os, json, time, threading, traceback, sqlite3, numpy as np
 from datetime import datetime
+import requests
 from supabase import create_client, Client
 import config
 
@@ -46,13 +47,11 @@ class DataTransformer:
             elif snap.get("tag") == "roll_right": 
                 rr, rr_lat = float(snap.get("roll", 0.0)), lat
 
-        # ✅ FORMAT 1: TANPA LATENSI (Untuk tabel registered_faces)
         yaw_score_clean = f"L:{yl:.1f}° R:{yr:.1f}°"
         pitch_score_clean = f"U:{pu:.1f}° D:{pd:.1f}°"
         roll_score_clean = f"L:{rl:.1f}° R:{rr:.1f}°"
         blink_score_clean = f"Buka:{ear_o:.2f} Kedip:{ear_c:.2f}"
 
-        # ✅ FORMAT 2: DENGAN LATENSI LENGKAP (Untuk tabel register_logs)
         yaw_score_log = f"L:{yl:.1f}° ({yl_lat:.1f}ms) R:{yr:.1f}° ({yr_lat:.1f}ms)"
         pitch_score_log = f"U:{pu:.1f}° ({pu_lat:.1f}ms) D:{pd:.1f}° ({pd_lat:.1f}ms)"
         roll_score_log = f"L:{rl:.1f}° ({rl_lat:.1f}ms) R:{rr:.1f}° ({rr_lat:.1f}ms)"
@@ -96,20 +95,21 @@ class FaceDatabase:
 
         self.url, self.key = getattr(config, "SUPABASE_URL", ""), getattr(config, "SUPABASE_KEY", "")
         self.is_connected = False
+        
         if self.url and self.key:
             try:
                 self.client: Client = create_client(self.url, self.key)
                 self.is_connected = True
-                print("[Supabase] Terhubung ke Cloud Database PostgreSQL (Mode Hybrid SQLite).")
+                print("[Supabase] Terhubung ke Cloud Database PostgreSQL (Mode Edge Offline-First).")
             except Exception as e: 
-                print(f"[Supabase WARNING] Gagal inisialisasi: {e}")
+                print(f"[Supabase WARNING] Gagal inisialisasi awal: {e}")
 
+        # Jalankan pekerja sinkronisasi di latar belakang
         threading.Thread(target=self._https_sync_worker, daemon=True).start()
 
     def _init_sqlite(self):
         with self.db_lock, sqlite3.connect(self.db_path, check_same_thread=False) as conn:
             c = conn.cursor()
-            # Tabel master dikembalikan kolom skornya (tapi nanti diisi tanpa latensi)
             c.execute('''CREATE TABLE IF NOT EXISTS registered_faces (
                 name TEXT PRIMARY KEY, embedding TEXT, liveness_config TEXT,
                 yaw_score TEXT, pitch_score TEXT, roll_score TEXT, blink_score TEXT,
@@ -118,7 +118,7 @@ class FaceDatabase:
             c.execute('''CREATE TABLE IF NOT EXISTS register_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, status TEXT,
                 yaw_score TEXT, pitch_score TEXT, roll_score TEXT, blink_score TEXT,
-                accuracy REAL, light_condition TEXT, created_at TEXT, is_synced INTEGER DEFAULT 0)''')
+                light_condition TEXT, created_at TEXT, is_synced INTEGER DEFAULT 0)''')
             
             c.execute('''CREATE TABLE IF NOT EXISTS access_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, status TEXT,
@@ -128,9 +128,35 @@ class FaceDatabase:
             c.execute('''CREATE TABLE IF NOT EXISTS spoofing_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, spoof_score REAL, message TEXT,
                 created_at TEXT, is_synced INTEGER DEFAULT 0)''')
+
+            # --- TABEL SENSOR PENGHAPUSAN (TRIGGER) ---
+            c.execute('''CREATE TABLE IF NOT EXISTS sync_deletes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, table_name TEXT, record_id TEXT)''')
+
+            # Sensor otomatis jika data dihapus di SQLite (DBeaver)
+            triggers = [
+                ("registered_faces", "name"),
+                ("register_logs", "created_at"),
+                ("access_logs", "created_at"),
+                ("spoofing_logs", "created_at")
+            ]
+            for tbl, col in triggers:
+                c.execute(f'''CREATE TRIGGER IF NOT EXISTS trg_del_{tbl} 
+                              AFTER DELETE ON {tbl} 
+                              FOR EACH ROW BEGIN 
+                                  INSERT INTO sync_deletes (table_name, record_id) VALUES ('{tbl}', OLD.{col}); 
+                              END;''')
             conn.commit()
 
+    def _is_online(self):
+        try:
+            requests.head("https://1.1.1.1", timeout=2)
+            return True
+        except requests.ConnectionError:
+            return False
+
     def check_user_exists(self, name):
+        """Cek langsung ke memori lokal. Selalu cepat walau tanpa internet."""
         with self.db_lock, sqlite3.connect(self.db_path) as conn:
             c = conn.cursor()
             c.execute("SELECT 1 FROM registered_faces WHERE name = ?", (name,))
@@ -139,13 +165,12 @@ class FaceDatabase:
     def save_face(self, name, embedding, cap_data):
         try:
             p = DataTransformer.prepare_payload(name, embedding, cap_data)
-            acc = float(cap_data.get("registration_accuracy", 0.0))
             lc = cap_data.get("light_condition", "N/A")
             created_at = p.get("registered_at", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
 
             with self.db_lock, sqlite3.connect(self.db_path) as conn:
                 c = conn.cursor()
-                # 1. Simpan ke master data menggunakan format *_clean (Tanpa Latensi)
+                # 1. Simpan ke LOKAL (Offline-First)
                 c.execute("""INSERT INTO registered_faces 
                     (name, embedding, liveness_config, yaw_score, pitch_score, roll_score, blink_score, created_at, is_synced)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
@@ -156,22 +181,22 @@ class FaceDatabase:
                     (name, json.dumps(p["embedding"]), json.dumps(p.get("liveness_config", {})), 
                      p["yaw_score_clean"] or "-", p["pitch_score_clean"] or "-", p["roll_score_clean"] or "-", p["blink_score_clean"] or "-", created_at))
                 
-                # 2. Simpan ke log pendaftaran menggunakan format *_log (Dengan Latensi)
                 c.execute("""INSERT INTO register_logs 
-                    (name, status, yaw_score, pitch_score, roll_score, blink_score, accuracy, light_condition, created_at, is_synced)
-                    VALUES (?, 'SUCCESS', ?, ?, ?, ?, ?, ?, ?, 0)""",
-                    (name, p["yaw_score_log"] or "-", p["pitch_score_log"] or "-", p["roll_score_log"] or "-", p["blink_score_log"] or "-", acc, lc, created_at))
+                    (name, status, yaw_score, pitch_score, roll_score, blink_score, light_condition, created_at, is_synced)
+                    VALUES (?, 'SUCCESS', ?, ?, ?, ?, ?, ?, 0)""",
+                    (name, p["yaw_score_log"] or "-", p["pitch_score_log"] or "-", p["roll_score_log"] or "-", p["blink_score_log"] or "-", lc, created_at))
                 conn.commit()
             
-            print(f"\n[Database] ✅ Wajah '{name}' tersimpan instan ke SQLite. Sinkronisasi Cloud dijadwalkan...")
-            self.sync_trigger.set() 
+            print(f"\n[Database] ✅ Wajah '{name}' tersimpan instan ke SQLite LOKAL. Memicu sinkronisasi ke Supabase...")
+            self.sync_trigger.set() # Panggil worker untuk upload ke Supabase
             return True
         except Exception: 
             traceback.print_exc()
-            self.log_register_async(name, "FAILED", 0.0, light_cond="N/A", cap_data=cap_data)
+            self.log_register_async(name, "FAILED", light_cond="N/A", cap_data=cap_data)
             return False
 
     def load_all_faces(self, silent=False):
+        """Memuat data dari lokal dengan cepat saat aplikasi booting."""
         faces = {}
         with self.db_lock, sqlite3.connect(self.db_path) as conn:
             c = conn.cursor()
@@ -182,28 +207,35 @@ class FaceDatabase:
                     "yaw_score": row[3], "pitch_score": row[4], "roll_score": row[5], "blink_score": row[6],
                     "registered_at": row[7]
                 }
-        
-        if not faces and self.is_connected:
-            if not silent: print("[Hybrid Sync] SQLite lokal kosong. Mengunduh data dari Cloud Supabase...")
-            try:
-                res = self.client.table("registered_faces").select("*").execute()
-                if res.data:
-                    with self.db_lock, sqlite3.connect(self.db_path) as conn:
-                        c = conn.cursor()
-                        for r in res.data:
-                            c.execute("""INSERT OR IGNORE INTO registered_faces 
-                                (name, embedding, liveness_config, yaw_score, pitch_score, roll_score, blink_score, created_at, is_synced)
-                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)""",
-                                (r["name"], json.dumps(r["embedding"]), json.dumps(r.get("liveness_config", {})), 
-                                 r.get("yaw_score", "-"), r.get("pitch_score", "-"), r.get("roll_score", "-"), r.get("blink_score", "-"), r.get("created_at", "")))
-                            faces[r["name"]] = {"name": r["name"], "embedding": r["embedding"], "liveness_config": r.get("liveness_config", {}), "registered_at": r.get("created_at", "")}
-                        conn.commit()
-                    if not silent: print(f"[Hybrid Sync] Berhasil memulihkan {len(faces)} identitas wajah.")
-            except Exception as e: print(f"[Cloud Error] Gagal unduh data master: {e}")
-            
         return faces
 
-    def log_register_async(self, name, status, accuracy, message=None, light_cond="N/A", cap_data=None):
+    def _pull_logs_from_supabase(self, cursor, table_name, columns):
+        """Fungsi bantuan untuk menyedot log Supabase ke SQLite lokal, termasuk menghapusnya jika hilang di Supabase."""
+        res = self.client.table(table_name).select("*").execute()
+        # WAJIB gunakan "is not None" agar jika tabel Supabase kosong (dihapus semua), lokal ikut terhapus
+        if res.data is not None: 
+            remote_times = [str(r["created_at"]) for r in res.data]
+            
+            # 1. HAPUS LOG LOKAL JIKA DI SUPABASE SUDAH HILANG
+            cursor.execute(f"SELECT id, created_at FROM {table_name} WHERE is_synced = 1")
+            for row in cursor.fetchall():
+                local_id, local_time = row[0], str(row[1])
+                if local_time not in remote_times:
+                    cursor.execute(f"DELETE FROM {table_name} WHERE id = ?", (local_id,))
+                    # Cegah trigger SQLite mengirim ulang sinyal hapus ke Supabase (Echo Cancellation)
+                    cursor.execute("DELETE FROM sync_deletes WHERE table_name = ? AND record_id = ?", (table_name, local_time))
+                    print(f"[Sync] 🗑️ Log {table_name} dihapus dari lokal menyesuaikan Supabase.")
+
+            # 2. TAMBAH LOG DARI SUPABASE KE LOKAL JIKA BELUM ADA
+            for r in res.data:
+                cursor.execute(f"SELECT 1 FROM {table_name} WHERE created_at = ?", (r["created_at"],))
+                if not cursor.fetchone():
+                    placeholders = ", ".join(["?"] * (len(columns) + 1))
+                    cols_str = ", ".join(columns) + ", is_synced"
+                    vals = [r.get(c, ("-" if c != "accuracy" else 0.0)) for c in columns] + [1]
+                    cursor.execute(f"INSERT INTO {table_name} ({cols_str}) VALUES ({placeholders})", vals)
+
+    def log_register_async(self, name, status, message=None, light_cond="N/A", cap_data=None):
         y = p = r = b = "-"
         if cap_data:
             try: 
@@ -218,11 +250,10 @@ class FaceDatabase:
         created_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         with self.db_lock, sqlite3.connect(self.db_path) as conn:
             conn.execute("""INSERT INTO register_logs 
-                (name, status, yaw_score, pitch_score, roll_score, blink_score, accuracy, light_condition, created_at, is_synced)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
-                (name, status, y or "-", p or "-", r or "-", b or "-", float(accuracy), light_cond, created_at))
+                (name, status, yaw_score, pitch_score, roll_score, blink_score, light_condition, created_at, is_synced)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)""",
+                (name, status, y or "-", p or "-", r or "-", b or "-", light_cond, created_at))
             conn.commit()
-        
         self.sync_trigger.set() 
 
     def push_access_log_async(self, user_name, status, accuracy, light_cond="N/A", access_details=None):
@@ -242,7 +273,6 @@ class FaceDatabase:
                 VALUES (?, ?, ?, ?, ?, ?, ?, 0)""",
                 (user_name, status, headpose_str.strip(" | ") or "-", blink_str.strip(" | ") or "-", float(accuracy), light_cond, created_at))
             conn.commit()
-            
         self.sync_trigger.set() 
 
     def log_spoofing_async(self, score, message):
@@ -251,78 +281,105 @@ class FaceDatabase:
             conn.execute("INSERT INTO spoofing_logs (spoof_score, message, created_at, is_synced) VALUES (?, ?, ?, 0)", 
                          (float(score), message or "-", created_at))
             conn.commit()
-            
         self.sync_trigger.set() 
 
     # ==============================================================================
-    # 3. BACKGROUND WORKER: REAL-TIME EVENT DRIVEN SYNC VIA HTTPS
+    # 3. BACKGROUND WORKER: LIVE 2-WAY SYNC (HAPUS, TAMBAH, UPDATE)
     # ==============================================================================
     def _https_sync_worker(self):
         time.sleep(3) 
         
         while True:
-            self.sync_trigger.wait(timeout=10.0)
+            # Pekerja diatur untuk mengecek perubahan secara CEPAT (3 DETIK) 
+            self.sync_trigger.wait(timeout=3.0) 
             self.sync_trigger.clear() 
             
-            if self.is_connected:
-                try:
-                    with self.db_lock, sqlite3.connect(self.db_path) as conn:
-                        c = conn.cursor()
-                        synced_count = 0
+            if not self.is_connected or not self._is_online(): continue 
+            
+            try:
+                with self.db_lock, sqlite3.connect(self.db_path) as conn:
+                    c = conn.cursor()
+                    
+                    # ---------------------------------------------------------
+                    # TAHAP 1: PUSH DELETION (Dari LOKAL menghapus ke SUPABASE)
+                    # ---------------------------------------------------------
+                    c.execute("SELECT id, table_name, record_id FROM sync_deletes")
+                    for row in c.fetchall():
+                        del_id, tbl, rec_id = row
+                        try:
+                            if tbl == 'registered_faces':
+                                self.client.table(tbl).delete().eq('name', rec_id).execute()
+                            else:
+                                self.client.table(tbl).delete().eq('created_at', rec_id).execute()
+                            
+                            c.execute("DELETE FROM sync_deletes WHERE id = ?", (del_id,))
+                            print(f"[Sync] 🗑️ Data di Supabase ({tbl}) berhasil dihapus menyamakan SQLite.")
+                        except Exception: pass
+                    
+                    synced_count = 0
+                    
+                    # ---------------------------------------------------------
+                    # TAHAP 2: PUSH INSERT (Dari LOKAL upload ke SUPABASE)
+                    # ---------------------------------------------------------
+                    c.execute("SELECT name, embedding, liveness_config, yaw_score, pitch_score, roll_score, blink_score, created_at FROM registered_faces WHERE is_synced = 0")
+                    for r in c.fetchall():
+                        payload = {"name": r[0], "embedding": json.loads(r[1]), "liveness_config": json.loads(r[2]), "yaw_score": r[3] or "-", "pitch_score": r[4] or "-", "roll_score": r[5] or "-", "blink_score": r[6] or "-", "created_at": r[7]}
+                        self.client.table("registered_faces").upsert(payload, on_conflict="name").execute()
+                        c.execute("UPDATE registered_faces SET is_synced = 1 WHERE name = ?", (r[0],))
+                        synced_count += 1
+                    
+                    c.execute("SELECT id, name, status, yaw_score, pitch_score, roll_score, blink_score, light_condition, created_at FROM register_logs WHERE is_synced = 0")
+                    for r in c.fetchall():
+                        payload = {"name": r[1], "status": r[2], "yaw_score": r[3] or "-", "pitch_score": r[4] or "-", "roll_score": r[5] or "-", "blink_score": r[6] or "-", "light_condition": r[7] or "-", "created_at": r[8]}
+                        self.client.table("register_logs").insert(payload).execute()
+                        c.execute("UPDATE register_logs SET is_synced = 1 WHERE id = ?", (r[0],))
+                        synced_count += 1
                         
-                        # A. Upload Registered Faces Baru
-                        c.execute("SELECT name, embedding, liveness_config, yaw_score, pitch_score, roll_score, blink_score, created_at FROM registered_faces WHERE is_synced = 0")
-                        for r in c.fetchall():
-                            payload = {
-                                "name": r[0], 
-                                "embedding": json.loads(r[1]), 
-                                "liveness_config": json.loads(r[2]), 
-                                "yaw_score": r[3] or "-",
-                                "pitch_score": r[4] or "-",
-                                "roll_score": r[5] or "-",
-                                "blink_score": r[6] or "-",
-                                "created_at": r[7]
-                            }
-                            self.client.table("registered_faces").upsert(payload, on_conflict="name").execute()
-                            conn.execute("UPDATE registered_faces SET is_synced = 1 WHERE name = ?", (r[0],))
-                            synced_count += 1
+                    c.execute("SELECT id, name, status, headpose_score, blink_score, accuracy, light_condition, created_at FROM access_logs WHERE is_synced = 0")
+                    for r in c.fetchall():
+                        payload = {"name": r[1], "status": r[2], "headpose_score": r[3] or "-", "blink_score": r[4] or "-", "accuracy": float(r[5] or 0.0), "light_condition": r[6] or "-", "created_at": r[7]}
+                        self.client.table("access_logs").insert(payload).execute()
+                        c.execute("UPDATE access_logs SET is_synced = 1 WHERE id = ?", (r[0],))
+                        synced_count += 1
                         
-                        # B. Upload Register Logs
-                        c.execute("SELECT id, name, status, yaw_score, pitch_score, roll_score, blink_score, accuracy, light_condition, created_at FROM register_logs WHERE is_synced = 0")
-                        for r in c.fetchall():
-                            payload = {
-                                "name": r[1], "status": r[2],
-                                "yaw_score": r[3] or "-",
-                                "pitch_score": r[4] or "-",
-                                "roll_score": r[5] or "-",
-                                "blink_score": r[6] or "-",
-                                "accuracy": float(r[7] or 0.0),
-                                "light_condition": r[8] or "-",
-                                "created_at": r[9]
-                            }
-                            self.client.table("register_logs").insert(payload).execute()
-                            conn.execute("UPDATE register_logs SET is_synced = 1 WHERE id = ?", (r[0],))
-                            synced_count += 1
-                            
-                        # ... (Bagian Access Logs dan Spoofing Logs tidak berubah, sama seperti kode sebelumnya) ...
-                        c.execute("SELECT id, name, status, headpose_score, blink_score, accuracy, light_condition, created_at FROM access_logs WHERE is_synced = 0")
-                        for r in c.fetchall():
-                            payload = {"name": r[1], "status": r[2], "headpose_score": r[3] or "-", "blink_score": r[4] or "-", "accuracy": float(r[5] or 0.0), "light_condition": r[6] or "-", "created_at": r[7]}
-                            self.client.table("access_logs").insert(payload).execute()
-                            conn.execute("UPDATE access_logs SET is_synced = 1 WHERE id = ?", (r[0],))
-                            synced_count += 1
-                            
-                        c.execute("SELECT id, spoof_score, message, created_at FROM spoofing_logs WHERE is_synced = 0")
-                        for r in c.fetchall():
-                            payload = {"spoof_score": float(r[1] or 0.0), "message": r[2] or "-", "created_at": r[3]}
-                            self.client.table("spoofing_logs").insert(payload).execute()
-                            conn.execute("UPDATE spoofing_logs SET is_synced = 1 WHERE id = ?", (r[0],))
-                            synced_count += 1
-                            
-                        conn.commit()
+                    c.execute("SELECT id, spoof_score, message, created_at FROM spoofing_logs WHERE is_synced = 0")
+                    for r in c.fetchall():
+                        payload = {"spoof_score": float(r[1] or 0.0), "message": r[2] or "-", "created_at": r[3]}
+                        self.client.table("spoofing_logs").insert(payload).execute()
+                        c.execute("UPDATE spoofing_logs SET is_synced = 1 WHERE id = ?", (r[0],))
+                        synced_count += 1
+                    
+                    if synced_count > 0: print(f"\n[Background Sync] ☁️ Berhasil UPLOAD {synced_count} baris data ke Supabase!")
+
+                    # ---------------------------------------------------------
+                    # TAHAP 3: PULL SYNC (Dari SUPABASE turun ke LOKAL secara LIVE)
+                    # ---------------------------------------------------------
+                    # A. Sync Wajah (Master Data)
+                    res = self.client.table("registered_faces").select("*").execute()
+                    if res.data is not None:
+                        remote_names = [str(r["name"]) for r in res.data]
+                        c.execute("SELECT name FROM registered_faces WHERE is_synced = 1")
+                        for row in c.fetchall():
+                            if row[0] not in remote_names:
+                                c.execute("DELETE FROM registered_faces WHERE name = ?", (row[0],))
+                                c.execute("DELETE FROM sync_deletes WHERE table_name = 'registered_faces' AND record_id = ?", (row[0],))
+                                print(f"[Sync] 🗑️ Wajah '{row[0]}' dihapus dari lokal menyesuaikan Supabase.")
                         
-                        if synced_count > 0:
-                            print(f"\n[HTTPS Worker] ☁️ Berhasil melakukan PUSH {synced_count} baris data SQLite ke Supabase secara Real-Time!")
-                            
-                except Exception as e:
-                    pass
+                        for r in res.data:
+                            c.execute("""INSERT INTO registered_faces 
+                                (name, embedding, liveness_config, yaw_score, pitch_score, roll_score, blink_score, created_at, is_synced)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+                                ON CONFLICT(name) DO UPDATE SET 
+                                embedding=excluded.embedding, liveness_config=excluded.liveness_config,
+                                yaw_score=excluded.yaw_score, pitch_score=excluded.pitch_score, roll_score=excluded.roll_score,
+                                blink_score=excluded.blink_score, is_synced=1""",
+                                (r["name"], json.dumps(r["embedding"]), json.dumps(r.get("liveness_config", {})), 
+                                 r.get("yaw_score", "-"), r.get("pitch_score", "-"), r.get("roll_score", "-"), r.get("blink_score", "-"), r.get("created_at", "")))
+
+                    # B. Sync Logs
+                    self._pull_logs_from_supabase(c, "register_logs", ["name", "status", "yaw_score", "pitch_score", "roll_score", "blink_score", "light_condition", "created_at"])
+                    self._pull_logs_from_supabase(c, "access_logs", ["name", "status", "headpose_score", "blink_score", "accuracy", "light_condition", "created_at"])
+                    self._pull_logs_from_supabase(c, "spoofing_logs", ["spoof_score", "message", "created_at"])
+                        
+                    conn.commit()
+            except Exception as e: pass

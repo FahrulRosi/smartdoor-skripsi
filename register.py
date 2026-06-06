@@ -18,7 +18,7 @@ class RegistrationStage(Enum): IDLE=0; FACEMESH=1; YAW=2; PITCH=3; ROLL=4; BLINK
 STAGE_NAMES = {RegistrationStage.FACEMESH: "1. FaceMesh (3D)", RegistrationStage.YAW: "2a. Liveness (Yaw)", RegistrationStage.PITCH: "2b. Liveness (Pitch)", RegistrationStage.ROLL: "2c. Liveness (Roll)", RegistrationStage.BLINK: "3. Liveness (Blink)", RegistrationStage.EXTRACTION: "4. Ekstraksi Fitur"}
 STEP_TO_STAGE = {"FACEMESH": RegistrationStage.FACEMESH, "YAW": RegistrationStage.YAW, "PITCH": RegistrationStage.PITCH, "ROLL": RegistrationStage.ROLL, "BLINK": RegistrationStage.BLINK, "DONE": RegistrationStage.EXTRACTION}
 
-def _log(msg, level="INFO"): print(f"\r\033[K[{datetime.now().strftime('%H:%M:%S')}] [{level}] {msg}")
+def _log(msg, level="INFO"): print(f"[{datetime.now().strftime('%H:%M:%S')}] [{level}] {msg}")
 
 class Helpers:
     @staticmethod
@@ -33,31 +33,32 @@ class Helpers:
     @staticmethod
     def create_ai_frame(raw_frame, bbox):
         """
-        [SOLUSI FINAL] DYNAMIC GAMMA CORRECTION + YUV CLAHE
-        100% Identik dengan main.py agar ekstraksi vektor konsisten mutlak.
+        [SOLUSI FINAL] LAB CLAHE Normalization
+        100% Identik dengan main.py agar konsistensi vektor terjaga mutlak.
         """
         x, y, w, h = bbox
         fh, fw = raw_frame.shape[:2]
-        x1, y1 = max(0, x), max(0, y)
-        x2, y2 = min(fw, x+w), min(fh, y+h)
         
-        img_yuv = cv2.cvtColor(raw_frame, cv2.COLOR_BGR2YUV)
-        y_ch, u_ch, v_ch = cv2.split(img_yuv)
+        pad_x, pad_y = int(w * 0.1), int(h * 0.1)
+        x1, y1 = max(0, x - pad_x), max(0, y - pad_y)
+        x2, y2 = min(fw, x + w + pad_x), min(fh, y + h + pad_y)
         
-        face_y = y_ch[y1:y2, x1:x2]
-        mean_y = np.mean(face_y) if face_y.size > 0 else 130.0
+        face_crop = raw_frame[y1:y2, x1:x2].copy()
+        if face_crop.size == 0: return raw_frame
         
-        if 5.0 < mean_y < 250.0:
-            gamma = np.log(130.0 / 255.0) / np.log(mean_y / 255.0)
-            gamma = max(0.15, min(gamma, 4.5)) 
-            y_float = y_ch.astype(np.float32) / 255.0
-            y_float = np.power(y_float, gamma) * 255.0
-            y_ch = np.clip(y_float, 0, 255).astype(np.uint8)
-            
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-        y_ch = clahe.apply(y_ch)
+        lab = cv2.cvtColor(face_crop, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
         
-        return cv2.cvtColor(cv2.merge((y_ch, u_ch, v_ch)), cv2.COLOR_YUV2BGR)
+        clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+        cl = clahe.apply(l)
+        
+        merged = cv2.merge((cl, a, b))
+        enhanced_face = cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
+        
+        result_frame = raw_frame.copy()
+        result_frame[y1:y2, x1:x2] = enhanced_face
+        
+        return result_frame
 
     @staticmethod
     def capture_blink(face):
@@ -106,7 +107,7 @@ class FaceRegistrationApp:
     POSE_CFG = {RegistrationStage.YAW: ("yaw_snapshots", "yaw_left", "yaw_right", "yaw", getattr(config, 'YAW_THRESHOLD', 25.0)), RegistrationStage.PITCH: ("pitch_snapshots", "pitch_up", "pitch_down", "pitch", getattr(config, 'PITCH_THRESHOLD', 20.0)), RegistrationStage.ROLL: ("roll_snapshots", "roll_left", "roll_right", "roll", getattr(config, 'ROLL_THRESHOLD', 25.0))}
     
     def __init__(self, name):
-        self.name, self.stage, self.in_ext, self.hold_frames, self.print_counter, self.missed_frames = name, RegistrationStage.FACEMESH, False, 0, 0, 0
+        self.name, self.stage, self.in_ext, self.hold_frames, self.missed_frames = name, RegistrationStage.FACEMESH, False, 0, 0
         self.last_match_score, self.fake_frames, self.latency = 0.0, 0, 0.0 
         self.ext_embs = [] 
         
@@ -222,7 +223,6 @@ class FaceRegistrationApp:
         else: 
             light_cond = f"Normal (F:{L:.0f}/B:{L_bg:.0f})"
 
-        # ---> MENGEKSTRAK WAJAH DENGAN DYNAMIC GAMMA <---
         ai_frame = Helpers.create_ai_frame(raw_frame, face.bbox)
         
         raw_emb = self.model.get_embedding(self.model.crop_face(ai_frame, safe_bbox))
@@ -368,10 +368,6 @@ class FaceRegistrationApp:
                     self._process_extraction(raw, enhanced, face, display, pose, hud_txt, sp_score)
 
                 self.latency = (time.time() - t_start) * 1000.0
-
-                self.print_counter += 1
-                if self.print_counter % 3 == 0 and instr: 
-                    print(f"\r\033[K[{instr}] {term_txt} | Lat: {self.latency:.1f}ms", end="", flush=True)
                     
                 if old_stage != self.stage: 
                     self._log_transition(old_stage)
@@ -384,7 +380,6 @@ class FaceRegistrationApp:
         if self.stage == RegistrationStage.COMPLETE: return
         threading.Thread(target=self._process_thread, daemon=True).start()
         try:
-            # Jendela aplikasi tidak fullscreen lagi
             cv2.namedWindow("Register", cv2.WINDOW_NORMAL)
 
             while self.is_running and self.stage != RegistrationStage.COMPLETE:

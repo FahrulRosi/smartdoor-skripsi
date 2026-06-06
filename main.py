@@ -31,41 +31,38 @@ class UIHelper:
     @staticmethod
     def create_ai_frame(raw_frame, bbox):
         """
-        [SOLUSI FINAL] DYNAMIC GAMMA CORRECTION + YUV CLAHE
-        Memaksa tekstur wajah siluet menjadi terang (130) tanpa merusak background.
+        [SOLUSI FINAL] LAB CLAHE Normalization
+        Memisahkan cahaya dari warna, lalu meratakan kecerahan wajah secara lokal.
+        Tidak akan merusak vektor identitas MobileFaceNet.
         """
         x, y, w, h = bbox
         fh, fw = raw_frame.shape[:2]
-        x1, y1 = max(0, x), max(0, y)
-        x2, y2 = min(fw, x+w), min(fh, y+h)
         
-        # 1. Konversi ke YUV untuk mengontrol cahaya tanpa merusak warna
-        img_yuv = cv2.cvtColor(raw_frame, cv2.COLOR_BGR2YUV)
-        y_ch, u_ch, v_ch = cv2.split(img_yuv)
+        # Beri padding sedikit agar seluruh wajah (termasuk dagu/rambut) masuk
+        pad_x, pad_y = int(w * 0.1), int(h * 0.1)
+        x1, y1 = max(0, x - pad_x), max(0, y - pad_y)
+        x2, y2 = min(fw, x + w + pad_x), min(fh, y + h + pad_y)
         
-        # 2. Hitung kecerahan rata-rata HANYA pada area wajah
-        face_y = y_ch[y1:y2, x1:x2]
-        mean_y = np.mean(face_y) if face_y.size > 0 else 130.0
+        face_crop = raw_frame[y1:y2, x1:x2].copy()
+        if face_crop.size == 0: return raw_frame
         
-        # 3. Dynamic Gamma Correction (Target Kecerahan Mutlak: 130)
-        if 5.0 < mean_y < 250.0:
-            # Cari nilai Gamma secara matematis agar mean_y terangkat tepat ke 130
-            gamma = np.log(130.0 / 255.0) / np.log(mean_y / 255.0)
-            
-            # Limit diperlebar signifikan untuk mengatasi Backlight EKSTREM
-            gamma = max(0.15, min(gamma, 4.5)) 
-            
-            # Terapkan peregangan Gamma ke saluran cahaya (Y)
-            y_float = y_ch.astype(np.float32) / 255.0
-            y_float = np.power(y_float, gamma) * 255.0
-            y_ch = np.clip(y_float, 0, 255).astype(np.uint8)
-            
-        # 4. Terapkan Local Contrast (CLAHE) ekstra kuat agar mata & hidung tajam
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-        y_ch = clahe.apply(y_ch)
+        # Konversi ke ruang warna LAB (Lightness, A, B)
+        lab = cv2.cvtColor(face_crop, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
         
-        # 5. Gabungkan kembali
-        return cv2.cvtColor(cv2.merge((y_ch, u_ch, v_ch)), cv2.COLOR_YUV2BGR)
+        # Terapkan CLAHE HANYA pada channel Lightness (Kecerahan)
+        clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+        cl = clahe.apply(l)
+        
+        # Gabungkan kembali
+        merged = cv2.merge((cl, a, b))
+        enhanced_face = cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
+        
+        # Masukkan kembali wajah yang sudah diterangkan ke frame utuh
+        result_frame = raw_frame.copy()
+        result_frame[y1:y2, x1:x2] = enhanced_face
+        
+        return result_frame
 
     @staticmethod
     def get_ear(f):
@@ -138,7 +135,7 @@ class SmartDoorApp:
     def _reset_state(self):
         self.state, self.last_name, self.match_score, self.auth_start = ValidationState.IDLE, "", 0.0, 0.0
         self.seq, self.step_idx, self.reg_pose, self.pose_hold, self.prev_center = [], 0, [0.0, 0.0, 0.0], 0, None
-        self.wait_center, self.center_hold, self.blink_passed, self.blink_hold, self.ear_hist, self.print_counter, self.access_details = False, 0, False, 0, [], 0, []
+        self.wait_center, self.center_hold, self.blink_passed, self.blink_hold, self.ear_hist, self.access_details = False, 0, False, 0, [], []
 
     def _fail(self, status, color=config.COLOR_RED, instr="", wait=False):
         self._reset_state(); self.fake_frames = 0
@@ -190,10 +187,7 @@ class SmartDoorApp:
         
         if not sp.get("real", True):
             self.fake_frames += 1 
-            if self.fake_frames < 10: 
-                print(f"\r\033[K[Memeriksa] INDIKASI PALSU! | Spoofing: {self.spoof_score:.2f}", end="", flush=True)
-            elif self.fake_frames == 10: 
-                print()
+            if self.fake_frames == 10: 
                 detected_type = sp.get("label_name", "Spoofing Tidak Diketahui")
                 UIHelper.log(f"⚠️ Serangan Spoofing Terdeteksi! Tipe: {detected_type} (Skor: {self.spoof_score:.2f})", "WARNING")
                 if hasattr(self.db, 'log_spoofing_async'): self.db.log_spoofing_async(self.spoof_score, detected_type)
@@ -226,22 +220,21 @@ class SmartDoorApp:
             if self.state == ValidationState.IDLE: self.state, self.auth_start = ValidationState.RECOGNIZING, time.time(); return
             fh, fw = raw.shape[:2]
             
-            # ---> MENGEKSTRAK WAJAH DENGAN DYNAMIC GAMMA (SAMA DENGAN REGISTER) <---
             ai_frame = UIHelper.create_ai_frame(raw, face.bbox)
             
-            if (raw_emb := self.model.get_embedding(self.model.crop_face(ai_frame, [max(0, x), max(0, y), min(fw, x+w)-max(0, x), min(fh, y+h)-max(0, y)]))) is None: return
+            # Safe bounding box cropping
+            safe_bbox = [max(0, x), max(0, y), min(fw, x+w)-max(0, x), min(fh, y+h)-max(0, y)]
+            if (raw_emb := self.model.get_embedding(self.model.crop_face(ai_frame, safe_bbox))) is None: return
+            
             emb = np.array(raw_emb, dtype=np.float32).flatten()
             match = self.matcher.match(emb / (np.linalg.norm(emb) + 1e-6))
             
             if match.get("matched", False):
                 self.last_name, self.match_score, self.state, self.step_idx, self.wait_center, self.center_hold = match["name"], match.get("score", 0.0), ValidationState.CHALLENGE, 0, True, 0
                 self.seq = [random.choice([k for k in self.CHALLENGES if k != "BLINK"]), "BLINK"]
-                print()
                 UIHelper.log(f"Wajah {self.last_name} Dikenali ({l_str}). Memulai Liveness...", "SUCCESS")
             else: 
-                self.print_counter += 1
-                if self.print_counter % 20 == 0: 
-                    UIHelper.log(f"Wajah TIDAK DIKENAL (Spoofing: {self.spoof_score:.2f})", "WARNING")
+                # Cukup perbarui UI jika gagal, kurangi log spam
                 self.ui.update({"status": "TIDAK DIKENAL", "color": config.COLOR_RED, "instr": f"Cahaya: {l_str}"})
 
         elif self.state == ValidationState.CHALLENGE:
@@ -256,13 +249,8 @@ class SmartDoorApp:
             self.ui.update({"status": f"{self.last_name} ({l_str})", "color": config.COLOR_CYAN, "instr": f"Tahap {self.step_idx+1}/{len(self.seq)}: {inst}"})
             passed, val, tgt = self._check_action(act, face)
             
-            self.print_counter += 1
-            if self.print_counter % 3 == 0: 
-                print(f"\r\033[K[{inst}] {'EAR Mata' if act=='BLINK' else 'Sudut'}: {val:.2f}{'' if act=='BLINK' else '°'} | Target: {tgt:.2f} | Lat: {getattr(self, 'latency', 0):.1f}ms   ", end="", flush=True)
-            
             if passed:
-                print()
-                UIHelper.log(f"✅ {inst} SELESAI", "SUCCESS")
+                UIHelper.log(f"✅ Tantangan '{inst}' SELESAI", "SUCCESS")
                 self.access_details.append({"tantangan": inst, "skor_asli": round(val, 2), "target": round(tgt, 2), "latensi_ms": round(getattr(self, 'latency', 0), 1)})
                 self.step_idx, self.pose_hold, self.blink_hold, self.blink_passed = self.step_idx + 1, 0, 0, False; self.ear_hist.clear()
                 if self.step_idx < len(self.seq): self.reg_pose, self.wait_center = [curr.get(k, 0) for k in ("yaw", "pitch", "roll")], False 
@@ -304,7 +292,6 @@ class SmartDoorApp:
     def run(self):
         window_name = "Smart Door Lock"
         try:
-            # Jendela aplikasi tidak fullscreen lagi
             cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
             while self.running:
                 ret, frame = self.cam.read()

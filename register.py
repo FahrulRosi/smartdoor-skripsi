@@ -23,33 +23,40 @@ def _log(msg, level="INFO"): print(f"\r\033[K[{datetime.now().strftime('%H:%M:%S
 class Helpers:
     @staticmethod
     def enhance_frame(frame):
-        """
-        UI KEMBALI SEPERTI SEMULA.
-        Tetap mempertahankan perbaikan Gamma 0.7 untuk mengatasi Backlight.
-        """
         if not getattr(config, 'ENABLE_CLAHE_ENHANCEMENT', True): return frame
-        
         denoised = cv2.bilateralFilter(frame, d=5, sigmaColor=50, sigmaSpace=50)
         img_yuv = cv2.cvtColor(denoised, cv2.COLOR_BGR2YUV)
-        y, u, v = cv2.split(img_yuv)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        img_yuv[:,:,0] = clahe.apply(img_yuv[:,:,0])
+        return cv2.cvtColor(img_yuv, cv2.COLOR_YUV2BGR)
+
+    @staticmethod
+    def create_ai_frame(raw_frame, bbox):
+        """
+        [SOLUSI FINAL LINTAS CAHAYA]
+        Identik 100% dengan main.py agar hasil Ekstraksi Wajah Konsisten Mutlak.
+        """
+        x, y, w, h = bbox
+        fh, fw = raw_frame.shape[:2]
+        x1, y1 = max(0, x), max(0, y)
+        x2, y2 = min(fw, x+w), min(fh, y+h)
         
-        mean_y = np.mean(y)
+        img_yuv = cv2.cvtColor(raw_frame, cv2.COLOR_BGR2YUV)
+        y_ch, u_ch, v_ch = cv2.split(img_yuv)
         
-        if mean_y < 85.0:
-            gamma = 0.5  
-            invGamma = 1.0 / gamma
-            table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
-            y = cv2.LUT(y, table)
-        elif mean_y > 130.0:
-            gamma = 0.7 # PERBAIKAN PENTING: Menggunakan 0.7 agar wajah siluet diterangkan
-            invGamma = 1.0 / gamma
-            table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
-            y = cv2.LUT(y, table)
+        face_y = y_ch[y1:y2, x1:x2]
+        mean_y = np.mean(face_y) if face_y.size > 0 else 130.0
+        
+        target_brightness = 130.0
+        if mean_y > 5.0:
+            alpha = target_brightness / mean_y
+            alpha = min(max(alpha, 0.5), 3.5)
+            y_ch = cv2.convertScaleAbs(y_ch, alpha=alpha, beta=0)
             
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        y_eq = clahe.apply(y)
+        y_ch = clahe.apply(y_ch)
         
-        return cv2.cvtColor(cv2.merge((y_eq, u, v)), cv2.COLOR_YUV2BGR)
+        return cv2.cvtColor(cv2.merge((y_ch, u_ch, v_ch)), cv2.COLOR_YUV2BGR)
 
     @staticmethod
     def capture_blink(face):
@@ -61,7 +68,6 @@ class Helpers:
 
     @staticmethod
     def draw_hud(f, stg, instr, prog, score_txt, status, bbox, col):
-        # DIKEMBALIKAN 100% KE TAMPILAN UI ORIGINAL ANDA
         if bbox:
             bx, by, bw, bh = bbox
             bx = config.FRAME_WIDTH - bx - bw
@@ -215,7 +221,10 @@ class FaceRegistrationApp:
         else: 
             light_cond = f"Normal (F:{L:.0f}/B:{L_bg:.0f})"
 
-        raw_emb = self.model.get_embedding(self.model.crop_face(frame, safe_bbox))
+        # ---> MENGEKSTRAK WAJAH MENGGUNAKAN STANDAR MUTLAK <---
+        ai_frame = Helpers.create_ai_frame(raw_frame, face.bbox)
+        
+        raw_emb = self.model.get_embedding(self.model.crop_face(ai_frame, safe_bbox))
         
         if raw_emb is not None:
             emb_flat = np.array(raw_emb, dtype=np.float32).flatten()

@@ -21,41 +21,48 @@ class UIHelper:
 
     @staticmethod
     def enhance_frame(frame):
-        """
-        SOLUSI NORMALISASI SILANG KONDISI CAHAYA
-        (Bilateral Denoising + Dynamic Gamma + YUV CLAHE)
-        """
         if not getattr(config, 'ENABLE_CLAHE_ENHANCEMENT', True): return frame
-        
-        # 1. Hapus bintik-bintik noise kamera (sangat berguna untuk Low Light)
-        # Menghaluskan area datar (pipi) tapi menjaga tepi tajam (mata/hidung)
         denoised = cv2.bilateralFilter(frame, d=5, sigmaColor=50, sigmaSpace=50)
-
-        # 2. Konversi ke YUV untuk manipulasi cahaya (Y)
         img_yuv = cv2.cvtColor(denoised, cv2.COLOR_BGR2YUV)
-        y, u, v = cv2.split(img_yuv)
-        
-        mean_y = np.mean(y)
-        
-        # 3. Dynamic Gamma Correction (Paksa normalisasi sebelum di-CLAHE)
-        if mean_y < 85.0:
-            # Jika Low Light, paksa terangkan gambarnya
-            gamma = 0.5  
-            invGamma = 1.0 / gamma
-            table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
-            y = cv2.LUT(y, table)
-        elif mean_y > 130.0:
-            # PERBAIKAN: Ubah ke 0.7 untuk menerangkan area siluet wajah saat Backlight!
-            gamma = 0.7
-            invGamma = 1.0 / gamma
-            table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
-            y = cv2.LUT(y, table)
-            
-        # 4. Terapkan CLAHE yang seragam (Kontras Wajah)
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        y_eq = clahe.apply(y)
+        img_yuv[:,:,0] = clahe.apply(img_yuv[:,:,0])
+        return cv2.cvtColor(img_yuv, cv2.COLOR_YUV2BGR)
+
+    @staticmethod
+    def create_ai_frame(raw_frame, bbox):
+        """
+        [SOLUSI FINAL LINTAS CAHAYA]
+        Memastikan wajah SELALU memiliki kecerahan yang SAMA PERSIS (Target: 130),
+        baik saat mendaftar maupun saat verifikasi, di kondisi apapun.
+        """
+        x, y, w, h = bbox
+        fh, fw = raw_frame.shape[:2]
+        x1, y1 = max(0, x), max(0, y)
+        x2, y2 = min(fw, x+w), min(fh, y+h)
         
-        return cv2.cvtColor(cv2.merge((y_eq, u, v)), cv2.COLOR_YUV2BGR)
+        # 1. Konversi ke YUV untuk mengatur saluran cahaya (Y)
+        img_yuv = cv2.cvtColor(raw_frame, cv2.COLOR_BGR2YUV)
+        y_ch, u_ch, v_ch = cv2.split(img_yuv)
+        
+        # 2. Ambil HANYA area wajah untuk diukur kecerahan aslinya
+        face_y = y_ch[y1:y2, x1:x2]
+        mean_y = np.mean(face_y) if face_y.size > 0 else 130.0
+        
+        # 3. Hitung pengali mutlak (Gain) agar wajah selalu menyentuh angka 130.0
+        target_brightness = 130.0
+        if mean_y > 5.0:
+            alpha = target_brightness / mean_y
+            # Batasi agar tidak terjadi over-exposure ekstrem (max 3.5x lebih terang, min 0.5x lebih gelap)
+            alpha = min(max(alpha, 0.5), 3.5)
+            
+            # 4. Kalikan seluruh frame dengan pengali (wajah akan sempurna, background akan menyesuaikan)
+            y_ch = cv2.convertScaleAbs(y_ch, alpha=alpha, beta=0)
+            
+        # 5. Terapkan CLAHE untuk mengunci detail kontras (hidung/mata tetap tajam)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        y_ch = clahe.apply(y_ch)
+        
+        return cv2.cvtColor(cv2.merge((y_ch, u_ch, v_ch)), cv2.COLOR_YUV2BGR)
 
     @staticmethod
     def get_ear(f):
@@ -102,13 +109,11 @@ class SmartDoorApp:
 
     def _init_heavy_models(self):
         self.db, self.model, self.pose_estimator = FaceDatabase(), MobileFaceNet(), HeadPoseEstimator()
-        
         spoof_thr = getattr(config, 'ANTI_SPOOFING_THRESHOLD', 0.70) 
         self.anti_spoof = SilentAntiSpoofing(getattr(config, 'ANTI_SPOOFING_MODEL', "liveness/antispoofing.onnx"), spoof_thr)
         self.detector = FaceMeshDetector(min_detection_confidence=0.5, min_tracking_confidence=0.5)
         self.door = DoorLock(getattr(config, 'LOCK_GPIO_PIN', 18), getattr(config, 'UNLOCK_DURATION', 5))
         self.pose_estimator = HeadPoseEstimator()
-        
         self.matcher = FaceMatcher(getattr(config, 'MATCH_THRESHOLD', 0.42)) 
         
         try:
@@ -186,17 +191,9 @@ class SmartDoorApp:
                 print(f"\r\033[K[Memeriksa] INDIKASI PALSU! | Spoofing: {self.spoof_score:.2f}", end="", flush=True)
             elif self.fake_frames == 10: 
                 print()
-                
-                # --- PERBAIKAN PENGIRIMAN DATA KE DATABASE ---
-                # Mengambil tipe spoofing (Foto/Video) langsung dari model Anti Spoofing
                 detected_type = sp.get("label_name", "Spoofing Tidak Diketahui")
-                
                 UIHelper.log(f"⚠️ Serangan Spoofing Terdeteksi! Tipe: {detected_type} (Skor: {self.spoof_score:.2f})", "WARNING")
-                
-                if hasattr(self.db, 'log_spoofing_async'): 
-                    # Fungsi DB memerlukan (score, spoof_type)
-                    self.db.log_spoofing_async(self.spoof_score, detected_type)
-                    
+                if hasattr(self.db, 'log_spoofing_async'): self.db.log_spoofing_async(self.spoof_score, detected_type)
                 self._fail(f"{detected_type.upper()} (Spoof: {self.spoof_score:.2f})")
                 self.spoof_score = sp.get("score", 1.0) 
             return
@@ -224,8 +221,12 @@ class SmartDoorApp:
 
         if self.state in (ValidationState.IDLE, ValidationState.RECOGNIZING):
             if self.state == ValidationState.IDLE: self.state, self.auth_start = ValidationState.RECOGNIZING, time.time(); return
-            fh, fw = enhanced.shape[:2]
-            if (raw_emb := self.model.get_embedding(self.model.crop_face(enhanced, [max(0, x), max(0, y), min(fw, x+w)-max(0, x), min(fh, y+h)-max(0, y)]))) is None: return
+            fh, fw = raw.shape[:2]
+            
+            # ---> MENGEKSTRAK WAJAH MENGGUNAKAN STANDAR MUTLAK <---
+            ai_frame = UIHelper.create_ai_frame(raw, face.bbox)
+            
+            if (raw_emb := self.model.get_embedding(self.model.crop_face(ai_frame, [max(0, x), max(0, y), min(fw, x+w)-max(0, x), min(fh, y+h)-max(0, y)]))) is None: return
             emb = np.array(raw_emb, dtype=np.float32).flatten()
             match = self.matcher.match(emb / (np.linalg.norm(emb) + 1e-6))
             
@@ -289,10 +290,8 @@ class SmartDoorApp:
         pure_similarity = self.match_score
         UIHelper.log(f"🧪 [DATA UJI PENGAKUAN] Cosine Similarity Murni: {pure_similarity:.4f}", "SYSTEM")
         
-        # --- RUMUS MURNI (Akurasi Real) ---
         final_acc = pure_similarity * 100.0
         final_acc = min(100.0, max(0.0, final_acc))
-        # ----------------------------------
         
         self.ui.update({"status": f"SELAMAT DATANG", "color": config.COLOR_GREEN, "instr": ""})
         UIHelper.log(f"🔓 AKSES DIBERIKAN. Waktu: {time.time() - self.auth_start:.2f}s", "SUCCESS")

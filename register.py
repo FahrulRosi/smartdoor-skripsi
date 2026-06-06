@@ -33,8 +33,8 @@ class Helpers:
     @staticmethod
     def create_ai_frame(raw_frame, bbox):
         """
-        [SOLUSI FINAL LINTAS CAHAYA]
-        Identik 100% dengan main.py agar hasil Ekstraksi Wajah Konsisten Mutlak.
+        [SOLUSI FINAL] DYNAMIC GAMMA CORRECTION + YUV CLAHE
+        100% Identik dengan main.py agar ekstraksi vektor konsisten mutlak.
         """
         x, y, w, h = bbox
         fh, fw = raw_frame.shape[:2]
@@ -47,13 +47,14 @@ class Helpers:
         face_y = y_ch[y1:y2, x1:x2]
         mean_y = np.mean(face_y) if face_y.size > 0 else 130.0
         
-        target_brightness = 130.0
-        if mean_y > 5.0:
-            alpha = target_brightness / mean_y
-            alpha = min(max(alpha, 0.5), 3.5)
-            y_ch = cv2.convertScaleAbs(y_ch, alpha=alpha, beta=0)
+        if 5.0 < mean_y < 250.0:
+            gamma = np.log(130.0 / 255.0) / np.log(mean_y / 255.0)
+            gamma = max(0.15, min(gamma, 4.5)) 
+            y_float = y_ch.astype(np.float32) / 255.0
+            y_float = np.power(y_float, gamma) * 255.0
+            y_ch = np.clip(y_float, 0, 255).astype(np.uint8)
             
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
         y_ch = clahe.apply(y_ch)
         
         return cv2.cvtColor(cv2.merge((y_ch, u_ch, v_ch)), cv2.COLOR_YUV2BGR)
@@ -221,7 +222,7 @@ class FaceRegistrationApp:
         else: 
             light_cond = f"Normal (F:{L:.0f}/B:{L_bg:.0f})"
 
-        # ---> MENGEKSTRAK WAJAH MENGGUNAKAN STANDAR MUTLAK <---
+        # ---> MENGEKSTRAK WAJAH DENGAN DYNAMIC GAMMA <---
         ai_frame = Helpers.create_ai_frame(raw_frame, face.bbox)
         
         raw_emb = self.model.get_embedding(self.model.crop_face(ai_frame, safe_bbox))
@@ -383,8 +384,8 @@ class FaceRegistrationApp:
         if self.stage == RegistrationStage.COMPLETE: return
         threading.Thread(target=self._process_thread, daemon=True).start()
         try:
+            # Jendela aplikasi tidak fullscreen lagi
             cv2.namedWindow("Register", cv2.WINDOW_NORMAL)
-            cv2.setWindowProperty("Register", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
             while self.is_running and self.stage != RegistrationStage.COMPLETE:
                 with self.frame_lock: 

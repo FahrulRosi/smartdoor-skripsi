@@ -31,37 +31,40 @@ class UIHelper:
     @staticmethod
     def create_ai_frame(raw_frame, bbox):
         """
-        [SOLUSI FINAL LINTAS CAHAYA]
-        Memastikan wajah SELALU memiliki kecerahan yang SAMA PERSIS (Target: 130),
-        baik saat mendaftar maupun saat verifikasi, di kondisi apapun.
+        [SOLUSI FINAL] DYNAMIC GAMMA CORRECTION + YUV CLAHE
+        Memaksa tekstur wajah siluet menjadi terang (130) tanpa merusak background.
         """
         x, y, w, h = bbox
         fh, fw = raw_frame.shape[:2]
         x1, y1 = max(0, x), max(0, y)
         x2, y2 = min(fw, x+w), min(fh, y+h)
         
-        # 1. Konversi ke YUV untuk mengatur saluran cahaya (Y)
+        # 1. Konversi ke YUV untuk mengontrol cahaya tanpa merusak warna
         img_yuv = cv2.cvtColor(raw_frame, cv2.COLOR_BGR2YUV)
         y_ch, u_ch, v_ch = cv2.split(img_yuv)
         
-        # 2. Ambil HANYA area wajah untuk diukur kecerahan aslinya
+        # 2. Hitung kecerahan rata-rata HANYA pada area wajah
         face_y = y_ch[y1:y2, x1:x2]
         mean_y = np.mean(face_y) if face_y.size > 0 else 130.0
         
-        # 3. Hitung pengali mutlak (Gain) agar wajah selalu menyentuh angka 130.0
-        target_brightness = 130.0
-        if mean_y > 5.0:
-            alpha = target_brightness / mean_y
-            # Batasi agar tidak terjadi over-exposure ekstrem (max 3.5x lebih terang, min 0.5x lebih gelap)
-            alpha = min(max(alpha, 0.5), 3.5)
+        # 3. Dynamic Gamma Correction (Target Kecerahan Mutlak: 130)
+        if 5.0 < mean_y < 250.0:
+            # Cari nilai Gamma secara matematis agar mean_y terangkat tepat ke 130
+            gamma = np.log(130.0 / 255.0) / np.log(mean_y / 255.0)
             
-            # 4. Kalikan seluruh frame dengan pengali (wajah akan sempurna, background akan menyesuaikan)
-            y_ch = cv2.convertScaleAbs(y_ch, alpha=alpha, beta=0)
+            # Limit diperlebar signifikan untuk mengatasi Backlight EKSTREM
+            gamma = max(0.15, min(gamma, 4.5)) 
             
-        # 5. Terapkan CLAHE untuk mengunci detail kontras (hidung/mata tetap tajam)
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            # Terapkan peregangan Gamma ke saluran cahaya (Y)
+            y_float = y_ch.astype(np.float32) / 255.0
+            y_float = np.power(y_float, gamma) * 255.0
+            y_ch = np.clip(y_float, 0, 255).astype(np.uint8)
+            
+        # 4. Terapkan Local Contrast (CLAHE) ekstra kuat agar mata & hidung tajam
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
         y_ch = clahe.apply(y_ch)
         
+        # 5. Gabungkan kembali
         return cv2.cvtColor(cv2.merge((y_ch, u_ch, v_ch)), cv2.COLOR_YUV2BGR)
 
     @staticmethod
@@ -223,7 +226,7 @@ class SmartDoorApp:
             if self.state == ValidationState.IDLE: self.state, self.auth_start = ValidationState.RECOGNIZING, time.time(); return
             fh, fw = raw.shape[:2]
             
-            # ---> MENGEKSTRAK WAJAH MENGGUNAKAN STANDAR MUTLAK <---
+            # ---> MENGEKSTRAK WAJAH DENGAN DYNAMIC GAMMA (SAMA DENGAN REGISTER) <---
             ai_frame = UIHelper.create_ai_frame(raw, face.bbox)
             
             if (raw_emb := self.model.get_embedding(self.model.crop_face(ai_frame, [max(0, x), max(0, y), min(fw, x+w)-max(0, x), min(fh, y+h)-max(0, y)]))) is None: return
@@ -301,8 +304,8 @@ class SmartDoorApp:
     def run(self):
         window_name = "Smart Door Lock"
         try:
+            # Jendela aplikasi tidak fullscreen lagi
             cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-            cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
             while self.running:
                 ret, frame = self.cam.read()
                 if ret:

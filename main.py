@@ -21,11 +21,41 @@ class UIHelper:
 
     @staticmethod
     def enhance_frame(frame):
+        """
+        SOLUSI NORMALISASI SILANG KONDISI CAHAYA
+        (Bilateral Denoising + Dynamic Gamma + YUV CLAHE)
+        """
         if not getattr(config, 'ENABLE_CLAHE_ENHANCEMENT', True): return frame
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        if (m := np.mean(gray)) > 160.0: return frame  
-        l, a, b = cv2.split(cv2.cvtColor(frame, cv2.COLOR_BGR2LAB))
-        return cv2.cvtColor(cv2.merge((cv2.createCLAHE(clipLimit=2.5 if m < 85.0 else 1.2, tileGridSize=(8, 8)).apply(l), a, b)), cv2.COLOR_LAB2BGR)
+        
+        # 1. Hapus bintik-bintik noise kamera (sangat berguna untuk Low Light)
+        # Menghaluskan area datar (pipi) tapi menjaga tepi tajam (mata/hidung)
+        denoised = cv2.bilateralFilter(frame, d=5, sigmaColor=50, sigmaSpace=50)
+
+        # 2. Konversi ke YUV untuk manipulasi cahaya (Y)
+        img_yuv = cv2.cvtColor(denoised, cv2.COLOR_BGR2YUV)
+        y, u, v = cv2.split(img_yuv)
+        
+        mean_y = np.mean(y)
+        
+        # 3. Dynamic Gamma Correction (Paksa normalisasi sebelum di-CLAHE)
+        if mean_y < 85.0:
+            # Jika Low Light, paksa terangkan gambarnya
+            gamma = 0.5  
+            invGamma = 1.0 / gamma
+            table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
+            y = cv2.LUT(y, table)
+        elif mean_y > 130.0:
+            # Jika Terlalu Terang/Backlight, paksa gelapkan sedikit agar detail tidak hilang
+            gamma = 1.2
+            invGamma = 1.0 / gamma
+            table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
+            y = cv2.LUT(y, table)
+            
+        # 4. Terapkan CLAHE yang seragam (Kontras Wajah)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        y_eq = clahe.apply(y)
+        
+        return cv2.cvtColor(cv2.merge((y_eq, u, v)), cv2.COLOR_YUV2BGR)
 
     @staticmethod
     def get_ear(f):
@@ -73,12 +103,14 @@ class SmartDoorApp:
     def _init_heavy_models(self):
         self.db, self.model, self.pose_estimator = FaceDatabase(), MobileFaceNet(), HeadPoseEstimator()
         
-        # PERBAIKAN 1: Longgarkan ambang batas Spoofing dan Kemiripan agar lulus di kondisi gelap / noise
         spoof_thr = getattr(config, 'ANTI_SPOOFING_THRESHOLD', 0.70) 
         self.anti_spoof = SilentAntiSpoofing(getattr(config, 'ANTI_SPOOFING_MODEL', "liveness/antispoofing.onnx"), spoof_thr)
         self.detector = FaceMeshDetector(min_detection_confidence=0.5, min_tracking_confidence=0.5)
         self.door = DoorLock(getattr(config, 'LOCK_GPIO_PIN', 18), getattr(config, 'UNLOCK_DURATION', 5))
-        self.matcher = FaceMatcher(getattr(config, 'MATCH_THRESHOLD', 0.55)) 
+        self.pose_estimator = HeadPoseEstimator()
+        
+        # PERBAIKAN: Threshold diturunkan ke 0.42 agar mentoleransi beda tekstur silang kondisi
+        self.matcher = FaceMatcher(getattr(config, 'MATCH_THRESHOLD', 0.42)) 
         
         try:
             if (raw := self.db.load_all_faces()):
@@ -175,7 +207,6 @@ class SmartDoorApp:
         mask_live[y1_l:y2_l, x1_l:x2_l] = False
         L_bg_live = np.mean(gray_live[mask_live]) if np.any(mask_live) else L_live
 
-        # PERBAIKAN 2: Angka Low Light dinaikkan menjadi 85 agar mendeteksi kegelapan meskipun ada noise kamera
         if (L_bg_live - L_live) > 40 and L_bg_live > 120: 
             l_str = "Backlight"
         elif L_bg_live < 85 or L_live < 85: 
@@ -240,7 +271,6 @@ class SmartDoorApp:
         mask[y1:y2, x1:x2] = False
         L_bg = np.mean(gray[mask]) if np.any(mask) else L_face
 
-        # PERBAIKAN 3: Akurasi murni Cosine (tanpa penalty yang merusak nilai)
         if (L_bg - L_face) > 40 and L_bg > 120: 
             light_cond = f"Backlight (F:{L_face:.0f}/B:{L_bg:.0f})"
         elif L_bg < 85 or L_face < 85: 
@@ -251,7 +281,8 @@ class SmartDoorApp:
         pure_similarity = self.match_score
         UIHelper.log(f"🧪 [DATA UJI PENGAKUAN] Cosine Similarity Murni: {pure_similarity:.4f}", "SYSTEM")
         
-        thr = getattr(config, 'MATCH_THRESHOLD', 0.55)
+        # Threshold base disesuaikan ke 0.42 untuk kalkulasi persen
+        thr = getattr(config, 'MATCH_THRESHOLD', 0.42)
         
         if pure_similarity >= thr:
             if "Normal" in light_cond:

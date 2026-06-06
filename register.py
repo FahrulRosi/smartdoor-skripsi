@@ -23,12 +23,33 @@ def _log(msg, level="INFO"): print(f"\r\033[K[{datetime.now().strftime('%H:%M:%S
 class Helpers:
     @staticmethod
     def enhance_frame(frame):
+        """
+        DIBUAT IDENTIK DENGAN MAIN.PY
+        (Bilateral Denoising + Dynamic Gamma + YUV CLAHE)
+        """
         if not getattr(config, 'ENABLE_CLAHE_ENHANCEMENT', True): return frame
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        if (mean_val := np.mean(gray)) > 160.0: return frame 
-        l, a, b = cv2.split(cv2.cvtColor(frame, cv2.COLOR_BGR2LAB))
-        limit = getattr(config, 'CLAHE_CLIP_LIMIT', 2.5) if mean_val < 85.0 else 1.2
-        return cv2.cvtColor(cv2.merge((cv2.createCLAHE(clipLimit=limit, tileGridSize=(8,8)).apply(l), a, b)), cv2.COLOR_LAB2BGR)
+        
+        denoised = cv2.bilateralFilter(frame, d=5, sigmaColor=50, sigmaSpace=50)
+        img_yuv = cv2.cvtColor(denoised, cv2.COLOR_BGR2YUV)
+        y, u, v = cv2.split(img_yuv)
+        
+        mean_y = np.mean(y)
+        
+        if mean_y < 85.0:
+            gamma = 0.5  
+            invGamma = 1.0 / gamma
+            table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
+            y = cv2.LUT(y, table)
+        elif mean_y > 130.0:
+            gamma = 1.2
+            invGamma = 1.0 / gamma
+            table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
+            y = cv2.LUT(y, table)
+            
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        y_eq = clahe.apply(y)
+        
+        return cv2.cvtColor(cv2.merge((y_eq, u, v)), cv2.COLOR_YUV2BGR)
 
     @staticmethod
     def capture_blink(face):
@@ -88,9 +109,10 @@ class FaceRegistrationApp:
         self.detector = FaceMeshDetector(min_detection_confidence=0.5, min_tracking_confidence=0.5)
         self.liveness, self.model = LivenessManager(), MobileFaceNet()
         
-        # PERBAIKAN 1: Longgarkan ambang batas Spoofing dan Anti-Duplikat
         self.anti_spoof = SilentAntiSpoofing(getattr(config, 'ANTI_SPOOFING_MODEL', "liveness/antispoofing.onnx"), getattr(config, 'ANTI_SPOOFING_THRESHOLD', 0.70))
-        self.matcher = FaceMatcher(getattr(config, 'ANTI_DUPLICATE_THRESHOLD', 0.60))
+        
+        # PERBAIKAN: Threshold Anti-Duplikat diturunkan ke 0.42 agar sama dengan main.py
+        self.matcher = FaceMatcher(getattr(config, 'ANTI_DUPLICATE_THRESHOLD', 0.42))
         
         try:
             raw = self.db.load_all_faces()
@@ -180,7 +202,6 @@ class FaceRegistrationApp:
         mask[y1:y2, x1:x2] = False
         L_bg = np.mean(gray[mask]) if np.any(mask) else L
         
-        # PERBAIKAN 2: Batas Low Light = 85
         if (L_bg - L) > 40 and L_bg > 120: 
             light_cond = f"Backlight (F:{L:.0f}/B:{L_bg:.0f})"
         elif L_bg < 85 or L < 85: 
@@ -236,7 +257,7 @@ class FaceRegistrationApp:
             _log(f"✅ TAHAP 3: Blink Selesai -> EAR Buka: {bo.get('avg_ear',0):.2f} ({bo.get('latency_ms',0):.1f}ms) | Kedip: {bc.get('avg_ear',0):.2f} ({bc.get('latency_ms',0):.1f}ms)", "SUCCESS")
         elif old_stage == RegistrationStage.EXTRACTION:
             _log("📊 RANGKUMAN REGISTRASI KOMPREHENSIF", "SYSTEM")
-            _log(f"   • Kemiripan DB (Max Tol: {getattr(config, 'MATCH_THRESHOLD', 0.68)}): {self.last_match_score:.2%}", "SUCCESS")
+            _log(f"   • Kemiripan DB (Max Tol: {getattr(config, 'MATCH_THRESHOLD', 0.42)}): {self.last_match_score:.2%}", "SUCCESS")
             _log(f"   • Kondisi Cahaya: {self.cap_data.get('light_condition', 'N/A')}", "SUCCESS")
 
     def _process_thread(self):
@@ -300,7 +321,6 @@ class FaceRegistrationApp:
                 mask_live[y1_l:y2_l, x1_l:x2_l] = False
                 L_bg_live = np.mean(gray_live[mask_live]) if np.any(mask_live) else L_live
 
-                # PERBAIKAN 3: Batas Low Light Realtime HUD = 85
                 if (L_bg_live - L_live) > 40 and L_bg_live > 120: 
                     l_str = f"Backlight (F:{L_live:.0f}/B:{L_bg_live:.0f})"
                 elif L_bg_live < 85 or L_live < 85: 

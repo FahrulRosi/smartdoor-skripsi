@@ -104,12 +104,15 @@ class FaceDatabase:
             except Exception as e: 
                 print(f"[Supabase WARNING] Gagal inisialisasi awal: {e}")
 
-        # Jalankan pekerja sinkronisasi di latar belakang
         threading.Thread(target=self._https_sync_worker, daemon=True).start()
 
     def _init_sqlite(self):
         with self.db_lock, sqlite3.connect(self.db_path, check_same_thread=False) as conn:
             c = conn.cursor()
+            
+            # MEMATIKAN FILE JOURNAL SECARA PERMANEN
+            c.execute('PRAGMA journal_mode = OFF;')
+            
             c.execute('''CREATE TABLE IF NOT EXISTS registered_faces (
                 name TEXT PRIMARY KEY, embedding TEXT, liveness_config TEXT,
                 yaw_score TEXT, pitch_score TEXT, roll_score TEXT, blink_score TEXT,
@@ -156,7 +159,6 @@ class FaceDatabase:
             return False
 
     def check_user_exists(self, name):
-        """Cek langsung ke memori lokal. Selalu cepat walau tanpa internet."""
         with self.db_lock, sqlite3.connect(self.db_path) as conn:
             c = conn.cursor()
             c.execute("SELECT 1 FROM registered_faces WHERE name = ?", (name,))
@@ -170,7 +172,6 @@ class FaceDatabase:
 
             with self.db_lock, sqlite3.connect(self.db_path) as conn:
                 c = conn.cursor()
-                # 1. Simpan ke LOKAL (Offline-First)
                 c.execute("""INSERT INTO registered_faces 
                     (name, embedding, liveness_config, yaw_score, pitch_score, roll_score, blink_score, created_at, is_synced)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
@@ -188,7 +189,7 @@ class FaceDatabase:
                 conn.commit()
             
             print(f"\n[Database] ✅ Wajah '{name}' tersimpan instan ke SQLite LOKAL. Memicu sinkronisasi ke Supabase...")
-            self.sync_trigger.set() # Panggil worker untuk upload ke Supabase
+            self.sync_trigger.set() 
             return True
         except Exception: 
             traceback.print_exc()
@@ -196,7 +197,7 @@ class FaceDatabase:
             return False
 
     def load_all_faces(self, silent=False):
-        """Memuat data dari lokal dengan cepat saat aplikasi booting."""
+        # Saat awal booting, tarik cepat dari LOKAL. Sinkronisasi dibiarkan diurus worker
         faces = {}
         with self.db_lock, sqlite3.connect(self.db_path) as conn:
             c = conn.cursor()
@@ -207,26 +208,24 @@ class FaceDatabase:
                     "yaw_score": row[3], "pitch_score": row[4], "roll_score": row[5], "blink_score": row[6],
                     "registered_at": row[7]
                 }
+        self.sync_trigger.set() # Panggil sinkronisasi awal
         return faces
 
     def _pull_logs_from_supabase(self, cursor, table_name, columns):
-        """Fungsi bantuan untuk menyedot log Supabase ke SQLite lokal, termasuk menghapusnya jika hilang di Supabase."""
         res = self.client.table(table_name).select("*").execute()
-        # WAJIB gunakan "is not None" agar jika tabel Supabase kosong (dihapus semua), lokal ikut terhapus
         if res.data is not None: 
             remote_times = [str(r["created_at"]) for r in res.data]
             
-            # 1. HAPUS LOG LOKAL JIKA DI SUPABASE SUDAH HILANG
+            # HAPUS LOG LOKAL JIKA DI SUPABASE SUDAH HILANG
             cursor.execute(f"SELECT id, created_at FROM {table_name} WHERE is_synced = 1")
             for row in cursor.fetchall():
                 local_id, local_time = row[0], str(row[1])
                 if local_time not in remote_times:
                     cursor.execute(f"DELETE FROM {table_name} WHERE id = ?", (local_id,))
-                    # Cegah trigger SQLite mengirim ulang sinyal hapus ke Supabase (Echo Cancellation)
                     cursor.execute("DELETE FROM sync_deletes WHERE table_name = ? AND record_id = ?", (table_name, local_time))
-                    print(f"[Sync] 🗑️ Log {table_name} dihapus dari lokal menyesuaikan Supabase.")
+                    print(f"[Sync] 🗑️ Log {table_name} (ID: {local_id}) dihapus dari lokal menyesuaikan Supabase.")
 
-            # 2. TAMBAH LOG DARI SUPABASE KE LOKAL JIKA BELUM ADA
+            # TAMBAH LOG DARI SUPABASE KE LOKAL
             for r in res.data:
                 cursor.execute(f"SELECT 1 FROM {table_name} WHERE created_at = ?", (r["created_at"],))
                 if not cursor.fetchone():
@@ -284,13 +283,12 @@ class FaceDatabase:
         self.sync_trigger.set() 
 
     # ==============================================================================
-    # 3. BACKGROUND WORKER: LIVE 2-WAY SYNC (HAPUS, TAMBAH, UPDATE)
+    # 3. BACKGROUND WORKER: LIVE 2-WAY SYNC YANG TAHAN ERROR (ANTI CRASH)
     # ==============================================================================
     def _https_sync_worker(self):
         time.sleep(3) 
         
         while True:
-            # Pekerja diatur untuk mengecek perubahan secara CEPAT (3 DETIK) 
             self.sync_trigger.wait(timeout=3.0) 
             self.sync_trigger.clear() 
             
@@ -303,83 +301,103 @@ class FaceDatabase:
                     # ---------------------------------------------------------
                     # TAHAP 1: PUSH DELETION (Dari LOKAL menghapus ke SUPABASE)
                     # ---------------------------------------------------------
-                    c.execute("SELECT id, table_name, record_id FROM sync_deletes")
-                    for row in c.fetchall():
-                        del_id, tbl, rec_id = row
-                        try:
-                            if tbl == 'registered_faces':
-                                self.client.table(tbl).delete().eq('name', rec_id).execute()
-                            else:
-                                self.client.table(tbl).delete().eq('created_at', rec_id).execute()
-                            
-                            c.execute("DELETE FROM sync_deletes WHERE id = ?", (del_id,))
-                            print(f"[Sync] 🗑️ Data di Supabase ({tbl}) berhasil dihapus menyamakan SQLite.")
-                        except Exception: pass
+                    try:
+                        c.execute("SELECT id, table_name, record_id FROM sync_deletes")
+                        for row in c.fetchall():
+                            del_id, tbl, rec_id = row
+                            try:
+                                if tbl == 'registered_faces': self.client.table(tbl).delete().eq('name', rec_id).execute()
+                                else: self.client.table(tbl).delete().eq('created_at', rec_id).execute()
+                                
+                                c.execute("DELETE FROM sync_deletes WHERE id = ?", (del_id,))
+                                print(f"[Sync] 🗑️ Data di Supabase ({tbl}) berhasil dihapus menyamakan SQLite.")
+                            except Exception as e: print(f"[Sync Peringatan] Gagal hapus {tbl} di Cloud: {e}")
+                    except Exception as e: print(f"[Sync Error] Kesalahan saat push hapus: {e}")
                     
                     synced_count = 0
                     
                     # ---------------------------------------------------------
                     # TAHAP 2: PUSH INSERT (Dari LOKAL upload ke SUPABASE)
                     # ---------------------------------------------------------
-                    c.execute("SELECT name, embedding, liveness_config, yaw_score, pitch_score, roll_score, blink_score, created_at FROM registered_faces WHERE is_synced = 0")
-                    for r in c.fetchall():
-                        payload = {"name": r[0], "embedding": json.loads(r[1]), "liveness_config": json.loads(r[2]), "yaw_score": r[3] or "-", "pitch_score": r[4] or "-", "roll_score": r[5] or "-", "blink_score": r[6] or "-", "created_at": r[7]}
-                        self.client.table("registered_faces").upsert(payload, on_conflict="name").execute()
-                        c.execute("UPDATE registered_faces SET is_synced = 1 WHERE name = ?", (r[0],))
-                        synced_count += 1
+                    # 2A. Upload Registered Faces
+                    try:
+                        c.execute("SELECT name, embedding, liveness_config, yaw_score, pitch_score, roll_score, blink_score, created_at FROM registered_faces WHERE is_synced = 0")
+                        for r in c.fetchall():
+                            payload = {"name": r[0], "embedding": json.loads(r[1]), "liveness_config": json.loads(r[2]), "yaw_score": r[3] or "-", "pitch_score": r[4] or "-", "roll_score": r[5] or "-", "blink_score": r[6] or "-", "created_at": r[7]}
+                            self.client.table("registered_faces").upsert(payload, on_conflict="name").execute()
+                            c.execute("UPDATE registered_faces SET is_synced = 1 WHERE name = ?", (r[0],))
+                            synced_count += 1
+                    except Exception as e: print(f"[Sync Error] Gagal push registered_faces: {e}")
                     
-                    c.execute("SELECT id, name, status, yaw_score, pitch_score, roll_score, blink_score, light_condition, created_at FROM register_logs WHERE is_synced = 0")
-                    for r in c.fetchall():
-                        payload = {"name": r[1], "status": r[2], "yaw_score": r[3] or "-", "pitch_score": r[4] or "-", "roll_score": r[5] or "-", "blink_score": r[6] or "-", "light_condition": r[7] or "-", "created_at": r[8]}
-                        self.client.table("register_logs").insert(payload).execute()
-                        c.execute("UPDATE register_logs SET is_synced = 1 WHERE id = ?", (r[0],))
-                        synced_count += 1
+                    # 2B. Upload Register Logs
+                    try:
+                        c.execute("SELECT id, name, status, yaw_score, pitch_score, roll_score, blink_score, light_condition, created_at FROM register_logs WHERE is_synced = 0")
+                        for r in c.fetchall():
+                            payload = {"name": r[1], "status": r[2], "yaw_score": r[3] or "-", "pitch_score": r[4] or "-", "roll_score": r[5] or "-", "blink_score": r[6] or "-", "light_condition": r[7] or "-", "created_at": r[8]}
+                            self.client.table("register_logs").insert(payload).execute()
+                            c.execute("UPDATE register_logs SET is_synced = 1 WHERE id = ?", (r[0],))
+                            synced_count += 1
+                    except Exception as e: print(f"[Sync Error] Gagal push register_logs: {e}")
                         
-                    c.execute("SELECT id, name, status, headpose_score, blink_score, accuracy, light_condition, created_at FROM access_logs WHERE is_synced = 0")
-                    for r in c.fetchall():
-                        payload = {"name": r[1], "status": r[2], "headpose_score": r[3] or "-", "blink_score": r[4] or "-", "accuracy": float(r[5] or 0.0), "light_condition": r[6] or "-", "created_at": r[7]}
-                        self.client.table("access_logs").insert(payload).execute()
-                        c.execute("UPDATE access_logs SET is_synced = 1 WHERE id = ?", (r[0],))
-                        synced_count += 1
+                    # 2C. Upload Access Logs
+                    try:
+                        c.execute("SELECT id, name, status, headpose_score, blink_score, accuracy, light_condition, created_at FROM access_logs WHERE is_synced = 0")
+                        for r in c.fetchall():
+                            payload = {"name": r[1], "status": r[2], "headpose_score": r[3] or "-", "blink_score": r[4] or "-", "accuracy": float(r[5] or 0.0), "light_condition": r[6] or "-", "created_at": r[7]}
+                            self.client.table("access_logs").insert(payload).execute()
+                            c.execute("UPDATE access_logs SET is_synced = 1 WHERE id = ?", (r[0],))
+                            synced_count += 1
+                    except Exception as e: print(f"[Sync Error] Gagal push access_logs (Cek kolom database Supabase mu!): {e}")
                         
-                    c.execute("SELECT id, spoof_score, message, created_at FROM spoofing_logs WHERE is_synced = 0")
-                    for r in c.fetchall():
-                        payload = {"spoof_score": float(r[1] or 0.0), "message": r[2] or "-", "created_at": r[3]}
-                        self.client.table("spoofing_logs").insert(payload).execute()
-                        c.execute("UPDATE spoofing_logs SET is_synced = 1 WHERE id = ?", (r[0],))
-                        synced_count += 1
+                    # 2D. Upload Spoofing Logs
+                    try:
+                        c.execute("SELECT id, spoof_score, message, created_at FROM spoofing_logs WHERE is_synced = 0")
+                        for r in c.fetchall():
+                            payload = {"spoof_score": float(r[1] or 0.0), "message": r[2] or "-", "created_at": r[3]}
+                            self.client.table("spoofing_logs").insert(payload).execute()
+                            c.execute("UPDATE spoofing_logs SET is_synced = 1 WHERE id = ?", (r[0],))
+                            synced_count += 1
+                    except Exception as e: print(f"[Sync Error] Gagal push spoofing_logs: {e}")
                     
                     if synced_count > 0: print(f"\n[Background Sync] ☁️ Berhasil UPLOAD {synced_count} baris data ke Supabase!")
 
                     # ---------------------------------------------------------
                     # TAHAP 3: PULL SYNC (Dari SUPABASE turun ke LOKAL secara LIVE)
                     # ---------------------------------------------------------
-                    # A. Sync Wajah (Master Data)
-                    res = self.client.table("registered_faces").select("*").execute()
-                    if res.data is not None:
-                        remote_names = [str(r["name"]) for r in res.data]
-                        c.execute("SELECT name FROM registered_faces WHERE is_synced = 1")
-                        for row in c.fetchall():
-                            if row[0] not in remote_names:
-                                c.execute("DELETE FROM registered_faces WHERE name = ?", (row[0],))
-                                c.execute("DELETE FROM sync_deletes WHERE table_name = 'registered_faces' AND record_id = ?", (row[0],))
-                                print(f"[Sync] 🗑️ Wajah '{row[0]}' dihapus dari lokal menyesuaikan Supabase.")
-                        
-                        for r in res.data:
-                            c.execute("""INSERT INTO registered_faces 
-                                (name, embedding, liveness_config, yaw_score, pitch_score, roll_score, blink_score, created_at, is_synced)
-                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
-                                ON CONFLICT(name) DO UPDATE SET 
-                                embedding=excluded.embedding, liveness_config=excluded.liveness_config,
-                                yaw_score=excluded.yaw_score, pitch_score=excluded.pitch_score, roll_score=excluded.roll_score,
-                                blink_score=excluded.blink_score, is_synced=1""",
-                                (r["name"], json.dumps(r["embedding"]), json.dumps(r.get("liveness_config", {})), 
-                                 r.get("yaw_score", "-"), r.get("pitch_score", "-"), r.get("roll_score", "-"), r.get("blink_score", "-"), r.get("created_at", "")))
+                    # 3A. Sync Master Wajah
+                    try:
+                        res = self.client.table("registered_faces").select("*").execute()
+                        if res.data is not None:
+                            remote_names = [str(r["name"]) for r in res.data]
+                            c.execute("SELECT name FROM registered_faces WHERE is_synced = 1")
+                            for row in c.fetchall():
+                                if row[0] not in remote_names:
+                                    c.execute("DELETE FROM registered_faces WHERE name = ?", (row[0],))
+                                    c.execute("DELETE FROM sync_deletes WHERE table_name = 'registered_faces' AND record_id = ?", (row[0],))
+                                    print(f"[Sync] 🗑️ Wajah '{row[0]}' dihapus dari lokal menyesuaikan Supabase.")
+                            
+                            for r in res.data:
+                                c.execute("""INSERT INTO registered_faces 
+                                    (name, embedding, liveness_config, yaw_score, pitch_score, roll_score, blink_score, created_at, is_synced)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+                                    ON CONFLICT(name) DO UPDATE SET 
+                                    embedding=excluded.embedding, liveness_config=excluded.liveness_config,
+                                    yaw_score=excluded.yaw_score, pitch_score=excluded.pitch_score, roll_score=excluded.roll_score,
+                                    blink_score=excluded.blink_score, is_synced=1""",
+                                    (r["name"], json.dumps(r["embedding"]), json.dumps(r.get("liveness_config", {})), 
+                                     r.get("yaw_score", "-"), r.get("pitch_score", "-"), r.get("roll_score", "-"), r.get("blink_score", "-"), r.get("created_at", "")))
+                    except Exception as e: print(f"[Sync Error] Gagal pull master wajah: {e}")
 
-                    # B. Sync Logs
-                    self._pull_logs_from_supabase(c, "register_logs", ["name", "status", "yaw_score", "pitch_score", "roll_score", "blink_score", "light_condition", "created_at"])
-                    self._pull_logs_from_supabase(c, "access_logs", ["name", "status", "headpose_score", "blink_score", "accuracy", "light_condition", "created_at"])
-                    self._pull_logs_from_supabase(c, "spoofing_logs", ["spoof_score", "message", "created_at"])
+                    # 3B. Sync Semua Logs
+                    try: self._pull_logs_from_supabase(c, "register_logs", ["name", "status", "yaw_score", "pitch_score", "roll_score", "blink_score", "light_condition", "created_at"])
+                    except Exception as e: print(f"[Sync Error] Gagal pull register_logs: {e}")
+                    
+                    try: self._pull_logs_from_supabase(c, "access_logs", ["name", "status", "headpose_score", "blink_score", "accuracy", "light_condition", "created_at"])
+                    except Exception as e: print(f"[Sync Error] Gagal pull access_logs: {e}")
+                    
+                    try: self._pull_logs_from_supabase(c, "spoofing_logs", ["spoof_score", "message", "created_at"])
+                    except Exception as e: print(f"[Sync Error] Gagal pull spoofing_logs: {e}")
                         
                     conn.commit()
-            except Exception as e: pass
+            except Exception as e: 
+                print(f"[Fatal Sync Error] Koneksi ke database lokal terganggu: {e}")

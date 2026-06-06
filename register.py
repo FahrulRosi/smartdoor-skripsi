@@ -18,47 +18,19 @@ class RegistrationStage(Enum): IDLE=0; FACEMESH=1; YAW=2; PITCH=3; ROLL=4; BLINK
 STAGE_NAMES = {RegistrationStage.FACEMESH: "1. FaceMesh (3D)", RegistrationStage.YAW: "2a. Liveness (Yaw)", RegistrationStage.PITCH: "2b. Liveness (Pitch)", RegistrationStage.ROLL: "2c. Liveness (Roll)", RegistrationStage.BLINK: "3. Liveness (Blink)", RegistrationStage.EXTRACTION: "4. Ekstraksi Fitur"}
 STEP_TO_STAGE = {"FACEMESH": RegistrationStage.FACEMESH, "YAW": RegistrationStage.YAW, "PITCH": RegistrationStage.PITCH, "ROLL": RegistrationStage.ROLL, "BLINK": RegistrationStage.BLINK, "DONE": RegistrationStage.EXTRACTION}
 
-def _log(msg, level="INFO"): print(f"[{datetime.now().strftime('%H:%M:%S')}] [{level}] {msg}")
+def _log(msg, level="INFO"): print(f"\r\033[K[{datetime.now().strftime('%H:%M:%S')}] [{level}] {msg}")
 
 class Helpers:
     @staticmethod
     def enhance_frame(frame):
+        """DIBUAT IDENTIK DENGAN MAIN.PY (Murni CLAHE & Soft Bilateral)"""
         if not getattr(config, 'ENABLE_CLAHE_ENHANCEMENT', True): return frame
-        denoised = cv2.bilateralFilter(frame, d=5, sigmaColor=50, sigmaSpace=50)
+        
+        denoised = cv2.bilateralFilter(frame, d=3, sigmaColor=30, sigmaSpace=30)
         img_yuv = cv2.cvtColor(denoised, cv2.COLOR_BGR2YUV)
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         img_yuv[:,:,0] = clahe.apply(img_yuv[:,:,0])
         return cv2.cvtColor(img_yuv, cv2.COLOR_YUV2BGR)
-
-    @staticmethod
-    def create_ai_frame(raw_frame, bbox):
-        """
-        [SOLUSI FINAL] LAB CLAHE Normalization
-        Identik 100% dengan main.py agar ekstraksi vektor konsisten mutlak.
-        """
-        x, y, w, h = bbox
-        fh, fw = raw_frame.shape[:2]
-        
-        pad_x, pad_y = int(w * 0.1), int(h * 0.1)
-        x1, y1 = max(0, x - pad_x), max(0, y - pad_y)
-        x2, y2 = min(fw, x + w + pad_x), min(fh, y + h + pad_y)
-        
-        face_crop = raw_frame[y1:y2, x1:x2].copy()
-        if face_crop.size == 0: return raw_frame
-        
-        lab = cv2.cvtColor(face_crop, cv2.COLOR_BGR2LAB)
-        l, a, b = cv2.split(lab)
-        
-        clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
-        cl = clahe.apply(l)
-        
-        merged = cv2.merge((cl, a, b))
-        enhanced_face = cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
-        
-        result_frame = raw_frame.copy()
-        result_frame[y1:y2, x1:x2] = enhanced_face
-        
-        return result_frame
 
     @staticmethod
     def capture_blink(face):
@@ -76,16 +48,9 @@ class Helpers:
             cv2.rectangle(f, (bx, by), (bx+bw, by+bh), col, 3)
             cv2.rectangle(f, (bx, by-35), (bx+200, by-5), col, -1)
             cv2.putText(f, status, (bx+5, by-12), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255,255,255), 2)
-            
-        cv2.rectangle(f, (0, 50), (config.FRAME_WIDTH, 185), (20,20,20), -1)
-        cv2.rectangle(f, (0, 50), (config.FRAME_WIDTH, 185), config.COLOR_CYAN, 2)
-        
-        for txt, yp, c, sz, t in [(STAGE_NAMES.get(stg, "Proses..."), 75, config.COLOR_GREEN, 0.85, 2), 
-                                  (instr, 105, config.COLOR_YELLOW, 0.65, 2), 
-                                  (prog, 130, config.COLOR_CYAN, 0.6, 1), 
-                                  (score_txt, 160, config.COLOR_WHITE, 0.55, 1)]:
+        cv2.rectangle(f, (0, 50), (config.FRAME_WIDTH, 185), (20,20,20), -1); cv2.rectangle(f, (0, 50), (config.FRAME_WIDTH, 185), config.COLOR_CYAN, 2)
+        for txt, yp, c, sz, t in [(STAGE_NAMES.get(stg, "Proses..."), 75, config.COLOR_GREEN, 0.85, 2), (instr, 105, config.COLOR_YELLOW, 0.65, 2), (prog, 130, config.COLOR_CYAN, 0.6, 1), (score_txt, 160, config.COLOR_WHITE, 0.55, 1)]:
             if txt: cv2.putText(f, txt, (20, yp), cv2.FONT_HERSHEY_SIMPLEX, sz, c, t)
-            
         bx_bar, by_bar, bw_bar, bh_bar, sv = (config.FRAME_WIDTH-350)//2, 15, 350, 25, min(stg.value, 6)
         cv2.rectangle(f, (bx_bar, by_bar), (bx_bar+bw_bar, by_bar+bh_bar), (30,30,30), -1)
         if sv > 0: cv2.rectangle(f, (bx_bar, by_bar), (bx_bar + int(bw_bar*(sv-1)/6), by_bar+bh_bar), config.COLOR_GREEN, -1)
@@ -107,7 +72,7 @@ class FaceRegistrationApp:
     POSE_CFG = {RegistrationStage.YAW: ("yaw_snapshots", "yaw_left", "yaw_right", "yaw", getattr(config, 'YAW_THRESHOLD', 25.0)), RegistrationStage.PITCH: ("pitch_snapshots", "pitch_up", "pitch_down", "pitch", getattr(config, 'PITCH_THRESHOLD', 20.0)), RegistrationStage.ROLL: ("roll_snapshots", "roll_left", "roll_right", "roll", getattr(config, 'ROLL_THRESHOLD', 25.0))}
     
     def __init__(self, name):
-        self.name, self.stage, self.in_ext, self.hold_frames, self.missed_frames = name, RegistrationStage.FACEMESH, False, 0, 0
+        self.name, self.stage, self.in_ext, self.hold_frames, self.print_counter, self.missed_frames = name, RegistrationStage.FACEMESH, False, 0, 0, 0
         self.last_match_score, self.fake_frames, self.latency = 0.0, 0, 0.0 
         self.ext_embs = [] 
         
@@ -126,7 +91,7 @@ class FaceRegistrationApp:
         self.liveness, self.model = LivenessManager(), MobileFaceNet()
         
         self.anti_spoof = SilentAntiSpoofing(getattr(config, 'ANTI_SPOOFING_MODEL', "liveness/antispoofing.onnx"), getattr(config, 'ANTI_SPOOFING_THRESHOLD', 0.70))
-        self.matcher = FaceMatcher(getattr(config, 'ANTI_DUPLICATE_THRESHOLD', 0.42))
+        self.matcher = FaceMatcher(0.35) 
         
         try:
             raw = self.db.load_all_faces()
@@ -223,9 +188,7 @@ class FaceRegistrationApp:
         else: 
             light_cond = f"Normal (F:{L:.0f}/B:{L_bg:.0f})"
 
-        ai_frame = Helpers.create_ai_frame(raw_frame, face.bbox)
-        
-        raw_emb = self.model.get_embedding(self.model.crop_face(ai_frame, safe_bbox))
+        raw_emb = self.model.get_embedding(self.model.crop_face(frame, safe_bbox))
         
         if raw_emb is not None:
             emb_flat = np.array(raw_emb, dtype=np.float32).flatten()
@@ -241,7 +204,9 @@ class FaceRegistrationApp:
         match = self.matcher.match(avg_emb)
         self.last_match_score = match.get("score", 0.0)
         
-        if match["matched"] and os.getenv("ALLOW_DUPLICATE", "false").lower() != "true": 
+        anti_dup_thr = getattr(config, 'ANTI_DUPLICATE_THRESHOLD', 0.48)
+        
+        if match.get("name") and self.last_match_score >= anti_dup_thr and os.getenv("ALLOW_DUPLICATE", "false").lower() != "true": 
             msg_sub = f"User: {match['name']} (Sim: {match['score']:.4f}) | Kondisi: {light_cond}"
             Helpers.show_msg(display, "❌ WAJAH SUDAH TERDAFTAR!", msg_sub, config.COLOR_RED)
             _log(f"GAGAL: Terdeteksi duplikat dgn {match['name']} (Sim: {match['score']:.4f}) | Kondisi: {light_cond}", "ERROR")
@@ -273,7 +238,7 @@ class FaceRegistrationApp:
             _log(f"✅ TAHAP 3: Blink Selesai -> EAR Buka: {bo.get('avg_ear',0):.2f} ({bo.get('latency_ms',0):.1f}ms) | Kedip: {bc.get('avg_ear',0):.2f} ({bc.get('latency_ms',0):.1f}ms)", "SUCCESS")
         elif old_stage == RegistrationStage.EXTRACTION:
             _log("📊 RANGKUMAN REGISTRASI KOMPREHENSIF", "SYSTEM")
-            _log(f"   • Kemiripan DB (Max Tol: {getattr(config, 'MATCH_THRESHOLD', 0.42)}): {self.last_match_score:.2%}", "SUCCESS")
+            _log(f"   • Kemiripan DB (Max Tol: {getattr(config, 'MATCH_THRESHOLD', 0.48)}): {self.last_match_score:.2%}", "SUCCESS")
             _log(f"   • Kondisi Cahaya: {self.cap_data.get('light_condition', 'N/A')}", "SUCCESS")
 
     def _process_thread(self):
@@ -322,8 +287,9 @@ class FaceRegistrationApp:
                 if chk_spf:
                     sp = self.anti_spoof.is_real(raw, face.bbox)
                     sp_score, sp_real = sp.get("score", 1.0), sp.get("real", True)
+                    sp_label = sp.get("label_name", "FOTO/VIDEO").upper() 
                 else:
-                    sp_score, sp_real = 1.0, True
+                    sp_score, sp_real, sp_label = 1.0, True, "ASLI"
                 
                 bx, by, bw, bh = face.bbox
                 fh_l, fw_l = raw.shape[:2]
@@ -348,7 +314,7 @@ class FaceRegistrationApp:
                 
                 if chk_spf and not sp_real:
                     self.fake_frames += 1
-                    Helpers.draw_hud(display, self.stage, "❌ DETEKSI SPOOFING!", f"Palsu: {sp_score:.2f}", hud_txt, f"FOTO/VIDEO (Spoof: {sp_score:.2f})", face.bbox, config.COLOR_RED)
+                    Helpers.draw_hud(display, self.stage, "❌ DETEKSI SPOOFING!", f"Palsu: {sp_score:.2f}", hud_txt, f"{sp_label} (Spoof: {sp_score:.2f})", face.bbox, config.COLOR_RED)
                     with self.frame_lock: self.display_frame = display
                     continue 
                 else: 
@@ -368,6 +334,10 @@ class FaceRegistrationApp:
                     self._process_extraction(raw, enhanced, face, display, pose, hud_txt, sp_score)
 
                 self.latency = (time.time() - t_start) * 1000.0
+
+                self.print_counter += 1
+                if self.print_counter % 3 == 0 and instr: 
+                    print(f"\r\033[K[{instr}] {term_txt} | Lat: {self.latency:.1f}ms", end="", flush=True)
                     
                 if old_stage != self.stage: 
                     self._log_transition(old_stage)
@@ -380,10 +350,8 @@ class FaceRegistrationApp:
         if self.stage == RegistrationStage.COMPLETE: return
         threading.Thread(target=self._process_thread, daemon=True).start()
         try:
-            cv2.namedWindow("Register", cv2.WINDOW_NORMAL)
-            
-            # Memperbesar ukuran Window tanpa memberatkan AI
-            cv2.resizeWindow("Register", 1024, 768)
+            # --- PERBAIKAN: MODE JENDELA (TIDAK FULL SCREEN) ---
+            cv2.namedWindow("Register", cv2.WINDOW_AUTOSIZE)
 
             while self.is_running and self.stage != RegistrationStage.COMPLETE:
                 with self.frame_lock: 
@@ -399,5 +367,23 @@ class FaceRegistrationApp:
             cv2.destroyAllWindows()
             if GPIO_AVAILABLE: GPIO.cleanup()
 
+# --- PERBAIKAN: FITUR INPUT NAMA LALU NIM ---
 if __name__ == "__main__":
-    if (name := input("\nMasukan Nama: ").strip()): FaceRegistrationApp(name).run()
+    print("\n" + "="*40)
+    print("   SISTEM REGISTRASI WAJAH")
+    print("="*40)
+    
+    nama_input = input("Masukan Nama : ").strip()
+    
+    if nama_input:
+        nim_input = input("Masukan NIM  : ").strip()
+        
+        if nim_input:
+            # Gabungkan NIM dan Nama sebagai identitas unik di database
+            # Contoh hasil: "432007006 - Fahrul Rosi"
+            full_identity = f"{nim_input} - {nama_input}"
+            FaceRegistrationApp(full_identity).run()
+        else:
+            print("❌ Registrasi Dibatalkan: NIM tidak boleh kosong!")
+    else:
+        print("❌ Registrasi Dibatalkan: Nama tidak boleh kosong!")

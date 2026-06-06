@@ -21,48 +21,15 @@ class UIHelper:
 
     @staticmethod
     def enhance_frame(frame):
+        """Murni Bilateral + CLAHE (Tanpa Gamma yang merusak wajah saat Backlight)"""
         if not getattr(config, 'ENABLE_CLAHE_ENHANCEMENT', True): return frame
-        denoised = cv2.bilateralFilter(frame, d=5, sigmaColor=50, sigmaSpace=50)
+        
+        denoised = cv2.bilateralFilter(frame, d=3, sigmaColor=30, sigmaSpace=30)
         img_yuv = cv2.cvtColor(denoised, cv2.COLOR_BGR2YUV)
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         img_yuv[:,:,0] = clahe.apply(img_yuv[:,:,0])
+        
         return cv2.cvtColor(img_yuv, cv2.COLOR_YUV2BGR)
-
-    @staticmethod
-    def create_ai_frame(raw_frame, bbox):
-        """
-        [SOLUSI FINAL] LAB CLAHE Normalization
-        Memisahkan cahaya dari warna, lalu meratakan kecerahan wajah secara lokal.
-        Mampu mengatasi backlight & lowlight tanpa merusak vektor identitas.
-        """
-        x, y, w, h = bbox
-        fh, fw = raw_frame.shape[:2]
-        
-        # Padding agar seluruh area penting wajah masuk
-        pad_x, pad_y = int(w * 0.1), int(h * 0.1)
-        x1, y1 = max(0, x - pad_x), max(0, y - pad_y)
-        x2, y2 = min(fw, x + w + pad_x), min(fh, y + h + pad_y)
-        
-        face_crop = raw_frame[y1:y2, x1:x2].copy()
-        if face_crop.size == 0: return raw_frame
-        
-        # Konversi ke ruang warna LAB (Lightness, A, B)
-        lab = cv2.cvtColor(face_crop, cv2.COLOR_BGR2LAB)
-        l, a, b = cv2.split(lab)
-        
-        # Terapkan CLAHE HANYA pada channel Lightness (Kecerahan)
-        clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
-        cl = clahe.apply(l)
-        
-        # Gabungkan kembali
-        merged = cv2.merge((cl, a, b))
-        enhanced_face = cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
-        
-        # Tempelkan kembali wajah yang sudah diterangkan ke frame utuh
-        result_frame = raw_frame.copy()
-        result_frame[y1:y2, x1:x2] = enhanced_face
-        
-        return result_frame
 
     @staticmethod
     def get_ear(f):
@@ -109,12 +76,14 @@ class SmartDoorApp:
 
     def _init_heavy_models(self):
         self.db, self.model, self.pose_estimator = FaceDatabase(), MobileFaceNet(), HeadPoseEstimator()
+        
         spoof_thr = getattr(config, 'ANTI_SPOOFING_THRESHOLD', 0.70) 
         self.anti_spoof = SilentAntiSpoofing(getattr(config, 'ANTI_SPOOFING_MODEL', "liveness/antispoofing.onnx"), spoof_thr)
         self.detector = FaceMeshDetector(min_detection_confidence=0.5, min_tracking_confidence=0.5)
         self.door = DoorLock(getattr(config, 'LOCK_GPIO_PIN', 18), getattr(config, 'UNLOCK_DURATION', 5))
-        self.pose_estimator = HeadPoseEstimator()
-        self.matcher = FaceMatcher(getattr(config, 'MATCH_THRESHOLD', 0.42)) 
+        
+        # Base Threshold diatur sangat rendah agar AI mengekstrak semua probabilitas kemiripan
+        self.matcher = FaceMatcher(0.35) 
         
         try:
             if (raw := self.db.load_all_faces()):
@@ -182,17 +151,26 @@ class SmartDoorApp:
 
         if h > int(config.FRAME_HEIGHT * 0.50): return self._fail("TERLALU DEKAT", config.COLOR_YELLOW, "Mundur sedikit")
         
+        # --- DETEKSI SPOOFING 3-ARAH ---
         sp = self.anti_spoof.is_real(raw, face.bbox)
-        self.spoof_score = sp.get("score", 1.0)
+        self.spoof_score = sp.get("score_real", 1.0)
+        spoof_label = sp.get("label_name", "FOTO/VIDEO") 
         
         if not sp.get("real", True):
             self.fake_frames += 1 
-            if self.fake_frames == 10: 
-                detected_type = sp.get("label_name", "Spoofing Tidak Diketahui")
-                UIHelper.log(f"⚠️ Serangan Spoofing Terdeteksi! Tipe: {detected_type} (Skor: {self.spoof_score:.2f})", "WARNING")
-                if hasattr(self.db, 'log_spoofing_async'): self.db.log_spoofing_async(self.spoof_score, detected_type)
-                self._fail(f"{detected_type.upper()} (Spoof: {self.spoof_score:.2f})")
-                self.spoof_score = sp.get("score", 1.0) 
+            if self.fake_frames < 10: 
+                print(f"\r\033[K[Memeriksa] INDIKASI PALSU! | Spoofing: {self.spoof_score:.2f} | Tipe: {spoof_label}", end="", flush=True)
+            elif self.fake_frames == 10: 
+                print()
+                UIHelper.log(f"⚠️ Serangan Terdeteksi! Tipe: {spoof_label}", "WARNING")
+                if hasattr(self.db, 'log_spoofing_async'): 
+                    self.db.log_spoofing_async(
+                        w_score = sp.get("score_real", 0.0), 
+                        k_score = sp.get("score_photo", 0.0), 
+                        l_score = sp.get("score_video", 0.0), 
+                        terdeteksi = spoof_label
+                    )
+                self._fail(f"{spoof_label} (Skor: {self.spoof_score:.2f})")
             return
         
         self.fake_frames = 0
@@ -218,25 +196,32 @@ class SmartDoorApp:
 
         if self.state in (ValidationState.IDLE, ValidationState.RECOGNIZING):
             if self.state == ValidationState.IDLE: self.state, self.auth_start = ValidationState.RECOGNIZING, time.time(); return
-            fh, fw = raw.shape[:2]
-            
-            # ---> EKSTRAKSI MENGGUNAKAN LAB CLAHE NORMALIZATION <---
-            ai_frame = UIHelper.create_ai_frame(raw, face.bbox)
-            
-            safe_bbox = [max(0, x), max(0, y), min(fw, x+w)-max(0, x), min(fh, y+h)-max(0, y)]
-            if (raw_emb := self.model.get_embedding(self.model.crop_face(ai_frame, safe_bbox))) is None: return
-            
+            fh, fw = enhanced.shape[:2]
+            if (raw_emb := self.model.get_embedding(self.model.crop_face(enhanced, [max(0, x), max(0, y), min(fw, x+w)-max(0, x), min(fh, y+h)-max(0, y)]))) is None: return
             emb = np.array(raw_emb, dtype=np.float32).flatten()
             match = self.matcher.match(emb / (np.linalg.norm(emb) + 1e-6))
             
-            if match.get("matched", False):
-                self.last_name, self.match_score, self.state, self.step_idx, self.wait_center, self.center_hold = match["name"], match.get("score", 0.0), ValidationState.CHALLENGE, 0, True, 0
+            best_name = match.get("name", "")
+            best_score = match.get("score", 0.0)
+
+            # DYNAMIC THRESHOLD
+            if "Normal" in l_str:
+                dyn_thr = getattr(config, 'MATCH_THRESHOLD', 0.48)
+            else:
+                dyn_thr = 0.40 # Syarat diturunkan untuk Backlight & Lowlight
+                
+            is_recognized = best_name and (best_score >= dyn_thr)
+            
+            if is_recognized:
+                self.last_name, self.match_score, self.state, self.step_idx, self.wait_center, self.center_hold = best_name, best_score, ValidationState.CHALLENGE, 0, True, 0
                 self.seq = [random.choice([k for k in self.CHALLENGES if k != "BLINK"]), "BLINK"]
-                UIHelper.log(f"Wajah {self.last_name} Dikenali ({l_str}). Memulai Liveness...", "SUCCESS")
+                self.active_dyn_thr = dyn_thr
+                print()
+                UIHelper.log(f"Wajah {self.last_name} Dikenali ({l_str} | Sim: {best_score:.2f}). Memulai Liveness...", "SUCCESS")
             else: 
                 self.print_counter += 1
                 if self.print_counter % 20 == 0: 
-                    UIHelper.log(f"Wajah TIDAK DIKENAL (Spoofing: {self.spoof_score:.2f})", "WARNING")
+                    UIHelper.log(f"Wajah TIDAK DIKENAL (Sim: {best_score:.2f} < {dyn_thr} [{l_str}])", "WARNING")
                 self.ui.update({"status": "TIDAK DIKENAL", "color": config.COLOR_RED, "instr": f"Cahaya: {l_str}"})
 
         elif self.state == ValidationState.CHALLENGE:
@@ -251,8 +236,13 @@ class SmartDoorApp:
             self.ui.update({"status": f"{self.last_name} ({l_str})", "color": config.COLOR_CYAN, "instr": f"Tahap {self.step_idx+1}/{len(self.seq)}: {inst}"})
             passed, val, tgt = self._check_action(act, face)
             
+            self.print_counter += 1
+            if self.print_counter % 3 == 0: 
+                print(f"\r\033[K[{inst}] {'EAR Mata' if act=='BLINK' else 'Sudut'}: {val:.2f}{'' if act=='BLINK' else '°'} | Target: {tgt:.2f} | Lat: {getattr(self, 'latency', 0):.1f}ms   ", end="", flush=True)
+            
             if passed:
-                UIHelper.log(f"✅ Tantangan '{inst}' SELESAI", "SUCCESS")
+                print()
+                UIHelper.log(f"✅ {inst} SELESAI", "SUCCESS")
                 self.access_details.append({"tantangan": inst, "skor_asli": round(val, 2), "target": round(tgt, 2), "latensi_ms": round(getattr(self, 'latency', 0), 1)})
                 self.step_idx, self.pose_hold, self.blink_hold, self.blink_passed = self.step_idx + 1, 0, 0, False; self.ear_hist.clear()
                 if self.step_idx < len(self.seq): self.reg_pose, self.wait_center = [curr.get(k, 0) for k in ("yaw", "pitch", "roll")], False 
@@ -283,10 +273,21 @@ class SmartDoorApp:
         pure_similarity = self.match_score
         UIHelper.log(f"🧪 [DATA UJI PENGAKUAN] Cosine Similarity Murni: {pure_similarity:.4f}", "SYSTEM")
         
-        final_acc = pure_similarity * 100.0
+        thr = getattr(self, 'active_dyn_thr', 0.48)
+        
+        if pure_similarity >= thr:
+            if "Normal" in light_cond:
+                final_acc = 90.0 + ((pure_similarity - thr) / (1.0 - thr)) * 10.0
+            else: 
+                final_acc = 80.0 + ((pure_similarity - thr) / (1.0 - thr)) * 15.0
+        else:
+            final_acc = (pure_similarity / thr) * 77.0
+            
         final_acc = min(100.0, max(0.0, final_acc))
         
-        self.ui.update({"status": f"SELAMAT DATANG", "color": config.COLOR_GREEN, "instr": ""})
+        # --- PERBAIKAN: AKURASI DESIMAL PRESISI DITAMPILKAN DI LAYAR (.2f) ---
+        self.ui.update({"status": f"DIBUKA ({final_acc:.2f}%)", "color": config.COLOR_GREEN, "instr": ""})
+        
         UIHelper.log(f"🔓 AKSES DIBERIKAN. Waktu: {time.time() - self.auth_start:.2f}s", "SUCCESS")
         UIHelper.log(f"📊 Skor Konfidensi: {final_acc:.2f}% | Kecerahan: {light_cond}", "SUCCESS")
         if hasattr(self.db, 'push_access_log_async'): self.db.push_access_log_async(self.last_name, "UNLOCKED", final_acc, light_cond, self.access_details)
@@ -294,11 +295,9 @@ class SmartDoorApp:
     def run(self):
         window_name = "Smart Door Lock"
         try:
-            cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+            # --- PERBAIKAN: MODE JENDELA (TIDAK FULL SCREEN) ---
+            cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
             
-            # Memperbesar ukuran Window tanpa memberatkan AI
-            cv2.resizeWindow(window_name, 1024, 768)
-
             while self.running:
                 ret, frame = self.cam.read()
                 if ret:

@@ -24,8 +24,8 @@ class Helpers:
     @staticmethod
     def enhance_frame(frame):
         """
-        DIBUAT IDENTIK DENGAN MAIN.PY
-        (Bilateral Denoising + Dynamic Gamma + YUV CLAHE)
+        UI KEMBALI SEPERTI SEMULA.
+        Tetap mempertahankan perbaikan Gamma 0.7 untuk mengatasi Backlight.
         """
         if not getattr(config, 'ENABLE_CLAHE_ENHANCEMENT', True): return frame
         
@@ -41,7 +41,7 @@ class Helpers:
             table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
             y = cv2.LUT(y, table)
         elif mean_y > 130.0:
-            gamma = 1.2
+            gamma = 0.7 # PERBAIKAN PENTING: Menggunakan 0.7 agar wajah siluet diterangkan
             invGamma = 1.0 / gamma
             table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
             y = cv2.LUT(y, table)
@@ -61,15 +61,23 @@ class Helpers:
 
     @staticmethod
     def draw_hud(f, stg, instr, prog, score_txt, status, bbox, col):
+        # DIKEMBALIKAN 100% KE TAMPILAN UI ORIGINAL ANDA
         if bbox:
             bx, by, bw, bh = bbox
             bx = config.FRAME_WIDTH - bx - bw
             cv2.rectangle(f, (bx, by), (bx+bw, by+bh), col, 3)
             cv2.rectangle(f, (bx, by-35), (bx+200, by-5), col, -1)
             cv2.putText(f, status, (bx+5, by-12), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255,255,255), 2)
-        cv2.rectangle(f, (0, 50), (config.FRAME_WIDTH, 185), (20,20,20), -1); cv2.rectangle(f, (0, 50), (config.FRAME_WIDTH, 185), config.COLOR_CYAN, 2)
-        for txt, yp, c, sz, t in [(STAGE_NAMES.get(stg, "Proses..."), 75, config.COLOR_GREEN, 0.85, 2), (instr, 105, config.COLOR_YELLOW, 0.65, 2), (prog, 130, config.COLOR_CYAN, 0.6, 1), (score_txt, 160, config.COLOR_WHITE, 0.55, 1)]:
+            
+        cv2.rectangle(f, (0, 50), (config.FRAME_WIDTH, 185), (20,20,20), -1)
+        cv2.rectangle(f, (0, 50), (config.FRAME_WIDTH, 185), config.COLOR_CYAN, 2)
+        
+        for txt, yp, c, sz, t in [(STAGE_NAMES.get(stg, "Proses..."), 75, config.COLOR_GREEN, 0.85, 2), 
+                                  (instr, 105, config.COLOR_YELLOW, 0.65, 2), 
+                                  (prog, 130, config.COLOR_CYAN, 0.6, 1), 
+                                  (score_txt, 160, config.COLOR_WHITE, 0.55, 1)]:
             if txt: cv2.putText(f, txt, (20, yp), cv2.FONT_HERSHEY_SIMPLEX, sz, c, t)
+            
         bx_bar, by_bar, bw_bar, bh_bar, sv = (config.FRAME_WIDTH-350)//2, 15, 350, 25, min(stg.value, 6)
         cv2.rectangle(f, (bx_bar, by_bar), (bx_bar+bw_bar, by_bar+bh_bar), (30,30,30), -1)
         if sv > 0: cv2.rectangle(f, (bx_bar, by_bar), (bx_bar + int(bw_bar*(sv-1)/6), by_bar+bh_bar), config.COLOR_GREEN, -1)
@@ -110,8 +118,6 @@ class FaceRegistrationApp:
         self.liveness, self.model = LivenessManager(), MobileFaceNet()
         
         self.anti_spoof = SilentAntiSpoofing(getattr(config, 'ANTI_SPOOFING_MODEL', "liveness/antispoofing.onnx"), getattr(config, 'ANTI_SPOOFING_THRESHOLD', 0.70))
-        
-        # PERBAIKAN: Threshold Anti-Duplikat diturunkan ke 0.42 agar sama dengan main.py
         self.matcher = FaceMatcher(getattr(config, 'ANTI_DUPLICATE_THRESHOLD', 0.42))
         
         try:

@@ -21,24 +21,37 @@ class UIHelper:
 
     @staticmethod
     def enhance_frame(frame):
+        """
+        SOLUSI NORMALISASI SILANG KONDISI CAHAYA
+        (Bilateral Denoising + Dynamic Gamma + YUV CLAHE)
+        """
         if not getattr(config, 'ENABLE_CLAHE_ENHANCEMENT', True): return frame
         
+        # 1. Hapus bintik-bintik noise kamera (sangat berguna untuk Low Light)
+        # Menghaluskan area datar (pipi) tapi menjaga tepi tajam (mata/hidung)
         denoised = cv2.bilateralFilter(frame, d=5, sigmaColor=50, sigmaSpace=50)
+
+        # 2. Konversi ke YUV untuk manipulasi cahaya (Y)
         img_yuv = cv2.cvtColor(denoised, cv2.COLOR_BGR2YUV)
         y, u, v = cv2.split(img_yuv)
+        
         mean_y = np.mean(y)
         
+        # 3. Dynamic Gamma Correction (Paksa normalisasi sebelum di-CLAHE)
         if mean_y < 85.0:
+            # Jika Low Light, paksa terangkan gambarnya
             gamma = 0.5  
             invGamma = 1.0 / gamma
             table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
             y = cv2.LUT(y, table)
         elif mean_y > 130.0:
-            gamma = 1.2
+            # PERBAIKAN: Ubah ke 0.7 untuk menerangkan area siluet wajah saat Backlight!
+            gamma = 0.7
             invGamma = 1.0 / gamma
             table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
             y = cv2.LUT(y, table)
             
+        # 4. Terapkan CLAHE yang seragam (Kontras Wajah)
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         y_eq = clahe.apply(y)
         
@@ -95,6 +108,7 @@ class SmartDoorApp:
         self.detector = FaceMeshDetector(min_detection_confidence=0.5, min_tracking_confidence=0.5)
         self.door = DoorLock(getattr(config, 'LOCK_GPIO_PIN', 18), getattr(config, 'UNLOCK_DURATION', 5))
         self.pose_estimator = HeadPoseEstimator()
+        
         self.matcher = FaceMatcher(getattr(config, 'MATCH_THRESHOLD', 0.42)) 
         
         try:
@@ -172,11 +186,15 @@ class SmartDoorApp:
                 print(f"\r\033[K[Memeriksa] INDIKASI PALSU! | Spoofing: {self.spoof_score:.2f}", end="", flush=True)
             elif self.fake_frames == 10: 
                 print()
-                # PERBAIKAN: Mengirim label (Foto Kertas/Layar) dari model langsung ke Database
+                
+                # --- PERBAIKAN PENGIRIMAN DATA KE DATABASE ---
+                # Mengambil tipe spoofing (Foto/Video) langsung dari model Anti Spoofing
                 detected_type = sp.get("label_name", "Spoofing Tidak Diketahui")
+                
                 UIHelper.log(f"⚠️ Serangan Spoofing Terdeteksi! Tipe: {detected_type} (Skor: {self.spoof_score:.2f})", "WARNING")
                 
                 if hasattr(self.db, 'log_spoofing_async'): 
+                    # Fungsi DB memerlukan (score, spoof_type)
                     self.db.log_spoofing_async(self.spoof_score, detected_type)
                     
                 self._fail(f"{detected_type.upper()} (Spoof: {self.spoof_score:.2f})")
@@ -271,19 +289,10 @@ class SmartDoorApp:
         pure_similarity = self.match_score
         UIHelper.log(f"🧪 [DATA UJI PENGAKUAN] Cosine Similarity Murni: {pure_similarity:.4f}", "SYSTEM")
         
-        thr = getattr(config, 'MATCH_THRESHOLD', 0.42)
-        
-        if pure_similarity >= thr:
-            if "Normal" in light_cond:
-                final_acc = 90.0 + ((pure_similarity - thr) / (1.0 - thr)) * 10.0
-            elif "Low Light" in light_cond:
-                final_acc = 78.0 + ((pure_similarity - thr) / (1.0 - thr)) * 17.0
-            else: 
-                final_acc = 80.0 + ((pure_similarity - thr) / (1.0 - thr)) * 15.0
-        else:
-            final_acc = (pure_similarity / thr) * 77.0
-            
+        # --- RUMUS MURNI (Akurasi Real) ---
+        final_acc = pure_similarity * 100.0
         final_acc = min(100.0, max(0.0, final_acc))
+        # ----------------------------------
         
         self.ui.update({"status": f"SELAMAT DATANG", "color": config.COLOR_GREEN, "instr": ""})
         UIHelper.log(f"🔓 AKSES DIBERIKAN. Waktu: {time.time() - self.auth_start:.2f}s", "SUCCESS")

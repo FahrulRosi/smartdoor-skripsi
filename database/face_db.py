@@ -1,5 +1,6 @@
 import os, json, time, threading, traceback, sqlite3, numpy as np
 from datetime import datetime
+from contextlib import closing # Digunakan untuk menutup koneksi database secara otomatis dan aman
 import requests
 from supabase import create_client, Client
 import config
@@ -89,6 +90,17 @@ class DataTransformer:
 class FaceDatabase:
     def __init__(self, local_db_path="local_faces.db"):
         self.db_path = local_db_path
+        
+        # --- FITUR PENGHAPUSAN OTOMATIS FILE JOURNAL ---
+        journal_path = self.db_path + "-journal"
+        if os.path.exists(journal_path):
+            try:
+                os.remove(journal_path)
+                print(f"[Database] ✅ File sisa '{journal_path}' berhasil dihapus otomatis.")
+            except Exception as e:
+                print(f"[Database WARNING] Gagal menghapus '{journal_path}': {e}")
+        # -----------------------------------------------
+
         self.db_lock = threading.Lock()
         self.sync_trigger = threading.Event() 
         self._init_sqlite()
@@ -106,12 +118,18 @@ class FaceDatabase:
 
         threading.Thread(target=self._https_sync_worker, daemon=True).start()
 
+    # --- PENGHASIL KONEKSI AMAN (ANTI MEMORY LEAK & ANTI JOURNAL) ---
+    def _get_connection(self):
+        """Membuat koneksi SQLite dengan konfigurasi memori agar tidak ada file journal tertinggal saat beroperasi"""
+        conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=10.0)
+        conn.execute("PRAGMA journal_mode = MEMORY;") 
+        conn.execute("PRAGMA synchronous = NORMAL;")
+        return conn
+    # ----------------------------------------------------------------
+
     def _init_sqlite(self):
-        with self.db_lock, sqlite3.connect(self.db_path, check_same_thread=False) as conn:
+        with self.db_lock, closing(self._get_connection()) as conn:
             c = conn.cursor()
-            
-            # MEMATIKAN FILE JOURNAL SECARA PERMANEN
-            c.execute('PRAGMA journal_mode = OFF;')
             
             c.execute('''CREATE TABLE IF NOT EXISTS registered_faces (
                 name TEXT PRIMARY KEY, embedding TEXT, liveness_config TEXT,
@@ -128,16 +146,13 @@ class FaceDatabase:
                 headpose_score TEXT, blink_score TEXT, accuracy REAL, light_condition TEXT,
                 created_at TEXT, is_synced INTEGER DEFAULT 0)''')
             
-            # PERUBAHAN: message TEXT diubah menjadi spoof_type TEXT
             c.execute('''CREATE TABLE IF NOT EXISTS spoofing_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, spoof_score REAL, spoof_type TEXT,
                 created_at TEXT, is_synced INTEGER DEFAULT 0)''')
 
-            # --- TABEL SENSOR PENGHAPUSAN (TRIGGER) ---
             c.execute('''CREATE TABLE IF NOT EXISTS sync_deletes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, table_name TEXT, record_id TEXT)''')
 
-            # Sensor otomatis jika data dihapus di SQLite (DBeaver)
             triggers = [
                 ("registered_faces", "name"),
                 ("register_logs", "created_at"),
@@ -160,7 +175,7 @@ class FaceDatabase:
             return False
 
     def check_user_exists(self, name):
-        with self.db_lock, sqlite3.connect(self.db_path) as conn:
+        with self.db_lock, closing(self._get_connection()) as conn:
             c = conn.cursor()
             c.execute("SELECT 1 FROM registered_faces WHERE name = ?", (name,))
             return c.fetchone() is not None
@@ -171,7 +186,7 @@ class FaceDatabase:
             lc = cap_data.get("light_condition", "N/A")
             created_at = p.get("registered_at", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
 
-            with self.db_lock, sqlite3.connect(self.db_path) as conn:
+            with self.db_lock, closing(self._get_connection()) as conn:
                 c = conn.cursor()
                 c.execute("""INSERT INTO registered_faces 
                     (name, embedding, liveness_config, yaw_score, pitch_score, roll_score, blink_score, created_at, is_synced)
@@ -199,7 +214,7 @@ class FaceDatabase:
 
     def load_all_faces(self, silent=False):
         faces = {}
-        with self.db_lock, sqlite3.connect(self.db_path) as conn:
+        with self.db_lock, closing(self._get_connection()) as conn:
             c = conn.cursor()
             c.execute("SELECT name, embedding, liveness_config, yaw_score, pitch_score, roll_score, blink_score, created_at FROM registered_faces")
             for row in c.fetchall():
@@ -244,7 +259,7 @@ class FaceDatabase:
             except Exception: pass
             
         created_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        with self.db_lock, sqlite3.connect(self.db_path) as conn:
+        with self.db_lock, closing(self._get_connection()) as conn:
             conn.execute("""INSERT INTO register_logs 
                 (name, status, yaw_score, pitch_score, roll_score, blink_score, light_condition, created_at, is_synced)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)""",
@@ -263,7 +278,7 @@ class FaceDatabase:
                 elif "kedip" in tl or "mata" in tl: blink_str += info + " | "
 
         created_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        with self.db_lock, sqlite3.connect(self.db_path) as conn:
+        with self.db_lock, closing(self._get_connection()) as conn:
             conn.execute("""INSERT INTO access_logs 
                 (name, status, headpose_score, blink_score, accuracy, light_condition, created_at, is_synced)
                 VALUES (?, ?, ?, ?, ?, ?, ?, 0)""",
@@ -271,10 +286,9 @@ class FaceDatabase:
             conn.commit()
         self.sync_trigger.set() 
 
-    # PERUBAHAN: Mengganti argumen `message` menjadi `spoof_type`
     def log_spoofing_async(self, score, spoof_type):
         created_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        with self.db_lock, sqlite3.connect(self.db_path) as conn:
+        with self.db_lock, closing(self._get_connection()) as conn:
             conn.execute("INSERT INTO spoofing_logs (spoof_score, spoof_type, created_at, is_synced) VALUES (?, ?, ?, 0)", 
                          (float(score), spoof_type or "-", created_at))
             conn.commit()
@@ -293,7 +307,7 @@ class FaceDatabase:
             if not self.is_connected or not self._is_online(): continue 
             
             try:
-                with self.db_lock, sqlite3.connect(self.db_path) as conn:
+                with self.db_lock, closing(self._get_connection()) as conn:
                     c = conn.cursor()
                     
                     # ---------------------------------------------------------
@@ -316,7 +330,6 @@ class FaceDatabase:
                     # ---------------------------------------------------------
                     # TAHAP 2: PUSH INSERT (Upload ke SUPABASE)
                     # ---------------------------------------------------------
-                    # 2A. Upload Registered Faces
                     try:
                         c.execute("SELECT name, embedding, liveness_config, yaw_score, pitch_score, roll_score, blink_score, created_at FROM registered_faces WHERE is_synced = 0")
                         for r in c.fetchall():
@@ -326,7 +339,6 @@ class FaceDatabase:
                             synced_count += 1
                     except Exception as e: pass
                     
-                    # 2B. Upload Register Logs
                     try:
                         c.execute("SELECT id, name, status, yaw_score, pitch_score, roll_score, blink_score, light_condition, created_at FROM register_logs WHERE is_synced = 0")
                         for r in c.fetchall():
@@ -336,7 +348,6 @@ class FaceDatabase:
                             synced_count += 1
                     except Exception as e: pass
                         
-                    # 2C. Upload Access Logs
                     try:
                         c.execute("SELECT id, name, status, headpose_score, blink_score, accuracy, light_condition, created_at FROM access_logs WHERE is_synced = 0")
                         for r in c.fetchall():
@@ -346,7 +357,6 @@ class FaceDatabase:
                             synced_count += 1
                     except Exception as e: pass
                         
-                    # 2D. Upload Spoofing Logs (PERUBAHAN `message` -> `spoof_type`)
                     try:
                         c.execute("SELECT id, spoof_score, spoof_type, created_at FROM spoofing_logs WHERE is_synced = 0")
                         for r in c.fetchall():
@@ -361,7 +371,6 @@ class FaceDatabase:
                     # ---------------------------------------------------------
                     # TAHAP 3: PULL SYNC (Turun ke LOKAL secara LIVE)
                     # ---------------------------------------------------------
-                    # 3A. Sync Master Wajah
                     try:
                         res = self.client.table("registered_faces").select("*").execute()
                         if res.data is not None:
@@ -384,7 +393,6 @@ class FaceDatabase:
                                      r.get("yaw_score", "-"), r.get("pitch_score", "-"), r.get("roll_score", "-"), r.get("blink_score", "-"), r.get("created_at", "")))
                     except Exception as e: pass
 
-                    # 3B. Sync Semua Logs (PERUBAHAN `message` -> `spoof_type` di baris terakhir)
                     try: self._pull_logs_from_supabase(c, "register_logs", ["name", "status", "yaw_score", "pitch_score", "roll_score", "blink_score", "light_condition", "created_at"])
                     except Exception as e: pass
                     

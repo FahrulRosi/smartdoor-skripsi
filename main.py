@@ -21,37 +21,24 @@ class UIHelper:
 
     @staticmethod
     def enhance_frame(frame):
-        """
-        SOLUSI NORMALISASI SILANG KONDISI CAHAYA
-        (Bilateral Denoising + Dynamic Gamma + YUV CLAHE)
-        """
         if not getattr(config, 'ENABLE_CLAHE_ENHANCEMENT', True): return frame
         
-        # 1. Hapus bintik-bintik noise kamera (sangat berguna untuk Low Light)
-        # Menghaluskan area datar (pipi) tapi menjaga tepi tajam (mata/hidung)
         denoised = cv2.bilateralFilter(frame, d=5, sigmaColor=50, sigmaSpace=50)
-
-        # 2. Konversi ke YUV untuk manipulasi cahaya (Y)
         img_yuv = cv2.cvtColor(denoised, cv2.COLOR_BGR2YUV)
         y, u, v = cv2.split(img_yuv)
-        
         mean_y = np.mean(y)
         
-        # 3. Dynamic Gamma Correction (Paksa normalisasi sebelum di-CLAHE)
         if mean_y < 85.0:
-            # Jika Low Light, paksa terangkan gambarnya
             gamma = 0.5  
             invGamma = 1.0 / gamma
             table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
             y = cv2.LUT(y, table)
         elif mean_y > 130.0:
-            # Jika Terlalu Terang/Backlight, paksa gelapkan sedikit agar detail tidak hilang
             gamma = 1.2
             invGamma = 1.0 / gamma
             table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
             y = cv2.LUT(y, table)
             
-        # 4. Terapkan CLAHE yang seragam (Kontras Wajah)
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         y_eq = clahe.apply(y)
         
@@ -108,8 +95,6 @@ class SmartDoorApp:
         self.detector = FaceMeshDetector(min_detection_confidence=0.5, min_tracking_confidence=0.5)
         self.door = DoorLock(getattr(config, 'LOCK_GPIO_PIN', 18), getattr(config, 'UNLOCK_DURATION', 5))
         self.pose_estimator = HeadPoseEstimator()
-        
-        # PERBAIKAN: Threshold diturunkan ke 0.42 agar mentoleransi beda tekstur silang kondisi
         self.matcher = FaceMatcher(getattr(config, 'MATCH_THRESHOLD', 0.42)) 
         
         try:
@@ -187,9 +172,14 @@ class SmartDoorApp:
                 print(f"\r\033[K[Memeriksa] INDIKASI PALSU! | Spoofing: {self.spoof_score:.2f}", end="", flush=True)
             elif self.fake_frames == 10: 
                 print()
-                UIHelper.log(f"⚠️ Serangan Spoofing Terdeteksi! (Spoofing: {self.spoof_score:.2f})", "WARNING")
-                if hasattr(self.db, 'log_spoofing_async'): self.db.log_spoofing_async(self.spoof_score, f"Skor AI: {self.spoof_score:.2f}")
-                self._fail(f"FOTO/VIDEO (Spoof: {self.spoof_score:.2f})")
+                # PERBAIKAN: Mengirim label (Foto Kertas/Layar) dari model langsung ke Database
+                detected_type = sp.get("label_name", "Spoofing Tidak Diketahui")
+                UIHelper.log(f"⚠️ Serangan Spoofing Terdeteksi! Tipe: {detected_type} (Skor: {self.spoof_score:.2f})", "WARNING")
+                
+                if hasattr(self.db, 'log_spoofing_async'): 
+                    self.db.log_spoofing_async(self.spoof_score, detected_type)
+                    
+                self._fail(f"{detected_type.upper()} (Spoof: {self.spoof_score:.2f})")
                 self.spoof_score = sp.get("score", 1.0) 
             return
         
@@ -281,7 +271,6 @@ class SmartDoorApp:
         pure_similarity = self.match_score
         UIHelper.log(f"🧪 [DATA UJI PENGAKUAN] Cosine Similarity Murni: {pure_similarity:.4f}", "SYSTEM")
         
-        # Threshold base disesuaikan ke 0.42 untuk kalkulasi persen
         thr = getattr(config, 'MATCH_THRESHOLD', 0.42)
         
         if pure_similarity >= thr:

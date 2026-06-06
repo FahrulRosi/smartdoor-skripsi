@@ -33,12 +33,12 @@ class UIHelper:
         """
         [SOLUSI FINAL] LAB CLAHE Normalization
         Memisahkan cahaya dari warna, lalu meratakan kecerahan wajah secara lokal.
-        Tidak akan merusak vektor identitas MobileFaceNet.
+        Mampu mengatasi backlight & lowlight tanpa merusak vektor identitas.
         """
         x, y, w, h = bbox
         fh, fw = raw_frame.shape[:2]
         
-        # Beri padding sedikit agar seluruh wajah (termasuk dagu/rambut) masuk
+        # Padding agar seluruh area penting wajah masuk
         pad_x, pad_y = int(w * 0.1), int(h * 0.1)
         x1, y1 = max(0, x - pad_x), max(0, y - pad_y)
         x2, y2 = min(fw, x + w + pad_x), min(fh, y + h + pad_y)
@@ -58,7 +58,7 @@ class UIHelper:
         merged = cv2.merge((cl, a, b))
         enhanced_face = cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
         
-        # Masukkan kembali wajah yang sudah diterangkan ke frame utuh
+        # Tempelkan kembali wajah yang sudah diterangkan ke frame utuh
         result_frame = raw_frame.copy()
         result_frame[y1:y2, x1:x2] = enhanced_face
         
@@ -135,7 +135,7 @@ class SmartDoorApp:
     def _reset_state(self):
         self.state, self.last_name, self.match_score, self.auth_start = ValidationState.IDLE, "", 0.0, 0.0
         self.seq, self.step_idx, self.reg_pose, self.pose_hold, self.prev_center = [], 0, [0.0, 0.0, 0.0], 0, None
-        self.wait_center, self.center_hold, self.blink_passed, self.blink_hold, self.ear_hist, self.access_details = False, 0, False, 0, [], []
+        self.wait_center, self.center_hold, self.blink_passed, self.blink_hold, self.ear_hist, self.print_counter, self.access_details = False, 0, False, 0, [], 0, []
 
     def _fail(self, status, color=config.COLOR_RED, instr="", wait=False):
         self._reset_state(); self.fake_frames = 0
@@ -220,9 +220,9 @@ class SmartDoorApp:
             if self.state == ValidationState.IDLE: self.state, self.auth_start = ValidationState.RECOGNIZING, time.time(); return
             fh, fw = raw.shape[:2]
             
+            # ---> EKSTRAKSI MENGGUNAKAN LAB CLAHE NORMALIZATION <---
             ai_frame = UIHelper.create_ai_frame(raw, face.bbox)
             
-            # Safe bounding box cropping
             safe_bbox = [max(0, x), max(0, y), min(fw, x+w)-max(0, x), min(fh, y+h)-max(0, y)]
             if (raw_emb := self.model.get_embedding(self.model.crop_face(ai_frame, safe_bbox))) is None: return
             
@@ -234,7 +234,9 @@ class SmartDoorApp:
                 self.seq = [random.choice([k for k in self.CHALLENGES if k != "BLINK"]), "BLINK"]
                 UIHelper.log(f"Wajah {self.last_name} Dikenali ({l_str}). Memulai Liveness...", "SUCCESS")
             else: 
-                # Cukup perbarui UI jika gagal, kurangi log spam
+                self.print_counter += 1
+                if self.print_counter % 20 == 0: 
+                    UIHelper.log(f"Wajah TIDAK DIKENAL (Spoofing: {self.spoof_score:.2f})", "WARNING")
                 self.ui.update({"status": "TIDAK DIKENAL", "color": config.COLOR_RED, "instr": f"Cahaya: {l_str}"})
 
         elif self.state == ValidationState.CHALLENGE:
@@ -293,6 +295,10 @@ class SmartDoorApp:
         window_name = "Smart Door Lock"
         try:
             cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+            
+            # Memperbesar ukuran Window tanpa memberatkan AI
+            cv2.resizeWindow(window_name, 1024, 768)
+
             while self.running:
                 ret, frame = self.cam.read()
                 if ret:

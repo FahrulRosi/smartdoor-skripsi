@@ -34,7 +34,7 @@ class Helpers:
     def create_ai_frame(raw_frame, bbox):
         """
         [SOLUSI FINAL] LAB CLAHE Normalization
-        100% Identik dengan main.py agar konsistensi vektor terjaga mutlak.
+        Identik 100% dengan main.py agar ekstraksi vektor konsisten mutlak.
         """
         x, y, w, h = bbox
         fh, fw = raw_frame.shape[:2]
@@ -381,6 +381,9 @@ class FaceRegistrationApp:
         threading.Thread(target=self._process_thread, daemon=True).start()
         try:
             cv2.namedWindow("Register", cv2.WINDOW_NORMAL)
+            
+            # Memperbesar ukuran Window tanpa memberatkan AI
+            cv2.resizeWindow("Register", 1024, 768)
 
             while self.is_running and self.stage != RegistrationStage.COMPLETE:
                 with self.frame_lock: 

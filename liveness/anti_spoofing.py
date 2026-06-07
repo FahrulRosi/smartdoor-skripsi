@@ -2,6 +2,7 @@ import os
 import random
 import cv2
 import numpy as np
+import time
 
 # Konfigurasi dan Modul Internal
 import config
@@ -35,15 +36,8 @@ class SilentAntiSpoofing:
             print(f"[AntiSpoofing] Peringatan: Model tidak ditemukan di '{model_path}'")
 
     def _get_new_box(self, src_w, src_h, bbox, scale):
-        """
-        Memperbesar dimensi bounding box wajah untuk memberikan konteks visual
-        ekstra (seperti latar belakang atau tepi objek) kepada model.
-        """
         x, y, box_w, box_h = bbox
-        
-        # Batasi skala agar koordinat tidak melampaui batas tepi frame kamera
         scale = min((src_h - 1) / box_h, min((src_w - 1) / box_w, scale))
-        
         new_width = box_w * scale
         new_height = box_h * scale
         center_x = box_w / 2 + x
@@ -57,50 +51,34 @@ class SilentAntiSpoofing:
         return int(left_top_x), int(left_top_y), int(right_bottom_x), int(right_bottom_y)
 
     def is_real(self, frame, bbox):
-        """
-        Mengevaluasi gambar di dalam bounding box untuk menentukan 
-        status keaslian wajah (Real vs Spoof).
-        """
         if not self._session:
-            # Mengembalikan status asli (bypass) jika model gagal dimuat
-            return {"real": True, "score": 1.0, "label_name": "Asli"}
+            return {"real": True, "score": 1.0, "label_name": "Asli", "latency_ms": 0.0}
 
         src_h, src_w = frame.shape[:2]
-        
-        # 1. Tentukan koordinat pemotongan dengan skala (margin) tambahan
         x1, y1, x2, y2 = self._get_new_box(src_w, src_h, bbox, self.scale)
         face_crop = frame[y1:y2+1, x1:x2+1]
 
         if face_crop.size == 0:
-            return {"real": False, "score": 0.0, "label_name": "Tidak Diketahui"}
+            return {"real": False, "score": 0.0, "label_name": "Tidak Diketahui", "latency_ms": 0.0}
 
-        # 2. Prapemrosesan: Ubah ukuran ke 80x80 sesuai model
         face_resized = cv2.resize(face_crop, (80, 80))
-        
-        # Konversi warna ke RGB
         face_rgb = cv2.cvtColor(face_resized, cv2.COLOR_BGR2RGB)
-        
-        # 3. Format tensor ke CHW (Channels, Height, Width) untuk ONNX
         face_float = face_rgb.astype(np.float32)
         face_chw = np.transpose(face_float, (2, 0, 1))
         img_data = np.expand_dims(face_chw, axis=0)
 
-        # 4. Lakukan proses inferensi pada model
+        t_start = time.time()
         output = self._session.run(None, {self._input_name: img_data})[0]
-        
-        # 5. Hitung fungsi aktivasi Softmax untuk mendapatkan nilai probabilitas (0.0 - 1.0)
+        latency_ms = (time.time() - t_start) * 1000.0
+
         exp_output = np.exp(output - np.max(output, axis=1, keepdims=True))
         softmax_output = exp_output / np.sum(exp_output, axis=1, keepdims=True)
         preds = softmax_output[0]
 
-        # [DEBUG] Tampilkan probabilitas tiap kelas di terminal
-        # print(f"[DEBUG] Anti-Spoofing Output: {preds}")
-
-        # 6. Pemilihan Nilai Skor Berdasarkan Arsitektur Model (Perbaikan FOTO/VIDEO)
         if len(preds) >= 3:
-            score_photo = float(preds[0]) # Probabilitas Foto Cetak
-            score_real  = float(preds[1]) # Probabilitas Asli
-            score_video = float(preds[2]) # Probabilitas Layar/Video
+            score_photo = float(preds[0])
+            score_real  = float(preds[1])
+            score_video = float(preds[2])
         else:
             score_real = float(preds[1]) if len(preds) > 1 else 0.0
             score_photo = 1.0 - score_real
@@ -112,7 +90,6 @@ class SilentAntiSpoofing:
             label_name = "Asli"
             score_display = score_real
         else:
-            # Jika ditolak, bandingkan apakah lebih condong ke Foto atau Video
             if len(preds) >= 3:
                 if score_photo > score_video:
                     label_name = "Spoofing (Foto Cetak)"
@@ -124,27 +101,18 @@ class SilentAntiSpoofing:
                 label_name = "Spoofing (Foto/Video)"
                 score_display = 1.0 - score_real
 
-        return {"real": is_valid, "score": round(score_display, 4), "label_name": label_name}
-
+        return {"real": is_valid, "score": round(score_display, 4), "label_name": label_name, "latency_ms": round(latency_ms, 2)}
 
 class ActiveChallengeManager:
-    """
-    Manajer untuk mendeteksi liveness secara aktif.
-    Meminta pengguna melakukan gerakan acak (menoleh, mengangguk) atau berkedip.
-    """
-    
     def __init__(self):
         self.pose_estimator = HeadPoseEstimator()
         self.blink_detector = None
         self.current_challenge = None
         self.passed = False
-        
-        # Pengguna harus menahan gerakan dengan benar selama sekian frame untuk lolos
         self._step_frame_count = 0
         self._required_frames = 3 
 
     def generate_challenge(self):
-        """Menghasilkan satu instruksi tantangan liveness secara acak."""
         challenges = ["YAW", "PITCH", "ROLL", "BLINK"]
         self.current_challenge = random.choice(challenges)
         self.passed = False
@@ -156,11 +124,9 @@ class ActiveChallengeManager:
         return self.current_challenge
 
     def verify_challenge(self, face, detector):
-        """Memeriksa apakah gerakan/kedipan pengguna sesuai dengan tantangan aktif."""
         if self.passed:
             return True, "Liveness Berhasil!"
 
-        # A. Evaluasi Kedipan
         if self.current_challenge == "BLINK":
             res = self.blink_detector.update(face, detector)
             if res["complete"]:
@@ -168,7 +134,6 @@ class ActiveChallengeManager:
                 return True, "Kedipan Terdeteksi!"
             return False, "CHALLENGE: Silakan Berkedip"
 
-        # B. Evaluasi Pose Kepala
         pose = self.pose_estimator.estimate(face, detector)
         if not pose["valid"]:
             return False, "Arahkan wajah lurus ke kamera"

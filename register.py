@@ -19,13 +19,11 @@ STAGE_NAMES = {RegistrationStage.FACEMESH: "1. FaceMesh (3D)", RegistrationStage
 STEP_TO_STAGE = {"FACEMESH": RegistrationStage.FACEMESH, "YAW": RegistrationStage.YAW, "PITCH": RegistrationStage.PITCH, "ROLL": RegistrationStage.ROLL, "BLINK": RegistrationStage.BLINK, "DONE": RegistrationStage.EXTRACTION}
 
 def _log(msg, level="INFO"): 
-    # Menghapus \r\033[K agar cetakan log murni turun ke bawah (tidak tumpang tindih)
     print(f"[{datetime.now().strftime('%H:%M:%S')}] [{level}] {msg}")
 
 class Helpers:
     @staticmethod
     def enhance_frame(frame):
-        """DIBUAT IDENTIK DENGAN MAIN.PY (Murni CLAHE & Soft Bilateral)"""
         if not getattr(config, 'ENABLE_CLAHE_ENHANCEMENT', True): return frame
         
         denoised = cv2.bilateralFilter(frame, d=3, sigmaColor=30, sigmaSpace=30)
@@ -84,7 +82,6 @@ class FaceRegistrationApp:
         
         self.db = FaceDatabase()
         
-        # Ekstrak NIM untuk pengecekan awal
         check_nim = self.name.split(" - ")[0] if " - " in self.name else self.name
         if self.db.check_user_exists(check_nim): 
             _log(f"❌ '{self.name}' sudah terdaftar!", "ERROR")
@@ -105,7 +102,14 @@ class FaceRegistrationApp:
                 self.matcher.load_faces(faces) if hasattr(self.matcher, 'load_faces') else setattr(self.matcher, 'known_faces', faces)
         except Exception as e: _log(f"Warning: {e}", "WARNING")
         
-        self.liveness.start_register(); _log(f"✅ Inisialisasi: {self.name} dimulai. Silakan tatap layar.", "SYSTEM")
+        self.liveness.start_register()
+        
+        # --- TRACKING WAKTU REGISTRASI ---
+        self.reg_start_time = time.time()
+        self.stage_start_time = time.time()  
+        self.stage_durations = {}            
+        
+        _log(f"✅ Inisialisasi: {self.name} dimulai. Silakan tatap layar.", "SYSTEM")
 
     def _record_data_buffers(self, face, pose):
         if self.stage == RegistrationStage.FACEMESH and self.cap_data["facemesh_vector"] is None and face.landmarks:
@@ -186,12 +190,9 @@ class FaceRegistrationApp:
         mask[y1:y2, x1:x2] = False
         L_bg = np.mean(gray[mask]) if np.any(mask) else L
         
-        if (L_bg - L) > 40 and L_bg > 120: 
-            light_cond = f"Backlight (B:{L_bg:.0f})"
-        elif L_bg < 85 or L < 85: 
-            light_cond = f"Low Light (B:{L_bg:.0f})"
-        else: 
-            light_cond = f"Normal (B:{L_bg:.0f})"
+        if (L_bg - L) > 40 and L_bg > 120: light_cond = f"Backlight (B:{L_bg:.0f})"
+        elif L_bg < 85 or L < 85: light_cond = f"Low Light (B:{L_bg:.0f})"
+        else: light_cond = f"Normal (B:{L_bg:.0f})"
 
         raw_emb = self.model.get_embedding(self.model.crop_face(frame, safe_bbox))
         
@@ -210,47 +211,51 @@ class FaceRegistrationApp:
         self.last_match_score = match.get("score", 0.0)
         
         anti_dup_thr = getattr(config, 'ANTI_DUPLICATE_THRESHOLD', 0.48)
-        
-        # --- PERBAIKAN PEMISAHAN NAMA & NIM UNTUK SAVE_FACE ---
-        nim_user = "0000"
-        nama_user = self.name
-        if " - " in self.name:
-            nim_user, nama_user = self.name.split(" - ", 1)
+        nim_user, nama_user = self.name.split(" - ", 1) if " - " in self.name else ("0000", self.name)
         
         if match.get("name") and self.last_match_score >= anti_dup_thr and os.getenv("ALLOW_DUPLICATE", "false").lower() != "true": 
             msg_sub = f"User: {match['name']} (Sim: {match['score']:.4f}) | Kondisi: {light_cond}"
             Helpers.show_msg(display, "❌ WAJAH SUDAH TERDAFTAR!", msg_sub, config.COLOR_RED)
             _log(f"GAGAL: Terdeteksi duplikat dgn {match['name']} (Sim: {match['score']:.4f}) | Kondisi: {light_cond}", "ERROR")
             
-        elif self.db.save_face(nama_user, nim_user, avg_emb.tolist(), self.cap_data): 
-            msg_sub = f"User: {nama_user} | Vektor Tersimpan | Kondisi: {light_cond}"
-            Helpers.show_msg(display, "✅ REGISTRASI BERHASIL!", msg_sub, config.COLOR_GREEN)
-            _log(f"SUKSES: Data untuk '{nama_user}' ({nim_user}) berhasil disimpan ke database!", "SUCCESS")
-        else: 
-            Helpers.show_msg(display, "❌ GAGAL!", "DB Error", config.COLOR_RED)
+        else:
+            # --- WAKTU DIBULATKAN KE 2 DESIMAL ---
+            total_time = round(time.time() - self.reg_start_time, 2)
+            self.cap_data["reg_latency_sec"] = total_time
+            
+            ext_duration = round(time.time() - self.stage_start_time, 2)
+            self.stage_durations[RegistrationStage.EXTRACTION.name] = ext_duration
+            self.cap_data["stage_durations_exact"] = self.stage_durations 
+            
+            if self.db.save_face(nama_user, nim_user, avg_emb.tolist(), self.cap_data): 
+                msg_sub = f"User: {nama_user} | Vektor Tersimpan | Kondisi: {light_cond}"
+                Helpers.show_msg(display, "✅ REGISTRASI BERHASIL!", msg_sub, config.COLOR_GREEN)
+                _log(f"SUKSES: Data untuk '{nama_user}' ({nim_user}) berhasil disimpan! (Total Waktu: {total_time}s)", "SUCCESS")
+            else: 
+                Helpers.show_msg(display, "❌ GAGAL!", "DB Error", config.COLOR_RED)
             
         with self.frame_lock: self.display_frame = display.copy()
         time.sleep(1.5); self.stage = RegistrationStage.COMPLETE 
 
     def _log_transition(self, old_stage):
-        gs_val = lambda k, t, v: next((s.get(v, 0.0) for s in self.cap_data.get(f"{k}_snapshots", []) if s.get("tag") == t), 0.0)
-        gs_lat = lambda k, t: next((s.get("latency_ms", 0.0) for s in self.cap_data.get(f"{k}_snapshots", []) if s.get("tag") == t), 0.0)
+        # --- PERHITUNGAN WAKTU PER TAHAP DIBULATKAN (2 DESIMAL) ---
+        stage_duration = round(time.time() - self.stage_start_time, 2)
+        self.stage_durations[old_stage.name] = stage_duration
+        self.stage_start_time = time.time() # Reset stopwatch
         
         if old_stage == RegistrationStage.FACEMESH: 
-            _log(f"✅ TAHAP 1: FaceMesh 3D Terekam", "SUCCESS")
+            _log(f"✅ TAHAP 1 (FaceMesh): {stage_duration} detik", "SUCCESS")
         elif old_stage == RegistrationStage.YAW: 
-            _log(f"✅ TAHAP 2a: Yaw Selesai -> L:{gs_val('yaw','yaw_left','yaw'):.1f}° R:{gs_val('yaw','yaw_right','yaw'):.1f}°", "SUCCESS")
+            _log(f"✅ TAHAP 2a (Yaw): {stage_duration} detik", "SUCCESS")
         elif old_stage == RegistrationStage.PITCH: 
-            _log(f"✅ TAHAP 2b: Pitch Selesai -> U:{gs_val('pitch','pitch_up','pitch'):.1f}° D:{gs_val('pitch','pitch_down','pitch'):.1f}°", "SUCCESS")
+            _log(f"✅ TAHAP 2b (Pitch): {stage_duration} detik", "SUCCESS")
         elif old_stage == RegistrationStage.ROLL: 
-            _log(f"✅ TAHAP 2c: Roll Selesai -> L:{gs_val('roll','roll_left','roll'):.1f}° R:{gs_val('roll','roll_right','roll'):.1f}°", "SUCCESS")
+            _log(f"✅ TAHAP 2c (Roll): {stage_duration} detik", "SUCCESS")
         elif old_stage == RegistrationStage.BLINK: 
-            bo, bc = self.cap_data.get('blink_open') or {}, self.cap_data.get('blink_closed') or {}
-            _log(f"✅ TAHAP 3: Blink Selesai -> EAR Buka: {bo.get('avg_ear',0):.2f} | Kedip: {bc.get('avg_ear',0):.2f}", "SUCCESS")
+            _log(f"✅ TAHAP 3 (Blink): {stage_duration} detik", "SUCCESS")
         elif old_stage == RegistrationStage.EXTRACTION:
             _log("📊 RANGKUMAN REGISTRASI KOMPREHENSIF", "SYSTEM")
-            _log(f"   • Kemiripan Tertinggi di DB (Max Tol: {getattr(config, 'MATCH_THRESHOLD', 0.48)}): {self.last_match_score:.2%}", "SUCCESS")
-            _log(f"   • Kondisi Cahaya: {self.cap_data.get('light_condition', 'N/A')}", "SUCCESS")
+            _log(f"   • Waktu Total Registrasi: {self.cap_data.get('reg_latency_sec', 0.0)} detik", "SUCCESS")
 
     def _process_thread(self):
         try:
@@ -295,12 +300,17 @@ class FaceRegistrationApp:
                 ear_val = (Helpers.capture_blink(face) or {}).get("avg_ear", 0.0)
                 
                 chk_spf = self.stage in (RegistrationStage.FACEMESH, RegistrationStage.BLINK, RegistrationStage.EXTRACTION)
+                
                 if chk_spf:
                     sp = self.anti_spoof.is_real(raw, face.bbox)
-                    sp_score, sp_real = sp.get("score", 1.0), sp.get("real", True)
+                    sp_score = float(sp.get("score_real", sp.get("score", 1.0)))
+                    sp_photo = float(sp.get("score_photo", 0.0))
+                    sp_video = float(sp.get("score_video", 0.0))
+                    sp_real = sp.get("real", True)
                     sp_label = sp.get("label_name", "FOTO/VIDEO").upper() 
+                    sp_lat = float(sp.get("latency_ms", 0.0))
                 else:
-                    sp_score, sp_real, sp_label = 1.0, True, "ASLI"
+                    sp_score, sp_real, sp_label, sp_lat = 1.0, True, "ASLI", 0.0
                 
                 bx, by, bw, bh = face.bbox
                 fh_l, fw_l = raw.shape[:2]
@@ -314,18 +324,24 @@ class FaceRegistrationApp:
                 mask_live[y1_l:y2_l, x1_l:x2_l] = False
                 L_bg_live = np.mean(gray_live[mask_live]) if np.any(mask_live) else L_live
 
-                if (L_bg_live - L_live) > 40 and L_bg_live > 120: 
-                    l_str = f"Backlight (B:{L_bg_live:.0f})"
-                elif L_bg_live < 85 or L_live < 85: 
-                    l_str = f"Low Light (B:{L_bg_live:.0f})"
-                else: 
-                    l_str = f"Normal (B:{L_bg_live:.0f})"
+                if (L_bg_live - L_live) > 40 and L_bg_live > 120: l_str = f"Backlight (B:{L_bg_live:.0f})"
+                elif L_bg_live < 85 or L_live < 85: l_str = f"Low Light (B:{L_bg_live:.0f})"
+                else: l_str = f"Normal (B:{L_bg_live:.0f})"
 
                 hud_txt, term_txt = self._generate_metric_text(pose, ear_val, sp_score, l_str)
                 
                 if chk_spf and not sp_real:
                     self.fake_frames += 1
-                    Helpers.draw_hud(display, self.stage, "❌ DETEKSI SPOOFING!", f"Palsu: {sp_score:.2f}", hud_txt, f"{sp_label} (Spoof: {sp_score:.2f})", face.bbox, config.COLOR_RED)
+                    Helpers.draw_hud(display, self.stage, "❌ DETEKSI SPOOFING!", f"Palsu: {sp_score:.2f} | Latensi: {sp_lat}ms", hud_txt, f"{sp_label} (Spoof: {sp_score:.2f})", face.bbox, config.COLOR_RED)
+                    
+                    if self.fake_frames >= 10:
+                        current_time = time.time()
+                        if current_time - getattr(self, 'last_spoof_log_time', 0) > 5.0:
+                            _log(f"❌ SPOOFING TERDETEKSI: {sp_label} (Latensi: {sp_lat}ms)", "ERROR")
+                            if hasattr(self.db, 'log_spoofing_async'):
+                                self.db.log_spoofing_async(sp_score, sp_photo, sp_video, sp_label, sp_lat)
+                            self.last_spoof_log_time = current_time
+
                     with self.frame_lock: self.display_frame = display
                     continue 
                 else: 
@@ -346,7 +362,6 @@ class FaceRegistrationApp:
 
                 self.latency = (time.time() - t_start) * 1000.0
 
-                # --- SPAM PRINT DIHAPUS --- (Log hanya muncul saat stage berganti)
                 if old_stage != self.stage: 
                     self._log_transition(old_stage)
                     
@@ -375,7 +390,7 @@ class FaceRegistrationApp:
             try:
                 if GPIO_AVAILABLE: GPIO.cleanup()
             except RuntimeWarning:
-                pass # Mengabaikan warning channel belum di-setup
+                pass 
 
 if __name__ == "__main__":
     print("\n" + "="*40)

@@ -209,6 +209,10 @@ class SmartDoorApp:
     def _reset_state(self):
         self.state, self.last_name, self.match_score, self.auth_start = ValidationState.IDLE, "", 0.0, 0.0
         self.seq, self.step_idx, self.reg_pose, self.pose_hold, self.prev_center = [], 0, [0.0, 0.0, 0.0], 0, None
+        
+        # --- TRACKING WAKTU PER TAHAPAN LIVENESS (MAINSTREAM) ---
+        self.current_stage_start = 0.0
+        
         self.wait_center, self.center_hold, self.blink_passed, self.blink_hold, self.ear_hist, self.print_counter, self.access_details = False, 0, False, 0, [], 0, []
 
     def _fail(self, status, color=config.COLOR_RED, instr="", wait=False):
@@ -262,6 +266,7 @@ class SmartDoorApp:
         kertas_score = float(sp.get("score_photo", 0.0))
         layar_score = float(sp.get("score_video", 0.0))
         spoof_label = sp.get("label_name", "FOTO/VIDEO").upper()
+        spoof_lat = float(sp.get("latency_ms", 0.0))
         
         self.spoof_score = wajah_score
         
@@ -269,15 +274,15 @@ class SmartDoorApp:
             self.fake_frames += 1 
             self.print_counter += 1
             if self.print_counter % 2 == 0:
-                print(f"\r\033[K[SPOOFING] Memeriksa... | Wajah Asli: {wajah_score:.4f} | Kertas: {kertas_score:.4f} | Layar: {layar_score:.4f} | Tipe: {spoof_label}", end="", flush=True)
+                print(f"\r\033[K[SPOOFING] Memeriksa... | Latensi: {spoof_lat}ms | Wajah Asli: {wajah_score:.4f} | Tipe: {spoof_label}", end="", flush=True)
 
             if self.fake_frames >= 10: 
                 current_time = time.time()
                 if current_time - getattr(self, 'last_spoof_log_time', 0) > 5.0:
                     print("") 
-                    UIHelper.log(f"❌ DETEKSI SPOOFING: (Asli: {wajah_score:.2f} | Kertas: {kertas_score:.2f} | Layar: {layar_score:.2f})", "ERROR")
+                    UIHelper.log(f"❌ DETEKSI SPOOFING: Wajah Palsu! (Latensi: {spoof_lat}ms | Skor: {wajah_score:.2f} | Tipe: {spoof_label})", "ERROR")
                     if hasattr(self.db, 'log_spoofing_async'): 
-                        self.db.log_spoofing_async(wajah_score, kertas_score, layar_score, spoof_label)
+                        self.db.log_spoofing_async(wajah_score, kertas_score, layar_score, spoof_label, spoof_lat)
                     self.last_spoof_log_time = current_time 
                 self._fail(f"{spoof_label} (Skor Asli: {wajah_score:.2f})")
             return
@@ -298,7 +303,12 @@ class SmartDoorApp:
 
         if self.state in (ValidationState.IDLE, ValidationState.RECOGNIZING):
             if self.state == ValidationState.IDLE: 
-                self.state, self.auth_start = ValidationState.RECOGNIZING, time.time()
+                self.state = ValidationState.RECOGNIZING
+                
+                # --- CATAT WAKTU MULAI END-TO-END DAN RECOGNIZING ---
+                self.auth_start = time.time()
+                self.current_stage_start = time.time()
+                
                 print("") 
                 UIHelper.log("🔍 Wajah terdeteksi, memulai identifikasi...", "INFO")
                 return
@@ -316,11 +326,19 @@ class SmartDoorApp:
             dyn_thr = getattr(config, 'MATCH_THRESHOLD', 0.48) if "Normal" in l_str else 0.40 
             
             if best_name and (best_score >= dyn_thr):
+                
+                # --- WAKTU DIBULATKAN (2 DESIMAL) ---
+                recog_duration = round(time.time() - self.current_stage_start, 2)
+                self.access_details.append({"tahap": "RECOGNIZING", "latency_sec": recog_duration})
+                
                 print("") 
-                UIHelper.log(f"✅ Dikenali: '{best_name}' (Skor: {best_score:.2f})", "SUCCESS")
+                UIHelper.log(f"✅ Dikenali: '{best_name}' (Waktu Validasi: {recog_duration} detik)", "SUCCESS")
+                
                 self.last_name, self.match_score, self.state, self.step_idx, self.wait_center, self.center_hold = best_name, best_score, ValidationState.CHALLENGE, 0, True, 0
                 self.seq = [random.choice([k for k in self.CHALLENGES if k != "BLINK"]), "BLINK"]
                 self.active_dyn_thr = dyn_thr
+                
+                self.current_stage_start = time.time()
             else: 
                 self.ui.update({"status": "TIDAK DIKENAL", "color": config.COLOR_RED, "instr": f"Cahaya: {l_str}"})
 
@@ -347,12 +365,24 @@ class SmartDoorApp:
                 print(f"\r\033[K[Tantangan {self.step_idx+1}/{len(self.seq)}] Aktual: {val:.2f}{unit} | Target: {tgt:.2f}{unit}", end="", flush=True)
             
             if passed:
+                
+                # --- WAKTU DIBULATKAN (2 DESIMAL) ---
+                chal_duration = round(time.time() - self.current_stage_start, 2)
+                self.access_details.append({
+                    "tantangan": inst, 
+                    "skor_asli": val, 
+                    "target": tgt, 
+                    "latency_sec": chal_duration
+                })
+                
                 print("") 
-                UIHelper.log(f"✅ Tantangan '{inst}' Berhasil!", "SUCCESS")
-                self.access_details.append({"tantangan": inst, "skor_asli": round(val, 2), "target": round(tgt, 2)})
+                UIHelper.log(f"✅ Tantangan '{inst}' Berhasil! (Waktu: {chal_duration} detik)", "SUCCESS")
+                
                 self.step_idx, self.pose_hold, self.blink_hold, self.blink_passed = self.step_idx + 1, 0, 0, False; self.ear_hist.clear()
+                
                 if self.step_idx < len(self.seq): 
                     self.reg_pose, self.wait_center = [curr.get(k, 0) for k in ("yaw", "pitch", "roll")], False 
+                    self.current_stage_start = time.time()
                 else:
                     self.state = ValidationState.UNLOCKED
                     threading.Thread(target=self.door.unlock, daemon=True).start()
@@ -374,14 +404,18 @@ class SmartDoorApp:
         final_acc = min(100.0, max(0.0, 90.0 + ((self.match_score - getattr(self, 'active_dyn_thr', 0.48)) / (1.0 - getattr(self, 'active_dyn_thr', 0.48))) * 10.0))
         self.ui.update({"status": f"DIBUKA ({final_acc:.2f}%)", "color": config.COLOR_GREEN, "instr": ""})
         
+        # --- TOTAL WAKTU DIBULATKAN (2 DESIMAL) ---
+        total_auth_time = round(time.time() - self.auth_start, 2)
+        
         print("") 
         UIHelper.log(f"🔓 PINTU UNLOCKED: {self.last_name} | Kecerahan: {light_cond}", "SUCCESS")
+        UIHelper.log(f"⏱️ Total Waktu Autentikasi (End-to-End): {total_auth_time} detik", "SUCCESS")
         
         if hasattr(self.db, 'push_access_log_async'): 
             nim_val, name_val = "-", self.last_name
             if "_" in self.last_name: nim_val, name_val = self.last_name.split("_", 1)
             elif " - " in self.last_name: nim_val, name_val = self.last_name.split(" - ", 1)
-            self.db.push_access_log_async(name_val, nim_val, "UNLOCKED", final_acc, light_cond, self.access_details)
+            self.db.push_access_log_async(name_val, nim_val, "UNLOCKED", final_acc, light_cond, self.access_details, total_auth_time)
 
     def run(self):
         window_name = "Smart Door Lock System"
@@ -428,6 +462,17 @@ class RegistrationApp:
         self.is_done = False
         
         self.st = {"instr": "Tatap lurus kamera untuk inisialisasi FaceMesh", "prog": "Progress: 0%", "hud_txt": "", "status": "MENUNGGU WAJAH", "bbox": None, "col": config.COLOR_WHITE}
+        
+        # --- TRACKING WAKTU REGISTRASI ---
+        self.reg_start_time = time.time()
+        self.stage_start_time = time.time()
+        self.stage_durations = {}
+
+    def _record_stage_duration(self, stage_name):
+        dur = round(time.time() - self.stage_start_time, 2)
+        self.stage_durations[stage_name] = dur
+        self.stage_start_time = time.time()
+        return dur
 
     def _process_frame(self):
         ret, frame = self.cam.read()
@@ -456,18 +501,19 @@ class RegistrationApp:
         kertas_score = float(sp.get("score_photo", 0.0))
         layar_score = float(sp.get("score_video", 0.0))
         spoof_label = sp.get("label_name", "FOTO/VIDEO").upper()
+        spoof_lat = float(sp.get("latency_ms", 0.0))
         
         if not sp.get("real", True):
             self.fake_frames += 1
             self.print_counter += 1
             if self.print_counter % 2 == 0:
-                print(f"\r\033[K[SPOOFING] Memeriksa... | Wajah Asli: {wajah_score:.4f} | Kertas: {kertas_score:.4f} | Layar: {layar_score:.4f}", end="", flush=True)
+                print(f"\r\033[K[SPOOFING] Memeriksa... | Latensi: {spoof_lat}ms | Wajah Asli: {wajah_score:.4f}", end="", flush=True)
                 
             if self.fake_frames >= 10:
                 print("")
-                UIHelper.log(f"❌ REGISTRASI DITOLAK: Terdeteksi Spoofing ({spoof_label})!", "ERROR")
+                UIHelper.log(f"❌ REGISTRASI DITOLAK: Terdeteksi Spoofing ({spoof_label})! (Latensi: {spoof_lat}ms)", "ERROR")
                 if hasattr(self.db, 'log_spoofing_async'):
-                    self.db.log_spoofing_async(wajah_score, kertas_score, layar_score, spoof_label)
+                    self.db.log_spoofing_async(wajah_score, kertas_score, layar_score, spoof_label, spoof_lat)
                 self.is_done = True
                 state.MODE = "MAIN"
             self.st.update({"status": "SPOOFING TERDETEKSI", "col": config.COLOR_RED, "instr": "Gunakan Wajah Asli Anda!"})
@@ -494,8 +540,9 @@ class RegistrationApp:
             pose = self.pose_estimator.estimate(face, self.detector)
             if abs(pose.get("yaw", 0)) < 10 and abs(pose.get("pitch", 0)) < 10:
                 if self.liveness.save_facemesh_base(face):
+                    dur = self._record_stage_duration("FACEMESH")
                     print("")
-                    UIHelper.log("✅ Data Base 3D FaceMesh berhasil disimpan.", "SUCCESS")
+                    UIHelper.log(f"✅ Data Base 3D FaceMesh berhasil disimpan. (Waktu: {dur}s)", "SUCCESS")
                     self.stage = RegistrationStage.YAW
             else:
                 self.st["instr"] = "Posisikan wajah tegak lurus menatap kamera"
@@ -513,8 +560,9 @@ class RegistrationApp:
             self.st["hud_txt"] = f"Y: {pose.get('yaw',0):.1f}° | P: {pose.get('pitch',0):.1f}°"
             
             if progress >= 100:
+                dur = self._record_stage_duration(current_axis.upper())
                 print("")
-                UIHelper.log(f"✅ Uji Liveness komponen {current_axis.upper()} Selesai.", "SUCCESS")
+                UIHelper.log(f"✅ Uji Liveness komponen {current_axis.upper()} Selesai. (Waktu: {dur}s)", "SUCCESS")
                 self.stage = RegistrationStage.PITCH if current_axis == "yaw" else (RegistrationStage.ROLL if current_axis == "pitch" else RegistrationStage.BLINK)
                 
         elif self.stage == RegistrationStage.BLINK:
@@ -524,8 +572,9 @@ class RegistrationApp:
             self.liveness.update_blink(ear)
             
             if self.liveness.blink_count >= 3:
+                dur = self._record_stage_duration("BLINK")
                 print("")
-                UIHelper.log("✅ Uji Kedipan Mata Berhasil.", "SUCCESS")
+                UIHelper.log(f"✅ Uji Kedipan Mata Berhasil. (Waktu: {dur}s)", "SUCCESS")
                 self.stage = RegistrationStage.EXTRACTION
 
         if self.stage == RegistrationStage.EXTRACTION:
@@ -535,14 +584,26 @@ class RegistrationApp:
             raw_emb = self.model.get_embedding(cropped)
             
             if raw_emb is not None:
+                dur = self._record_stage_duration("EXTRACTION")
+                total_time = round(time.time() - self.reg_start_time, 2)
+                
                 final_features = self.liveness.compile_registration_data()
                 final_features["embedding"] = [float(val) for val in np.array(raw_emb).flatten()]
-                full_identity_name = f"{self.nim}_{self.nama}"
                 
-                if hasattr(self.db, 'register_face_async'):
-                    self.db.register_face_async(full_identity_name, final_features)
-                    print("")
-                    UIHelper.log(f"🎉 PENDAFTARAN SUKSES: {full_identity_name} disimpan!", "SUCCESS")
+                # --- TAMBAHKAN METRIK LATENSI KE PAYLOAD ---
+                final_features["reg_latency_sec"] = total_time
+                final_features["stage_durations_exact"] = self.stage_durations
+                final_features["light_condition"] = l_str
+                
+                # Gunakan metode save_face agar sejalan dengan standarisasi face_db.py
+                if hasattr(self.db, 'save_face'):
+                    if self.db.save_face(self.nama, self.nim, final_features["embedding"], final_features):
+                        print("")
+                        UIHelper.log(f"🎉 PENDAFTARAN SUKSES: {self.nim}_{self.nama} disimpan! (Total Waktu: {total_time}s)", "SUCCESS")
+                else:
+                    if hasattr(self.db, 'register_face_async'):
+                        self.db.register_face_async(f"{self.nim}_{self.nama}", final_features)
+                        
                 self.stage = RegistrationStage.COMPLETE
             else:
                 self.stage = RegistrationStage.FACEMESH

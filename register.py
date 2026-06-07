@@ -18,7 +18,9 @@ class RegistrationStage(Enum): IDLE=0; FACEMESH=1; YAW=2; PITCH=3; ROLL=4; BLINK
 STAGE_NAMES = {RegistrationStage.FACEMESH: "1. FaceMesh (3D)", RegistrationStage.YAW: "2a. Liveness (Yaw)", RegistrationStage.PITCH: "2b. Liveness (Pitch)", RegistrationStage.ROLL: "2c. Liveness (Roll)", RegistrationStage.BLINK: "3. Liveness (Blink)", RegistrationStage.EXTRACTION: "4. Ekstraksi Fitur"}
 STEP_TO_STAGE = {"FACEMESH": RegistrationStage.FACEMESH, "YAW": RegistrationStage.YAW, "PITCH": RegistrationStage.PITCH, "ROLL": RegistrationStage.ROLL, "BLINK": RegistrationStage.BLINK, "DONE": RegistrationStage.EXTRACTION}
 
-def _log(msg, level="INFO"): print(f"\r\033[K[{datetime.now().strftime('%H:%M:%S')}] [{level}] {msg}")
+def _log(msg, level="INFO"): 
+    # Menghapus \r\033[K agar cetakan log murni turun ke bawah (tidak tumpang tindih)
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] [{level}] {msg}")
 
 class Helpers:
     @staticmethod
@@ -72,7 +74,7 @@ class FaceRegistrationApp:
     POSE_CFG = {RegistrationStage.YAW: ("yaw_snapshots", "yaw_left", "yaw_right", "yaw", getattr(config, 'YAW_THRESHOLD', 25.0)), RegistrationStage.PITCH: ("pitch_snapshots", "pitch_up", "pitch_down", "pitch", getattr(config, 'PITCH_THRESHOLD', 20.0)), RegistrationStage.ROLL: ("roll_snapshots", "roll_left", "roll_right", "roll", getattr(config, 'ROLL_THRESHOLD', 25.0))}
     
     def __init__(self, name):
-        self.name, self.stage, self.in_ext, self.hold_frames, self.print_counter, self.missed_frames = name, RegistrationStage.FACEMESH, False, 0, 0, 0
+        self.name, self.stage, self.in_ext, self.hold_frames, self.missed_frames = name, RegistrationStage.FACEMESH, False, 0, 0
         self.last_match_score, self.fake_frames, self.latency = 0.0, 0, 0.0 
         self.ext_embs = [] 
         
@@ -81,7 +83,10 @@ class FaceRegistrationApp:
         self._pose_buf, self._blink_buf, self._prev_step = {"yaw": {}, "pitch": {}, "roll": {}}, {"closed": None, "open": None}, "FACEMESH"
         
         self.db = FaceDatabase()
-        if self.db.check_user_exists(self.name): 
+        
+        # Ekstrak NIM untuk pengecekan awal
+        check_nim = self.name.split(" - ")[0] if " - " in self.name else self.name
+        if self.db.check_user_exists(check_nim): 
             _log(f"❌ '{self.name}' sudah terdaftar!", "ERROR")
             self.stage = RegistrationStage.COMPLETE
             return
@@ -100,7 +105,7 @@ class FaceRegistrationApp:
                 self.matcher.load_faces(faces) if hasattr(self.matcher, 'load_faces') else setattr(self.matcher, 'known_faces', faces)
         except Exception as e: _log(f"Warning: {e}", "WARNING")
         
-        self.liveness.start_register(); _log(f"✅ Inisialisasi: {self.name}", "SYSTEM")
+        self.liveness.start_register(); _log(f"✅ Inisialisasi: {self.name} dimulai. Silakan tatap layar.", "SYSTEM")
 
     def _record_data_buffers(self, face, pose):
         if self.stage == RegistrationStage.FACEMESH and self.cap_data["facemesh_vector"] is None and face.landmarks:
@@ -181,7 +186,6 @@ class FaceRegistrationApp:
         mask[y1:y2, x1:x2] = False
         L_bg = np.mean(gray[mask]) if np.any(mask) else L
         
-        # --- UBAH HANYA TAMPILKAN B DI SINI ---
         if (L_bg - L) > 40 and L_bg > 120: 
             light_cond = f"Backlight (B:{L_bg:.0f})"
         elif L_bg < 85 or L < 85: 
@@ -207,15 +211,21 @@ class FaceRegistrationApp:
         
         anti_dup_thr = getattr(config, 'ANTI_DUPLICATE_THRESHOLD', 0.48)
         
+        # --- PERBAIKAN PEMISAHAN NAMA & NIM UNTUK SAVE_FACE ---
+        nim_user = "0000"
+        nama_user = self.name
+        if " - " in self.name:
+            nim_user, nama_user = self.name.split(" - ", 1)
+        
         if match.get("name") and self.last_match_score >= anti_dup_thr and os.getenv("ALLOW_DUPLICATE", "false").lower() != "true": 
             msg_sub = f"User: {match['name']} (Sim: {match['score']:.4f}) | Kondisi: {light_cond}"
             Helpers.show_msg(display, "❌ WAJAH SUDAH TERDAFTAR!", msg_sub, config.COLOR_RED)
             _log(f"GAGAL: Terdeteksi duplikat dgn {match['name']} (Sim: {match['score']:.4f}) | Kondisi: {light_cond}", "ERROR")
             
-        elif self.db.save_face(self.name, avg_emb, self.cap_data): 
-            msg_sub = f"User: {self.name} | Vektor Tersimpan | Kondisi: {light_cond}"
+        elif self.db.save_face(nama_user, nim_user, avg_emb.tolist(), self.cap_data): 
+            msg_sub = f"User: {nama_user} | Vektor Tersimpan | Kondisi: {light_cond}"
             Helpers.show_msg(display, "✅ REGISTRASI BERHASIL!", msg_sub, config.COLOR_GREEN)
-            _log(f"SUKSES: {self.name} | Kondisi: {light_cond}", "SUCCESS")
+            _log(f"SUKSES: Data untuk '{nama_user}' ({nim_user}) berhasil disimpan ke database!", "SUCCESS")
         else: 
             Helpers.show_msg(display, "❌ GAGAL!", "DB Error", config.COLOR_RED)
             
@@ -229,17 +239,17 @@ class FaceRegistrationApp:
         if old_stage == RegistrationStage.FACEMESH: 
             _log(f"✅ TAHAP 1: FaceMesh 3D Terekam", "SUCCESS")
         elif old_stage == RegistrationStage.YAW: 
-            _log(f"✅ TAHAP 2a: Yaw Selesai -> L:{gs_val('yaw','yaw_left','yaw'):.1f}° ({gs_lat('yaw','yaw_left'):.1f}ms) R:{gs_val('yaw','yaw_right','yaw'):.1f}° ({gs_lat('yaw','yaw_right'):.1f}ms)", "SUCCESS")
+            _log(f"✅ TAHAP 2a: Yaw Selesai -> L:{gs_val('yaw','yaw_left','yaw'):.1f}° R:{gs_val('yaw','yaw_right','yaw'):.1f}°", "SUCCESS")
         elif old_stage == RegistrationStage.PITCH: 
-            _log(f"✅ TAHAP 2b: Pitch Selesai -> U:{gs_val('pitch','pitch_up','pitch'):.1f}° ({gs_lat('pitch','pitch_up'):.1f}ms) D:{gs_val('pitch','pitch_down','pitch'):.1f}° ({gs_lat('pitch','pitch_down'):.1f}ms)", "SUCCESS")
+            _log(f"✅ TAHAP 2b: Pitch Selesai -> U:{gs_val('pitch','pitch_up','pitch'):.1f}° D:{gs_val('pitch','pitch_down','pitch'):.1f}°", "SUCCESS")
         elif old_stage == RegistrationStage.ROLL: 
-            _log(f"✅ TAHAP 2c: Roll Selesai -> L:{gs_val('roll','roll_left','roll'):.1f}° ({gs_lat('roll','roll_left'):.1f}ms) R:{gs_val('roll','roll_right','roll'):.1f}° ({gs_lat('roll','roll_right'):.1f}ms)", "SUCCESS")
+            _log(f"✅ TAHAP 2c: Roll Selesai -> L:{gs_val('roll','roll_left','roll'):.1f}° R:{gs_val('roll','roll_right','roll'):.1f}°", "SUCCESS")
         elif old_stage == RegistrationStage.BLINK: 
             bo, bc = self.cap_data.get('blink_open') or {}, self.cap_data.get('blink_closed') or {}
-            _log(f"✅ TAHAP 3: Blink Selesai -> EAR Buka: {bo.get('avg_ear',0):.2f} ({bo.get('latency_ms',0):.1f}ms) | Kedip: {bc.get('avg_ear',0):.2f} ({bc.get('latency_ms',0):.1f}ms)", "SUCCESS")
+            _log(f"✅ TAHAP 3: Blink Selesai -> EAR Buka: {bo.get('avg_ear',0):.2f} | Kedip: {bc.get('avg_ear',0):.2f}", "SUCCESS")
         elif old_stage == RegistrationStage.EXTRACTION:
             _log("📊 RANGKUMAN REGISTRASI KOMPREHENSIF", "SYSTEM")
-            _log(f"   • Kemiripan DB (Max Tol: {getattr(config, 'MATCH_THRESHOLD', 0.48)}): {self.last_match_score:.2%}", "SUCCESS")
+            _log(f"   • Kemiripan Tertinggi di DB (Max Tol: {getattr(config, 'MATCH_THRESHOLD', 0.48)}): {self.last_match_score:.2%}", "SUCCESS")
             _log(f"   • Kondisi Cahaya: {self.cap_data.get('light_condition', 'N/A')}", "SUCCESS")
 
     def _process_thread(self):
@@ -304,7 +314,6 @@ class FaceRegistrationApp:
                 mask_live[y1_l:y2_l, x1_l:x2_l] = False
                 L_bg_live = np.mean(gray_live[mask_live]) if np.any(mask_live) else L_live
 
-                # --- UBAH HANYA TAMPILKAN B DI SINI ---
                 if (L_bg_live - L_live) > 40 and L_bg_live > 120: 
                     l_str = f"Backlight (B:{L_bg_live:.0f})"
                 elif L_bg_live < 85 or L_live < 85: 
@@ -337,10 +346,7 @@ class FaceRegistrationApp:
 
                 self.latency = (time.time() - t_start) * 1000.0
 
-                self.print_counter += 1
-                if self.print_counter % 3 == 0 and instr: 
-                    print(f"\r\033[K[{instr}] {term_txt} | Lat: {self.latency:.1f}ms", end="", flush=True)
-                    
+                # --- SPAM PRINT DIHAPUS --- (Log hanya muncul saat stage berganti)
                 if old_stage != self.stage: 
                     self._log_transition(old_stage)
                     
@@ -366,7 +372,10 @@ class FaceRegistrationApp:
             self.cam.stop()
             self.detector.close()
             cv2.destroyAllWindows()
-            if GPIO_AVAILABLE: GPIO.cleanup()
+            try:
+                if GPIO_AVAILABLE: GPIO.cleanup()
+            except RuntimeWarning:
+                pass # Mengabaikan warning channel belum di-setup
 
 if __name__ == "__main__":
     print("\n" + "="*40)

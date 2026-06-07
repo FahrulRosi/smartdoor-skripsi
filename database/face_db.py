@@ -1,6 +1,6 @@
 import os, json, time, threading, traceback, sqlite3, numpy as np
 from datetime import datetime
-from contextlib import closing # Digunakan untuk menutup koneksi database secara otomatis dan aman
+from contextlib import closing 
 import requests
 from supabase import create_client, Client
 import config
@@ -92,7 +92,6 @@ class FaceDatabase:
     def __init__(self, local_db_path="local_faces.db"):
         self.db_path = local_db_path
         
-        # --- FITUR PENGHAPUSAN OTOMATIS FILE JOURNAL ---
         journal_path = self.db_path + "-journal"
         if os.path.exists(journal_path):
             try:
@@ -100,7 +99,6 @@ class FaceDatabase:
                 print(f"[Database] ✅ File sisa '{journal_path}' berhasil dihapus otomatis.")
             except Exception as e:
                 print(f"[Database WARNING] Gagal menghapus '{journal_path}': {e}")
-        # -----------------------------------------------
 
         self.db_lock = threading.Lock()
         self.sync_trigger = threading.Event() 
@@ -119,20 +117,16 @@ class FaceDatabase:
 
         threading.Thread(target=self._https_sync_worker, daemon=True).start()
 
-    # --- PENGHASIL KONEKSI AMAN (ANTI MEMORY LEAK & ANTI JOURNAL) ---
     def _get_connection(self):
-        """Membuat koneksi SQLite dengan konfigurasi memori agar tidak ada file journal tertinggal saat beroperasi"""
         conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=10.0)
         conn.execute("PRAGMA journal_mode = MEMORY;") 
         conn.execute("PRAGMA synchronous = NORMAL;")
         return conn
-    # ----------------------------------------------------------------
 
     def _init_sqlite(self):
         with self.db_lock, closing(self._get_connection()) as conn:
             c = conn.cursor()
             
-            # Update: Menggunakan nim sebagai Primary Key (agar unik per mahasiswa)
             c.execute('''CREATE TABLE IF NOT EXISTS registered_faces (
                 nim TEXT PRIMARY KEY, name TEXT, embedding TEXT, liveness_config TEXT,
                 yaw_score TEXT, pitch_score TEXT, roll_score TEXT, blink_score TEXT,
@@ -148,6 +142,7 @@ class FaceDatabase:
                 headpose_score TEXT, blink_score TEXT, accuracy REAL, light_condition TEXT,
                 created_at TEXT, is_synced INTEGER DEFAULT 0)''')
             
+            # [PERBAIKAN BESAR] Menyesuaikan nama kolom sesuai dengan SQL Supabase Anda
             c.execute('''CREATE TABLE IF NOT EXISTS spoofing_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, spoof_score REAL, spoof_type TEXT,
                 created_at TEXT, is_synced INTEGER DEFAULT 0)''')
@@ -155,7 +150,6 @@ class FaceDatabase:
             c.execute('''CREATE TABLE IF NOT EXISTS sync_deletes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, table_name TEXT, record_id TEXT)''')
 
-            # Update triggers: registered_faces menggunakan 'nim' bukan 'name'
             triggers = [
                 ("registered_faces", "nim"),
                 ("register_logs", "created_at"),
@@ -178,7 +172,6 @@ class FaceDatabase:
             return False
 
     def check_user_exists(self, nim):
-        # Update: Cek keberadaan user berdasarkan NIM
         with self.db_lock, closing(self._get_connection()) as conn:
             c = conn.cursor()
             c.execute("SELECT 1 FROM registered_faces WHERE nim = ?", (nim,))
@@ -222,7 +215,6 @@ class FaceDatabase:
             c = conn.cursor()
             c.execute("SELECT nim, name, embedding, liveness_config, yaw_score, pitch_score, roll_score, blink_score, created_at FROM registered_faces")
             for row in c.fetchall():
-                # Menggunakan identifier f"{nim}_{name}" atau label nim untuk membedakan unik
                 label_id = f"{row[0]}_{row[1]}" 
                 faces[label_id] = {
                     "nim": row[0], "name": row[1], "embedding": json.loads(row[2]), "liveness_config": json.loads(row[3]),
@@ -249,57 +241,82 @@ class FaceDatabase:
                 if not cursor.fetchone():
                     placeholders = ", ".join(["?"] * (len(columns) + 1))
                     cols_str = ", ".join(columns) + ", is_synced"
-                    vals = [r.get(c, ("-" if c != "accuracy" else 0.0)) for c in columns] + [1]
+                    # [PERBAIKAN] Cek numerik untuk akurasi dan spoof_score
+                    vals = [r.get(c, (0.0 if c in ["accuracy", "spoof_score"] else "-")) for c in columns] + [1]
                     cursor.execute(f"INSERT INTO {table_name} ({cols_str}) VALUES ({placeholders})", vals)
 
+    # --- FUNGSI LOGGING BACKGROUND (ANTI-LAG) ---
+
     def log_register_async(self, name, nim, status, message=None, light_cond="N/A", cap_data=None):
-        y = p = r = b = "-"
-        if cap_data:
-            try: 
-                light_cond = cap_data.get("light_condition", light_cond)
-                p_dummy = DataTransformer.prepare_payload(name, nim, [0.0]*128, cap_data)
-                y = p_dummy.get("yaw_score_log", "-")
-                p = p_dummy.get("pitch_score_log", "-")
-                r = p_dummy.get("roll_score_log", "-")
-                b = p_dummy.get("blink_score_log", "-")
-            except Exception: pass
-            
-        created_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        with self.db_lock, closing(self._get_connection()) as conn:
-            conn.execute("""INSERT INTO register_logs 
-                (name, nim, status, yaw_score, pitch_score, roll_score, blink_score, light_condition, created_at, is_synced)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
-                (name, nim, status, y or "-", p or "-", r or "-", b or "-", light_cond, created_at))
-            conn.commit()
-        self.sync_trigger.set() 
+        def _task():
+            y = p = r = b = "-"
+            local_light_cond = light_cond
+            if cap_data:
+                try: 
+                    local_light_cond = cap_data.get("light_condition", light_cond)
+                    p_dummy = DataTransformer.prepare_payload(name, nim, [0.0]*128, cap_data)
+                    y = p_dummy.get("yaw_score_log", "-")
+                    p = p_dummy.get("pitch_score_log", "-")
+                    r = p_dummy.get("roll_score_log", "-")
+                    b = p_dummy.get("blink_score_log", "-")
+                except Exception: pass
+                
+            created_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            try:
+                with self.db_lock, closing(self._get_connection()) as conn:
+                    conn.execute("""INSERT INTO register_logs 
+                        (name, nim, status, yaw_score, pitch_score, roll_score, blink_score, light_condition, created_at, is_synced)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
+                        (name, nim, status, y or "-", p or "-", r or "-", b or "-", local_light_cond, created_at))
+                    conn.commit()
+                self.sync_trigger.set() 
+            except Exception as e:
+                print(f"[DB Error] log_register_async: {e}")
+                
+        threading.Thread(target=_task, daemon=True).start()
 
     def push_access_log_async(self, user_name, nim, status, accuracy, light_cond="N/A", access_details=None):
-        headpose_str, blink_str = "-", "-"
-        if access_details:
-            headpose_str, blink_str = "", ""
-            for d in access_details:
-                info = f"{d.get('tantangan', '')}: {float(d.get('skor_asli', 0)):.2f} (Tgt: {float(d.get('target', 0)):.2f}, Lat: {float(d.get('latensi_ms', 0)):.0f}ms)"
-                tl = str(d.get("tantangan", "")).lower()
-                if any(x in tl for x in ["toleh", "dongak", "tunduk", "miring"]): headpose_str += info + " | "
-                elif "kedip" in tl or "mata" in tl: blink_str += info + " | "
+        def _task():
+            headpose_str, blink_str = "-", "-"
+            if access_details:
+                headpose_str, blink_str = "", ""
+                for d in access_details:
+                    info = f"{d.get('tantangan', '')}: {float(d.get('skor_asli', 0)):.2f} (Tgt: {float(d.get('target', 0)):.2f}, Lat: {float(d.get('latensi_ms', 0)):.0f}ms)"
+                    tl = str(d.get("tantangan", "")).lower()
+                    if any(x in tl for x in ["toleh", "dongak", "tunduk", "miring"]): headpose_str += info + " | "
+                    elif "kedip" in tl or "mata" in tl: blink_str += info + " | "
 
-        created_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        with self.db_lock, closing(self._get_connection()) as conn:
-            conn.execute("""INSERT INTO access_logs 
-                (name, nim, status, headpose_score, blink_score, accuracy, light_condition, created_at, is_synced)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)""",
-                (user_name, nim, status, headpose_str.strip(" | ") or "-", blink_str.strip(" | ") or "-", float(accuracy), light_cond, created_at))
-            conn.commit()
-        self.sync_trigger.set() 
+            created_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            try:
+                with self.db_lock, closing(self._get_connection()) as conn:
+                    conn.execute("""INSERT INTO access_logs 
+                        (name, nim, status, headpose_score, blink_score, accuracy, light_condition, created_at, is_synced)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)""",
+                        (user_name, nim, status, headpose_str.strip(" | ") or "-", blink_str.strip(" | ") or "-", float(accuracy), light_cond, created_at))
+                    conn.commit()
+                self.sync_trigger.set() 
+            except Exception as e:
+                print(f"[DB Error] push_access_log_async: {e}")
+                
+        threading.Thread(target=_task, daemon=True).start()
 
-   # Pastikan definisinya persis seperti ini
-    def log_spoofing_async(self, w_score, k_score, l_score, terdeteksi):
-        created_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        with self.db_lock, sqlite3.connect(self.db_path) as conn:
-            conn.execute("INSERT INTO spoofing_logs (wajah_score, kertas_score, layar_score, terdeteksi, created_at, is_synced) VALUES (?, ?, ?, ?, ?, 0)", 
-                         (float(w_score), float(k_score), float(l_score), terdeteksi, created_at))
-            conn.commit()
-        self.sync_trigger.set()
+    def log_spoofing_async(self, score_real, score_photo, score_video, spoof_label):
+        """
+        [PERBAIKAN JENIUS] Tetap menerima 4 argumen dari main.py/register.py agar tidak error,
+        tetapi program otomatis mengekstrak `score_real` dan `spoof_label` agar sesuai dengan SQL Supabase Anda.
+        """
+        def _task():
+            created_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            try:
+                with self.db_lock, closing(self._get_connection()) as conn:
+                    conn.execute("INSERT INTO spoofing_logs (spoof_score, spoof_type, created_at, is_synced) VALUES (?, ?, ?, 0)", 
+                                 (float(score_real), str(spoof_label), created_at))
+                    conn.commit()
+                self.sync_trigger.set()
+            except Exception as e:
+                print(f"[DB Error] log_spoofing_async: {e}")
+                
+        threading.Thread(target=_task, daemon=True).start()
 
     # ==============================================================================
     # 3. BACKGROUND WORKER: LIVE 2-WAY SYNC YANG TAHAN ERROR (ANTI CRASH)
@@ -317,15 +334,11 @@ class FaceDatabase:
                 with self.db_lock, closing(self._get_connection()) as conn:
                     c = conn.cursor()
                     
-                    # ---------------------------------------------------------
-                    # TAHAP 1: PUSH DELETION
-                    # ---------------------------------------------------------
                     try:
                         c.execute("SELECT id, table_name, record_id FROM sync_deletes")
                         for row in c.fetchall():
                             del_id, tbl, rec_id = row
                             try:
-                                # Menghapus di Supabase dengan parameter identifier yang sesuai
                                 if tbl == 'registered_faces': self.client.table(tbl).delete().eq('nim', rec_id).execute()
                                 else: self.client.table(tbl).delete().eq('created_at', rec_id).execute()
                                 
@@ -335,9 +348,6 @@ class FaceDatabase:
                     
                     synced_count = 0
                     
-                    # ---------------------------------------------------------
-                    # TAHAP 2: PUSH INSERT (Upload ke SUPABASE)
-                    # ---------------------------------------------------------
                     try:
                         c.execute("SELECT nim, name, embedding, liveness_config, yaw_score, pitch_score, roll_score, blink_score, created_at FROM registered_faces WHERE is_synced = 0")
                         for r in c.fetchall():
@@ -365,10 +375,15 @@ class FaceDatabase:
                             synced_count += 1
                     except Exception as e: pass
                         
+                    # [PERBAIKAN] Push payload spoofing_logs disesuaikan dengan 2 field: spoof_score dan spoof_type
                     try:
                         c.execute("SELECT id, spoof_score, spoof_type, created_at FROM spoofing_logs WHERE is_synced = 0")
                         for r in c.fetchall():
-                            payload = {"spoof_score": float(r[1] or 0.0), "spoof_type": r[2] or "-", "created_at": r[3]}
+                            payload = {
+                                "spoof_score": float(r[1] or 0.0), 
+                                "spoof_type": str(r[2] or "-"), 
+                                "created_at": r[3]
+                            }
                             self.client.table("spoofing_logs").insert(payload).execute()
                             c.execute("UPDATE spoofing_logs SET is_synced = 1 WHERE id = ?", (r[0],))
                             synced_count += 1
@@ -376,9 +391,6 @@ class FaceDatabase:
                     
                     if synced_count > 0: print(f"\n[Background Sync] ☁️ Berhasil UPLOAD {synced_count} baris data ke Supabase!")
 
-                    # ---------------------------------------------------------
-                    # TAHAP 3: PULL SYNC (Turun ke LOKAL secara LIVE)
-                    # ---------------------------------------------------------
                     try:
                         res = self.client.table("registered_faces").select("*").execute()
                         if res.data is not None:
@@ -407,6 +419,7 @@ class FaceDatabase:
                     try: self._pull_logs_from_supabase(c, "access_logs", ["name", "nim", "status", "headpose_score", "blink_score", "accuracy", "light_condition", "created_at"])
                     except Exception as e: pass
                     
+                    # [PERBAIKAN] Pull data dari Supabase menggunakan 2 field saja
                     try: self._pull_logs_from_supabase(c, "spoofing_logs", ["spoof_score", "spoof_type", "created_at"])
                     except Exception as e: print(f"[Sync Error] Gagal pull spoofing_logs: {e}")
                         

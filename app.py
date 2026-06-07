@@ -32,35 +32,46 @@ STAGE_NAMES = {
     RegistrationStage.YAW: "2a. Liveness (Yaw)", 
     RegistrationStage.PITCH: "2b. Liveness (Pitch)", 
     RegistrationStage.ROLL: "2c. Liveness (Roll)", 
-    RegistrationStage.BLINK: "3. Liveness (Blink)", 
-    RegistrationStage.EXTRACTION: "4. Ekstraksi Fitur"
+    RegistrationStage.BLINK: "2d. Liveness (Blink)"
 }
-STEP_TO_STAGE = {"FACEMESH": RegistrationStage.FACEMESH, "YAW": RegistrationStage.YAW, "PITCH": RegistrationStage.PITCH, "ROLL": RegistrationStage.ROLL, "BLINK": RegistrationStage.BLINK, "DONE": RegistrationStage.EXTRACTION}
+
+class SystemState:
+    def __init__(self):
+        self.MODE = "MAIN" 
+        self.REG_NAMA = ""
+        self.REG_NIM = ""
+        self.CURRENT_FRAME = None
+
+state = SystemState()
 
 # ==============================================================================
-# 2. GLOBAL STATE API (Untuk Web Admin)
+# 2. FLASK API SERVICE
 # ==============================================================================
-class SystemState:
-    MODE = "MAIN"         
-    REG_NAMA = ""         
-    REG_NIM = ""          
-    CURRENT_FRAME = None  
-    
-state = SystemState()
 app_api = Flask(__name__)
 CORS(app_api)
 
-@app_api.route('/api/trigger_register', methods=['POST'])
-def trigger_register():
-    data = request.json
-    nama, nim = data.get('nama', '').strip(), data.get('nim', '').strip()
-    if nama and nim:
-        state.REG_NAMA, state.REG_NIM = nama, nim
-        state.MODE = "REGISTER"
-        return jsonify({"status": "success", "message": f"Raspi beralih ke mode registrasi untuk {nama}."})
-    return jsonify({"status": "error", "message": "Nama dan NIM tidak boleh kosong!"}), 400
+@app_api.route('/api/status', methods=['GET'])
+def get_status():
+    return jsonify({"mode": state.MODE, "status": "running"})
 
-# --- alias baru untuk VPS ---
+@app_api.route('/api/register', methods=['POST'])
+def start_registration():
+    data = request.json or {}
+    nama = data.get("nama", "").strip()
+    nim = data.get("nim", "").strip()
+    
+    if not nama or not nim:
+        return jsonify({"success": False, "message": "Nama dan NIM wajib diisi"}), 400
+        
+    state.REG_NAMA = nama
+    state.REG_NIM = nim
+    state.MODE = "REGISTER"
+    
+    print("")
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] [SYSTEM] Menerima Perintah Registrasi Web -> {nim} - {nama}")
+    return jsonify({"success": True, "message": f"Memulai registrasi untuk {nama}"})
+
+# --- alias route registrasi vps ---
 @app_api.route('/register', methods=['POST'])
 def register_alias():
     data = request.get_json(silent=True) or {}
@@ -68,40 +79,27 @@ def register_alias():
     nim = (data.get('nim') or '').strip()
 
     if not nama or not nim:
-        return jsonify({
-            "status": "error",
-            "message": "Nama dan NIM wajib diisi."
-        }), 400
+        return jsonify({"status": "error", "message": "Nama dan NIM wajib diisi."}), 400
 
     state.REG_NAMA = nama
     state.REG_NIM = nim
     state.MODE = "REGISTER"
+    return jsonify({"status": "success", "message": f"Mode register diaktifkan untuk {nama}.", "mode": state.MODE})
 
-    return jsonify({
-        "status": "success",
-        "message": f"Mode register diaktifkan untuk {nama}.",
-        "mode": state.MODE
-    })
-
-@app_api.route('/api/status', methods=['GET'])
-def get_status():
-    return jsonify({"mode": state.MODE, "nama": state.REG_NAMA, "nim": state.REG_NIM})
-
-def generate_video_stream():
+def generate_video_feed():
     while True:
         if state.CURRENT_FRAME is not None:
-            # Kecilkan ukuran stream ke web admin agar CPU Raspi tidak hang
-            small_stream = cv2.resize(state.CURRENT_FRAME, (640, 360))
-            ret, buffer = cv2.imencode('.jpg', small_stream, [cv2.IMWRITE_JPEG_QUALITY, 50])
-            if ret: yield (b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
-        time.sleep(0.15) 
+            ret, jpeg = cv2.imencode('.jpg', state.CURRENT_FRAME)
+            if ret:
+                yield (b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n\r\n')
+        time.sleep(0.04)
 
 @app_api.route('/api/video_feed')
 def video_feed():
-    return Response(generate_video_stream(), mimetype='multipart/x-mixed-replace; boundary=frame')
+    return Response(generate_video_feed(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
 # ==============================================================================
-# 3. UI HELPERS 
+# 3. UI HELPERS & ENHANCEMENT
 # ==============================================================================
 class UIHelper:
     @staticmethod
@@ -109,11 +107,7 @@ class UIHelper:
 
     @staticmethod
     def enhance_frame(frame):
-        if not getattr(config, 'ENABLE_CLAHE_ENHANCEMENT', False): 
-            # Solusi ringan untuk menerangkan gambar (convertScaleAbs)
-            return cv2.convertScaleAbs(frame, alpha=1.1, beta=25)
-        
-        # Jika CLAHE diaktifkan (berat)
+        if not getattr(config, 'ENABLE_CLAHE_ENHANCEMENT', True): return frame
         denoised = cv2.bilateralFilter(frame, d=3, sigmaColor=30, sigmaSpace=30)
         img_yuv = cv2.cvtColor(denoised, cv2.COLOR_BGR2YUV)
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
@@ -146,51 +140,31 @@ class UIHelper:
                 cv2.putText(d, stat, (fx+8, y-12), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255,255,255), 2)
         cv2.putText(d, f"PINTU: {'TERKUNCI' if locked else 'TERBUKA'}", (10, fh-30), cv2.FONT_HERSHEY_SIMPLEX, 0.75, config.COLOR_RED if locked else config.COLOR_GREEN, 2)
 
-class Helpers:
     @staticmethod
-    def capture_blink(face):
-        if not getattr(face, 'landmarks', None) or len(face.landmarks) < 400: return None
-        p = np.array([[face.landmarks[i].x, face.landmarks[i].y] for i in [33,160,158,133,153,144,362,385,387,263,373,380]])
-        la = (np.linalg.norm(p[1]-p[5])+np.linalg.norm(p[2]-p[4]))/(2.0*np.linalg.norm(p[0]-p[3])+1e-6)
-        ra = (np.linalg.norm(p[7]-p[11])+np.linalg.norm(p[8]-p[10]))/(2.0*np.linalg.norm(p[6]-p[9])+1e-6)
-        return {"left_ear": la, "right_ear": ra, "avg_ear": (la+ra)/2.0}
-
-    @staticmethod
-    def draw_hud(f, stg, instr, prog, score_txt, status, bbox, col):
-        fw, fh = f.shape[1], f.shape[0]
-        if bbox:
-            bx, by, bw, bh = bbox
-            bx = fw - bx - bw
-            cv2.rectangle(f, (bx, by), (bx+bw, by+bh), col, 3)
-            cv2.rectangle(f, (bx, by-35), (bx+200, by-5), col, -1)
-            cv2.putText(f, status, (bx+5, by-12), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255,255,255), 2)
+    def draw_reg_ui(d, stage, inst, prog, hud, stat, bbox, col):
+        fw, fh = d.shape[1], d.shape[0]
+        cv2.putText(d, f"MODE: REGISTRASI MAHASISWA", (15, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, config.COLOR_MAGENTA, 2)
+        cv2.putText(d, f"TAHAP: {stage}", (15, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.65, config.COLOR_YELLOW, 2)
         
-        cv2.rectangle(f, (0, 50), (fw, 185), (20,20,20), -1)
-        cv2.rectangle(f, (0, 50), (fw, 185), config.COLOR_CYAN, 2)
-        
-        for txt, yp, c, sz, t in [(STAGE_NAMES.get(stg, "Proses..."), 75, config.COLOR_GREEN, 0.85, 2), (instr, 105, config.COLOR_YELLOW, 0.65, 2), (prog, 130, config.COLOR_CYAN, 0.6, 1), (score_txt, 160, config.COLOR_WHITE, 0.55, 1)]:
-            if txt: cv2.putText(f, txt, (20, yp), cv2.FONT_HERSHEY_SIMPLEX, sz, c, t)
+        if inst:
+            w, h = cv2.getTextSize(inst, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0]
+            cv2.rectangle(d, (10, 90), (w+40, h+110), (0,0,0), -1)
+            cv2.putText(d, inst, (20, h+100), cv2.FONT_HERSHEY_SIMPLEX, 0.7, config.COLOR_GREEN, 2)
             
-        bx_bar, by_bar, bw_bar, bh_bar, sv = (fw-350)//2, 15, 350, 25, min(stg.value, 6)
-        cv2.rectangle(f, (bx_bar, by_bar), (bx_bar+bw_bar, by_bar+bh_bar), (30,30,30), -1)
-        if sv > 0: cv2.rectangle(f, (bx_bar, by_bar), (bx_bar + int(bw_bar*(sv-1)/6), by_bar+bh_bar), config.COLOR_GREEN, -1)
-        cv2.rectangle(f, (bx_bar, by_bar), (bx_bar+bw_bar, by_bar+bh_bar), config.COLOR_WHITE, 2)
-        cv2.putText(f, f"Tahap {sv if sv<=5 else 6}/6", (bx_bar+130, by_bar+18), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,255,255), 1)
-
-    @staticmethod
-    def show_msg(f, t_title, t_sub, col):
-        fw, fh = f.shape[1], f.shape[0]
-        cv2.rectangle(f, (0, 0), (fw, fh), (15, 15, 15), -1)
-        cv2.rectangle(f, (15, 15), (fw - 15, fh - 15), col, 8)
-        cv2.putText(f, t_title, (40, fh // 2 - 50), cv2.FONT_HERSHEY_SIMPLEX, 1.2, col, 3)
-        y_offset = fh // 2 + 10
-        for line in t_sub.split(" | "):
-            cv2.putText(f, line, (45, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (240, 240, 240), 2)
-            y_offset += 35
-
+        if prog: cv2.putText(d, prog, (15, fh-65), cv2.FONT_HERSHEY_SIMPLEX, 0.65, config.COLOR_WHITE, 2)
+        if hud: cv2.putText(d, hud, (15, fh-35), cv2.FONT_HERSHEY_SIMPLEX, 0.6, config.COLOR_CYAN, 2)
+        
+        if bbox:
+            x, y, w, h = bbox
+            fx = fw - x - w
+            cv2.rectangle(d, (fx, y), (fx+w, y+h), col, 3)
+            if stat:
+                tw = cv2.getTextSize(stat, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)[0][0]
+                cv2.rectangle(d, (fx, y-35), (fx+tw+15, y-5), col, -1)
+                cv2.putText(d, stat, (fx+8, y-12), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255,255,255), 2)
 
 # ==============================================================================
-# 4. APLIKASI SMART DOOR MAIN
+# 4. MAIN VALIDATION PROCESS (SMART DOOR LOCK)
 # ==============================================================================
 class SmartDoorApp:
     CHALLENGES = {"BLINK": "Kedipkan Mata", "KANAN": "Toleh KANAN", "KIRI": "Toleh KIRI", "ATAS": "Dongak ATAS", "BAWAH": "Tunduk BAWAH"}
@@ -205,7 +179,7 @@ class SmartDoorApp:
             try:
                 GPIO.setmode(GPIO.BCM); GPIO.setup(self.btn_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP) 
                 GPIO.add_event_detect(self.btn_pin, GPIO.FALLING, callback=self._manual_unlock, bouncetime=500)
-            except Exception as e: pass
+            except Exception: pass
         
         self._reset_state(); self.fake_frames = 0
         self._init_heavy_models()
@@ -229,7 +203,8 @@ class SmartDoorApp:
         if hasattr(self, 'door') and self.door and getattr(self.door, 'locked', True):
             self.ui.update({"status": "DIBUKA MANUAL", "color": config.COLOR_GREEN, "instr": ""})
             threading.Thread(target=self.door.unlock, daemon=True).start()
-            if hasattr(self.db, 'push_access_log_async'): self.db.push_access_log_async("Manual", "UNLOCKED", 100.0)
+            if hasattr(self.db, 'push_access_log_async'): 
+                self.db.push_access_log_async("Manual", "Admin", "UNLOCKED", 100.0)
 
     def _reset_state(self):
         self.state, self.last_name, self.match_score, self.auth_start = ValidationState.IDLE, "", 0.0, 0.0
@@ -259,7 +234,7 @@ class SmartDoorApp:
         return self.pose_hold >= 6, val, tgt
 
     def _ai_worker(self):
-        while self.running:
+        while self.running and state.MODE == "MAIN":
             with self.lock: frame = self.shared_frame.copy() if self.shared_frame is not None else None
             if frame is None: time.sleep(0.01); continue
             t0, raw = time.time(), frame.copy()
@@ -276,20 +251,35 @@ class SmartDoorApp:
 
     def _process_face(self, raw, enhanced, face):
         x, y, w, h = face.bbox; cx, cy = x + w//2, y + h//2
-        if self.state.value > 1 and self.prev_center and np.hypot(cx-self.prev_center[0], cy-self.prev_center[1]) > max(w, h)*0.40: return self._fail("WAJAH BERGANTI", instr="Mulai Ulang")
+        if self.state.value > 1 and self.prev_center and np.hypot(cx-self.prev_center[0], cy-self.prev_center[1]) > max(w, h)*0.40: 
+            return self._fail("WAJAH BERGANTI", instr="Mulai Ulang")
         self.prev_center = (cx, cy) 
-        if h > int(config.FRAME_HEIGHT * 0.50): return self._fail("TERLALU DEKAT", config.COLOR_YELLOW, "Mundur sedikit")
+        if h > int(config.FRAME_HEIGHT * 0.50): 
+            return self._fail("TERLALU DEKAT", config.COLOR_YELLOW, "Mundur sedikit")
         
         sp = self.anti_spoof.is_real(raw, face.bbox)
-        self.spoof_score = sp.get("score_real", 1.0)
-        spoof_label = sp.get("label_name", "FOTO/VIDEO") 
+        wajah_score = float(sp.get("score_real", sp.get("score", 0.0)))
+        kertas_score = float(sp.get("score_photo", 0.0))
+        layar_score = float(sp.get("score_video", 0.0))
+        spoof_label = sp.get("label_name", "FOTO/VIDEO").upper()
+        
+        self.spoof_score = wajah_score
         
         if not sp.get("real", True):
             self.fake_frames += 1 
-            if self.fake_frames == 10: 
-                if hasattr(self.db, 'log_spoofing_async'): 
-                    self.db.log_spoofing_async(sp.get("score_real", 0.0), sp.get("score_photo", 0.0), sp.get("score_video", 0.0), spoof_label)
-                self._fail(f"{spoof_label} (Skor: {self.spoof_score:.2f})")
+            self.print_counter += 1
+            if self.print_counter % 2 == 0:
+                print(f"\r\033[K[SPOOFING] Memeriksa... | Wajah Asli: {wajah_score:.4f} | Kertas: {kertas_score:.4f} | Layar: {layar_score:.4f} | Tipe: {spoof_label}", end="", flush=True)
+
+            if self.fake_frames >= 10: 
+                current_time = time.time()
+                if current_time - getattr(self, 'last_spoof_log_time', 0) > 5.0:
+                    print("") 
+                    UIHelper.log(f"❌ DETEKSI SPOOFING: (Asli: {wajah_score:.2f} | Kertas: {kertas_score:.2f} | Layar: {layar_score:.2f})", "ERROR")
+                    if hasattr(self.db, 'log_spoofing_async'): 
+                        self.db.log_spoofing_async(wajah_score, kertas_score, layar_score, spoof_label)
+                    self.last_spoof_log_time = current_time 
+                self._fail(f"{spoof_label} (Skor Asli: {wajah_score:.2f})")
             return
         
         self.fake_frames = 0
@@ -307,7 +297,16 @@ class SmartDoorApp:
         else: l_str = f"Normal (B:{L_bg_live:.0f})"
 
         if self.state in (ValidationState.IDLE, ValidationState.RECOGNIZING):
-            if self.state == ValidationState.IDLE: self.state, self.auth_start = ValidationState.RECOGNIZING, time.time(); return
+            if self.state == ValidationState.IDLE: 
+                self.state, self.auth_start = ValidationState.RECOGNIZING, time.time()
+                print("") 
+                UIHelper.log("🔍 Wajah terdeteksi, memulai identifikasi...", "INFO")
+                return
+            
+            self.print_counter += 1
+            if self.print_counter % 2 == 0:
+                print(f"\r\033[K[IDENTIFIKASI] Sedang mencocokkan... | Lat: {getattr(self, 'latency', 0.0):.1f}ms", end="", flush=True)
+
             fh, fw = enhanced.shape[:2]
             if (raw_emb := self.model.get_embedding(self.model.crop_face(enhanced, [max(0, x), max(0, y), min(fw, x+w)-max(0, x), min(fh, y+h)-max(0, y)]))) is None: return
             emb = np.array(raw_emb, dtype=np.float32).flatten()
@@ -317,6 +316,8 @@ class SmartDoorApp:
             dyn_thr = getattr(config, 'MATCH_THRESHOLD', 0.48) if "Normal" in l_str else 0.40 
             
             if best_name and (best_score >= dyn_thr):
+                print("") 
+                UIHelper.log(f"✅ Dikenali: '{best_name}' (Skor: {best_score:.2f})", "SUCCESS")
                 self.last_name, self.match_score, self.state, self.step_idx, self.wait_center, self.center_hold = best_name, best_score, ValidationState.CHALLENGE, 0, True, 0
                 self.seq = [random.choice([k for k in self.CHALLENGES if k != "BLINK"]), "BLINK"]
                 self.active_dyn_thr = dyn_thr
@@ -328,17 +329,30 @@ class SmartDoorApp:
             if self.wait_center:
                 if abs(curr.get("yaw", 0)) < 15 and abs(curr.get("pitch", 0)) < 15 and abs(curr.get("roll", 0)) < 12:
                     self.wait_center, self.center_hold, self.reg_pose = False, 0, [curr.get(k, 0) for k in ("yaw", "pitch", "roll")]
+                    print("") 
+                    UIHelper.log("✅ Posisi lurus terkonfirmasi. Memulai tantangan liveness...", "SUCCESS")
                 else: 
+                    self.print_counter += 1
+                    if self.print_counter % 2 == 0:
+                        print(f"\r\033[K[PERSIAPAN] Tatap lurus kamera... | Y:{curr.get('yaw',0):.1f}° P:{curr.get('pitch',0):.1f}°", end="", flush=True)
                     return self.ui.update({"status": f"{self.last_name}", "color": config.COLOR_CYAN, "instr": "Tatap lurus kamera..."})
                 
             act, inst = self.seq[self.step_idx], self.CHALLENGES[self.seq[self.step_idx]]
             self.ui.update({"status": f"{self.last_name} ({l_str})", "color": config.COLOR_CYAN, "instr": f"Tahap {self.step_idx+1}/{len(self.seq)}: {inst}"})
             passed, val, tgt = self._check_action(act, face)
             
+            self.print_counter += 1
+            if self.print_counter % 2 == 0:
+                unit = "" if act == "BLINK" else "°"
+                print(f"\r\033[K[Tantangan {self.step_idx+1}/{len(self.seq)}] Aktual: {val:.2f}{unit} | Target: {tgt:.2f}{unit}", end="", flush=True)
+            
             if passed:
-                self.access_details.append({"tantangan": inst, "skor_asli": round(val, 2), "target": round(tgt, 2), "latensi_ms": round(getattr(self, 'latency', 0), 1)})
+                print("") 
+                UIHelper.log(f"✅ Tantangan '{inst}' Berhasil!", "SUCCESS")
+                self.access_details.append({"tantangan": inst, "skor_asli": round(val, 2), "target": round(tgt, 2)})
                 self.step_idx, self.pose_hold, self.blink_hold, self.blink_passed = self.step_idx + 1, 0, 0, False; self.ear_hist.clear()
-                if self.step_idx < len(self.seq): self.reg_pose, self.wait_center = [curr.get(k, 0) for k in ("yaw", "pitch", "roll")], False 
+                if self.step_idx < len(self.seq): 
+                    self.reg_pose, self.wait_center = [curr.get(k, 0) for k in ("yaw", "pitch", "roll")], False 
                 else:
                     self.state = ValidationState.UNLOCKED
                     threading.Thread(target=self.door.unlock, daemon=True).start()
@@ -348,12 +362,9 @@ class SmartDoorApp:
         gray = cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY)
         fh, fw = gray.shape
         x1, y1, x2, y2 = max(0, bbox[0]), max(0, bbox[1]), min(fw, bbox[0]+bbox[2]), min(fh, bbox[1]+bbox[3])
-        
         face_roi = gray[y1:y2, x1:x2]
         L_face = np.mean(face_roi) if face_roi.size > 0 else 100.0
-        
-        mask = np.ones((fh, fw), dtype=bool)
-        mask[y1:y2, x1:x2] = False
+        mask = np.ones((fh, fw), dtype=bool); mask[y1:y2, x1:x2] = False
         L_bg = np.mean(gray[mask]) if np.any(mask) else L_face
 
         if (L_bg - L_face) > 40 and L_bg > 120: light_cond = f"Backlight (B:{L_bg:.0f})"
@@ -362,255 +373,202 @@ class SmartDoorApp:
 
         final_acc = min(100.0, max(0.0, 90.0 + ((self.match_score - getattr(self, 'active_dyn_thr', 0.48)) / (1.0 - getattr(self, 'active_dyn_thr', 0.48))) * 10.0))
         self.ui.update({"status": f"DIBUKA ({final_acc:.2f}%)", "color": config.COLOR_GREEN, "instr": ""})
-        if hasattr(self.db, 'push_access_log_async'): self.db.push_access_log_async(self.last_name, "UNLOCKED", final_acc, light_cond, self.access_details)
+        
+        print("") 
+        UIHelper.log(f"🔓 PINTU UNLOCKED: {self.last_name} | Kecerahan: {light_cond}", "SUCCESS")
+        
+        if hasattr(self.db, 'push_access_log_async'): 
+            nim_val, name_val = "-", self.last_name
+            if "_" in self.last_name: nim_val, name_val = self.last_name.split("_", 1)
+            elif " - " in self.last_name: nim_val, name_val = self.last_name.split(" - ", 1)
+            self.db.push_access_log_async(name_val, nim_val, "UNLOCKED", final_acc, light_cond, self.access_details)
 
     def run(self):
-        window_name = "Sistem Edge"
-        
-        # --- KEMBALI KE WINDOW AUTOSIZE SESUAI CONFIG ---
-        cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
-        
+        window_name = "Smart Door Lock System"
         try:
-            while self.running:
-                if state.MODE == "REGISTER": break 
-
+            cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
+            while self.running and state.MODE == "MAIN":
                 ret, frame = self.cam.read()
                 if ret:
                     with self.lock: self.shared_frame = frame.copy()
                     display = cv2.flip(frame, 1)
                     is_door_locked = getattr(self.door, 'locked', True) if hasattr(self, 'door') and self.door else True
                     UIHelper.draw_ui(display, self.ui, is_door_locked)
-                    
-                    state.CURRENT_FRAME = display.copy() 
+                    state.CURRENT_FRAME = display.copy()
                     cv2.imshow(window_name, display)
                 if cv2.waitKey(10) & 0xFF in [ord("q"), ord("Q")]: self.running = False; break
         finally: 
-            self.running = False; time.sleep(0.5)
             if hasattr(self, 'cam') and self.cam: self.cam.stop()
+            if hasattr(self, 'door') and self.door: self.door.cleanup()
+            cv2.destroyAllWindows()
 
 # ==============================================================================
-# 5. APLIKASI REGISTRASI WAJAH (Optimized Async)
+# 5. REGISTRATION PROCESS (DATABASE ENROLLMENT - SINKRON REGISTER.PY)
 # ==============================================================================
-class FaceRegistrationApp:
-    POSE_CFG = {RegistrationStage.YAW: ("yaw_snapshots", "yaw_left", "yaw_right", "yaw", getattr(config, 'YAW_THRESHOLD', 25.0)), RegistrationStage.PITCH: ("pitch_snapshots", "pitch_up", "pitch_down", "pitch", getattr(config, 'PITCH_THRESHOLD', 20.0)), RegistrationStage.ROLL: ("roll_snapshots", "roll_left", "roll_right", "roll", getattr(config, 'ROLL_THRESHOLD', 25.0))}
-    
-    def __init__(self, name):
-        self.name, self.stage, self.in_ext, self.hold_frames, self.print_counter, self.missed_frames = name, RegistrationStage.FACEMESH, False, 0, 0, 0
-        self.last_match_score, self.fake_frames, self.latency = 0.0, 0, 0.0 
-        self.ext_embs = [] 
+class RegistrationApp:
+    def __init__(self, parent_db, parent_model, parent_detector, parent_stream):
+        self.db = parent_db
+        self.model = parent_model
+        self.detector = parent_detector
+        self.cam = parent_stream
+        self.nim = state.REG_NIM
+        self.nama = state.REG_NAMA
         
-        self.is_running, self.lock, self.shared_frame = True, threading.Lock(), None
-        self.ui_state = {"face_obj": None, "bbox": None, "hud_txt": "", "term_txt": "", "instr": "", "prog": "", "status": "Mencari...", "col": config.COLOR_CYAN}
+        UIHelper.log(f"Memulai Pendaftaran Pengguna Baru: {self.nim} - {self.nama}", "REGISTER")
         
-        self.cap_data = {"facemesh_vector": None, "yaw_snapshots": [], "pitch_snapshots": [], "roll_snapshots": [], "blink_closed": None, "blink_open": None, "headpose_vector": None}
-        self._pose_buf, self._blink_buf, self._prev_step = {"yaw": {}, "pitch": {}, "roll": {}}, {"closed": None, "open": None}, "FACEMESH"
+        spoof_thr = getattr(config, 'ANTI_SPOOFING_THRESHOLD', 0.70)
+        self.anti_spoof = SilentAntiSpoofing(getattr(config, 'ANTI_SPOOFING_MODEL', "liveness/antispoofing.onnx"), spoof_thr)
+        self.liveness = LivenessManager()
+        self.pose_estimator = HeadPoseEstimator()
         
-        self.db = FaceDatabase()
-        if self.db.check_user_exists(self.name): 
-            self.ui_state["overlay_msg"] = ("❌ SUDAH TERDAFTAR!", f"User: {self.name}", config.COLOR_RED)
-            self.stage = RegistrationStage.COMPLETE; return
-
-        self.cam = CameraStream(config.CAMERA_INDEX, config.FRAME_WIDTH, config.FRAME_HEIGHT).start()
-        self.detector = FaceMeshDetector(min_detection_confidence=0.5, min_tracking_confidence=0.5)
-        self.liveness, self.model = LivenessManager(), MobileFaceNet()
-        self.anti_spoof = SilentAntiSpoofing(getattr(config, 'ANTI_SPOOFING_MODEL', "liveness/antispoofing.onnx"), getattr(config, 'ANTI_SPOOFING_THRESHOLD', 0.70))
-        self.matcher = FaceMatcher(0.35) 
+        self.stage = RegistrationStage.FACEMESH
+        self.collected_embeddings = []
+        self.fake_frames = 0
+        self.print_counter = 0
+        self.is_done = False
         
-        try:
-            raw = self.db.load_all_faces()
-            if raw: self.matcher.load_faces({k: np.array(v.get('embedding'), dtype=np.float32) for k, v in raw.items() if v.get('embedding') is not None}) if hasattr(self.matcher, 'load_faces') else setattr(self.matcher, 'known_faces', raw)
-        except Exception: pass
-        self.liveness.start_register()
+        self.st = {"instr": "Tatap lurus kamera untuk inisialisasi FaceMesh", "prog": "Progress: 0%", "hud_txt": "", "status": "MENUNGGU WAJAH", "bbox": None, "col": config.COLOR_WHITE}
 
-    def _record_data_buffers(self, face, pose):
-        if self.stage == RegistrationStage.FACEMESH and self.cap_data["facemesh_vector"] is None and face.landmarks:
-            self.hold_frames += 1
-            if self.hold_frames >= 5: self.cap_data["facemesh_vector"], self.hold_frames = np.array([[l.x, l.y, l.z] for l in face.landmarks], dtype=np.float32).flatten(), 0
-        if self.stage in self.POSE_CFG:
-            _, t_neg, t_pos, axis, thr = self.POSE_CFG[self.stage]
-            val = pose.get(axis, 0.0)
-            buf = self._pose_buf[axis]
-            if val < -(thr*0.7) or val > (thr*0.7):
-                self.hold_frames += 1
-                tag = t_neg if val < -(thr*0.7) else t_pos
-                if self.hold_frames >= 6 and (tag not in buf or abs(val) > abs(buf[tag][axis])): 
-                    buf[tag] = {k: float(pose.get(k, 0.0)) for k in ("yaw", "pitch", "roll")}
-                    buf[tag]["tag"], buf[tag]["latency_ms"] = tag, self.latency 
-            else: self.hold_frames = 0
-        if self.stage == RegistrationStage.BLINK:
-            bv = Helpers.capture_blink(face)
-            if bv:
-                bv["latency_ms"] = self.latency 
-                if not self._blink_buf["closed"] or bv["avg_ear"] < self._blink_buf["closed"]["avg_ear"]: self._blink_buf["closed"] = bv
-                if not self._blink_buf["open"] or bv["avg_ear"] > self._blink_buf["open"]["avg_ear"]: self._blink_buf["open"] = bv
-
-    def _generate_metric_text(self, pose, ear_val, sp_score, light_cond):
-        y, p, r = pose.get('yaw', 0.0), pose.get('pitch', 0.0), pose.get('roll', 0.0)
-        hud_txt = {RegistrationStage.FACEMESH: f"Lurus | Y:{y:.1f}° P:{p:.1f}° R:{r:.1f}° | {light_cond}", RegistrationStage.YAW: f"Yaw: {y:.1f}° | Tgt: > ±{getattr(config, 'YAW_THRESHOLD', 25):.0f}° | {light_cond}", RegistrationStage.PITCH: f"Pitch: {p:.1f}° | Tgt: > ±{getattr(config, 'PITCH_THRESHOLD', 20):.0f}° | {light_cond}", RegistrationStage.ROLL: f"Roll: {r:.1f}° | Tgt: > ±{getattr(config, 'ROLL_THRESHOLD', 25):.0f}° | {light_cond}", RegistrationStage.BLINK: f"EAR: {ear_val:.2f} | Deteksi Mata | {light_cond}"}.get(self.stage, f"Tahan Lurus | Y:{y:.1f}° P:{p:.1f}° R:{r:.1f}° | {light_cond}")
-        return hud_txt, f"{hud_txt} | Spf: {sp_score:.2f}"
-
-    def _commit_stage_data(self, cur_step):
-        if cur_step in ("WAIT", self._prev_step): return
-        if self._prev_step in {"YAW", "PITCH", "ROLL"}:
-            axis = {"YAW": "yaw", "PITCH": "pitch", "ROLL": "roll"}[self._prev_step]
-            if len(self._pose_buf[axis]) < 2: self.liveness._register_step -= 1; return 
-            self.cap_data[self.POSE_CFG[STEP_TO_STAGE[self._prev_step]][0]], self._pose_buf[axis] = list(self._pose_buf[axis].values()), {}  
-        if cur_step == "DONE" and self._prev_step == "BLINK":
-            bc, bo = self._blink_buf["closed"], self._blink_buf["open"]
-            if not bc or not bo or (bo["avg_ear"] < 0.22) or (bc["avg_ear"] > 0.20) or (bo["avg_ear"] - bc["avg_ear"] < 0.04): 
-                self.liveness._register_step, self.liveness._blink_state, self.liveness._hold_frames, self.liveness._blink_count, self._blink_buf = 7, 0, 0, 0, {"closed": None, "open": None}; return
-            self.cap_data.update({"blink_closed": bc, "blink_open": bo})
-        self._prev_step, self.stage = cur_step, STEP_TO_STAGE.get(cur_step, self.stage)
-
-    def _process_extraction(self, raw_frame, frame, face, pose, score_txt, sp_score):
-        missing = [k for k, v in [("FaceMesh", self.cap_data["facemesh_vector"] is not None), ("Yaw", len(self.cap_data["yaw_snapshots"])>1), ("Pitch", len(self.cap_data["pitch_snapshots"])>1), ("Roll", len(self.cap_data["roll_snapshots"])>1), ("Blink", self.cap_data["blink_closed"] is not None)] if not v]
-        if missing: 
-            self.ui_state["overlay_msg"] = ("❌ GAGAL!", f"Kurang: {','.join(missing)}", config.COLOR_RED)
-            time.sleep(3); self.stage = RegistrationStage.COMPLETE; return
-
-        bx, by, bw, bh = face.bbox
-        fh, fw = frame.shape[:2]
-        x1, y1 = max(0, bx), max(0, by)
-        x2, y2 = min(fw, bx + bw), min(fh, by + bh)
-
-        gray = cv2.cvtColor(raw_frame, cv2.COLOR_BGR2GRAY)
-        face_roi = gray[y1:y2, x1:x2]
-        L = np.mean(face_roi) if face_roi.size > 0 else 100.0
-        mask = np.ones((fh, fw), dtype=bool); mask[y1:y2, x1:x2] = False
-        L_bg = np.mean(gray[mask]) if np.any(mask) else L
+    def _process_frame(self):
+        ret, frame = self.cam.read()
+        if not ret: return None
         
-        if (L_bg - L) > 40 and L_bg > 120: light_cond = f"Backlight (B:{L_bg:.0f})"
-        elif L_bg < 85 or L < 85: light_cond = f"Low Light (B:{L_bg:.0f})"
-        else: light_cond = f"Normal (B:{L_bg:.0f})"
-
-        raw_emb = self.model.get_embedding(self.model.crop_face(frame, [x1, y1, x2-x1, y2-y1]))
-        if raw_emb is not None:
-            emb_flat = np.array(raw_emb, dtype=np.float32).flatten()
-            self.ext_embs.append(emb_flat / (np.linalg.norm(emb_flat) + 1e-6))
+        raw = frame.copy()
+        enhanced = UIHelper.enhance_frame(raw)
+        faces = self.detector.detect(enhanced)
+        display = cv2.flip(frame, 1)
         
-        self.in_ext = True
-        avg_emb = np.mean(self.ext_embs, axis=0)
-        avg_emb = avg_emb / (np.linalg.norm(avg_emb) + 1e-6) 
-        
-        self.cap_data.update({"headpose_vector": [float(pose["yaw"]), float(pose["pitch"]), float(pose["roll"])], "registration_accuracy": 100.0, "light_condition": light_cond})
-        match = self.matcher.match(avg_emb)
-        self.last_match_score = match.get("score", 0.0)
-        
-        anti_dup_thr = getattr(config, 'ANTI_DUPLICATE_THRESHOLD', 0.48)
-        if match.get("name") and self.last_match_score >= anti_dup_thr and os.getenv("ALLOW_DUPLICATE", "false").lower() != "true": 
-            self.ui_state["overlay_msg"] = ("❌ WAJAH SUDAH TERDAFTAR!", f"User: {match['name']} (Sim: {match['score']:.4f})", config.COLOR_RED)
-        elif self.db.save_face(self.name, avg_emb.tolist(), self.cap_data): 
-            self.ui_state["overlay_msg"] = ("✅ REGISTRASI BERHASIL!", f"User: {self.name} | Disimpan", config.COLOR_GREEN)
-        else: 
-            self.ui_state["overlay_msg"] = ("❌ GAGAL!", "Database Error", config.COLOR_RED)
+        if not faces:
+            self.st.update({"status": "WAJAH TIDAK TERDETEKSI", "col": config.COLOR_WHITE, "bbox": None})
+            UIHelper.draw_reg_ui(display, STAGE_NAMES.get(self.stage, "Inisialisasi"), self.st["instr"], self.st["prog"], self.st["hud_txt"], self.st["status"], self.st["bbox"], self.st["col"])
+            return display
             
-        time.sleep(2.0); self.stage = RegistrationStage.COMPLETE 
+        face = max(faces, key=lambda f: f.bbox[2] * f.bbox[3])
+        self.st["bbox"] = face.bbox
+        x, y, w, h = face.bbox
+        if h > int(config.FRAME_HEIGHT * 0.50):
+            self.st.update({"status": "TERLALU DEKAT", "col": config.COLOR_YELLOW, "instr": "Mundur sedikit"})
+            UIHelper.draw_reg_ui(display, STAGE_NAMES.get(self.stage, "Inisialisasi"), self.st["instr"], self.st["prog"], self.st["hud_txt"], self.st["status"], self.st["bbox"], self.st["col"])
+            return display
 
-    def _process_thread(self):
-        try:
-            while self.is_running and self.stage != RegistrationStage.COMPLETE:
-                t_start = time.time()
-                with self.lock: raw = self.shared_frame.copy() if self.shared_frame is not None else None
-                if raw is None: time.sleep(0.01); continue
-                
-                enhanced = UIHelper.enhance_frame(raw)
-                faces = self.detector.detect(enhanced)
-                
-                if not faces: 
-                    self.missed_frames += 1
-                    if self.missed_frames >= 5: 
-                        self.ui_state.update({"face_obj": None, "bbox": None, "instr": "Hadapkan wajah", "status": "NO FACE", "col": config.COLOR_RED})
-                    continue
-                
-                self.missed_frames = 0
-                face = faces[0]
-                self.ui_state["face_obj"] = face 
-                
-                pose = self.liveness.pose_estimator.estimate(face, self.detector)
-                ear_val = (Helpers.capture_blink(face) or {}).get("avg_ear", 0.0)
-                
-                sp_score, sp_real, sp_label = 1.0, True, "ASLI"
-                if self.stage in (RegistrationStage.FACEMESH, RegistrationStage.BLINK, RegistrationStage.EXTRACTION):
-                    sp = self.anti_spoof.is_real(raw, face.bbox)
-                    sp_score, sp_real, sp_label = sp.get("score_real", 1.0), sp.get("real", True), sp.get("label_name", "LAYAR").upper() 
-                
-                fh_l, fw_l = raw.shape[:2]
-                bx, by, bw, bh = face.bbox
-                x1_l, y1_l, x2_l, y2_l = max(0, bx), max(0, by), min(fw_l, bx+bw), min(fh_l, by+bh)
-                gray_live = cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY)
-                face_roi_live = gray_live[y1_l:y2_l, x1_l:x2_l]
-                L_live = np.mean(face_roi_live) if face_roi_live.size > 0 else 100.0
-                mask_live = np.ones((fh_l, fw_l), dtype=bool); mask_live[y1_l:y2_l, x1_l:x2_l] = False
-                L_bg_live = np.mean(gray_live[mask_live]) if np.any(mask_live) else L_live
-
-                if (L_bg_live - L_live) > 40 and L_bg_live > 120: l_str = f"Backlight (B:{L_bg_live:.0f})"
-                elif L_bg_live < 85 or L_live < 85: l_str = f"Low Light (B:{L_bg_live:.0f})"
-                else: l_str = f"Normal (B:{L_bg_live:.0f})"
-                
-                hud_txt, term_txt = self._generate_metric_text(pose, ear_val, sp_score, l_str)
-                
-                if not sp_real:
-                    self.fake_frames += 1
-                    if hasattr(self.db, 'log_spoofing_async') and self.fake_frames == 10:
-                        self.db.log_spoofing_async(sp.get("score_real", 0.0), sp.get("score_photo", 0.0), sp.get("score_video", 0.0), sp_label)
-                    self.ui_state.update({"bbox": face.bbox, "instr": "❌ DETEKSI SPOOFING!", "prog": f"Palsu: {sp_score:.2f}", "hud_txt": hud_txt, "status": f"{sp_label} (Spoof: {sp_score:.2f})", "col": config.COLOR_RED})
-                    continue 
-                else: self.fake_frames = 0
-
-                if self.stage != RegistrationStage.EXTRACTION and not self.in_ext:
-                    self._record_data_buffers(face, pose) 
-                    res = self.liveness.update_register(face, self.detector)
-                    self._commit_stage_data(res["step"])
-                    self.ui_state.update({"bbox": face.bbox, "instr": res.get("instruction", ""), "prog": res.get("progress",""), "hud_txt": hud_txt, "status": "VALIDATING", "col": config.COLOR_GREEN if res["step"] == "DONE" else config.COLOR_CYAN})
-                elif not self.in_ext: 
-                    self._process_extraction(raw, enhanced, face, pose, hud_txt, sp_score)
-
-                self.latency = (time.time() - t_start) * 1000.0
-        finally: 
-            self.is_running = False
-
-    def run(self):
-        if self.stage == RegistrationStage.COMPLETE: return
-        threading.Thread(target=self._process_thread, daemon=True).start()
+        sp = self.anti_spoof.is_real(raw, face.bbox)
+        wajah_score = float(sp.get("score_real", sp.get("score", 0.0)))
+        kertas_score = float(sp.get("score_photo", 0.0))
+        layar_score = float(sp.get("score_video", 0.0))
+        spoof_label = sp.get("label_name", "FOTO/VIDEO").upper()
         
-        window_name = "Sistem Edge"
-        
-        # --- KEMBALI KE WINDOW AUTOSIZE SESUAI CONFIG ---
+        if not sp.get("real", True):
+            self.fake_frames += 1
+            self.print_counter += 1
+            if self.print_counter % 2 == 0:
+                print(f"\r\033[K[SPOOFING] Memeriksa... | Wajah Asli: {wajah_score:.4f} | Kertas: {kertas_score:.4f} | Layar: {layar_score:.4f}", end="", flush=True)
+                
+            if self.fake_frames >= 10:
+                print("")
+                UIHelper.log(f"❌ REGISTRASI DITOLAK: Terdeteksi Spoofing ({spoof_label})!", "ERROR")
+                if hasattr(self.db, 'log_spoofing_async'):
+                    self.db.log_spoofing_async(wajah_score, kertas_score, layar_score, spoof_label)
+                self.is_done = True
+                state.MODE = "MAIN"
+            self.st.update({"status": "SPOOFING TERDETEKSI", "col": config.COLOR_RED, "instr": "Gunakan Wajah Asli Anda!"})
+            UIHelper.draw_reg_ui(display, STAGE_NAMES.get(self.stage, "Inisialisasi"), self.st["instr"], self.st["prog"], self.st["hud_txt"], self.st["status"], self.st["bbox"], self.st["col"])
+            return display
+            
+        self.fake_frames = 0
+
+        gray_live = cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY)
+        fh_l, fw_l = gray_live.shape
+        x1_l, y1_l, x2_l, y2_l = max(0, x), max(0, y), min(fw_l, x+w), min(fh_l, y+h)
+        face_roi_live = gray_live[y1_l:y2_l, x1_l:x2_l]
+        L_live = np.mean(face_roi_live) if face_roi_live.size > 0 else 100.0
+        mask_live = np.ones((fh_l, fw_l), dtype=bool); mask_live[y1_l:y2_l, x1_l:x2_l] = False
+        L_bg_live = np.mean(gray_live[mask_live]) if np.any(mask_live) else L_live
+
+        if (L_bg_live - L_live) > 40 and L_bg_live > 120: l_str = f"Backlight (B:{L_bg_live:.0f})"
+        elif L_bg_live < 85 or L_live < 85: l_str = f"Low Light (B:{L_bg_live:.0f})"
+        else: l_str = f"Normal (B:{L_bg_live:.0f})"
+
+        # --- MACHINE STATE REGISTRASI ---
+        if self.stage == RegistrationStage.FACEMESH:
+            self.st.update({"status": f"ANALISA MESH ({l_str})", "col": config.COLOR_CYAN, "instr": "Tatap lurus & diam sebentar..."})
+            pose = self.pose_estimator.estimate(face, self.detector)
+            if abs(pose.get("yaw", 0)) < 10 and abs(pose.get("pitch", 0)) < 10:
+                if self.liveness.save_facemesh_base(face):
+                    print("")
+                    UIHelper.log("✅ Data Base 3D FaceMesh berhasil disimpan.", "SUCCESS")
+                    self.stage = RegistrationStage.YAW
+            else:
+                self.st["instr"] = "Posisikan wajah tegak lurus menatap kamera"
+                
+        elif self.stage in (RegistrationStage.YAW, RegistrationStage.PITCH, RegistrationStage.ROLL):
+            current_axis = "yaw" if self.stage == RegistrationStage.YAW else ("pitch" if self.stage == RegistrationStage.PITCH else "roll")
+            target_direction = "KANAN / KIRI" if current_axis == "yaw" else ("ATAS / BAWAH" if current_axis == "pitch" else "MIRING KANAN / KIRI")
+            
+            self.st.update({"status": f"UJI GERAKAN ({l_str})", "col": config.COLOR_CYAN, "instr": f"Gerakkan kepala ({target_direction})"})
+            pose = self.pose_estimator.estimate(face, self.detector)
+            self.liveness.update_vectors(pose)
+            
+            progress = self.liveness.get_progress(current_axis)
+            self.st["prog"] = f"Progress {current_axis.upper()}: {progress}%"
+            self.st["hud_txt"] = f"Y: {pose.get('yaw',0):.1f}° | P: {pose.get('pitch',0):.1f}°"
+            
+            if progress >= 100:
+                print("")
+                UIHelper.log(f"✅ Uji Liveness komponen {current_axis.upper()} Selesai.", "SUCCESS")
+                self.stage = RegistrationStage.PITCH if current_axis == "yaw" else (RegistrationStage.ROLL if current_axis == "pitch" else RegistrationStage.BLINK)
+                
+        elif self.stage == RegistrationStage.BLINK:
+            self.st.update({"status": f"UJI KEDIPAN ({l_str})", "col": config.COLOR_CYAN, "instr": "Silakan kedipkan mata Anda beberapa kali", "prog": f"Jumlah Kedipan: {self.liveness.blink_count}/3"})
+            ear = UIHelper.get_ear(face)
+            self.st["hud_txt"] = f"EAR Aktual: {ear:.3f}"
+            self.liveness.update_blink(ear)
+            
+            if self.liveness.blink_count >= 3:
+                print("")
+                UIHelper.log("✅ Uji Kedipan Mata Berhasil.", "SUCCESS")
+                self.stage = RegistrationStage.EXTRACTION
+
+        if self.stage == RegistrationStage.EXTRACTION:
+            self.st.update({"status": "EKSTRAKSI DATA", "col": config.COLOR_MAGENTA, "instr": "Sedang membuat model enkripsi wajah...", "prog": "", "hud_txt": ""})
+            fh, fw = enhanced.shape[:2]
+            cropped = self.model.crop_face(enhanced, [max(0, x), max(0, y), min(fw, x+w)-max(0, x), min(fh, y+h)-max(0, y)])
+            raw_emb = self.model.get_embedding(cropped)
+            
+            if raw_emb is not None:
+                final_features = self.liveness.compile_registration_data()
+                final_features["embedding"] = [float(val) for val in np.array(raw_emb).flatten()]
+                full_identity_name = f"{self.nim}_{self.nama}"
+                
+                if hasattr(self.db, 'register_face_async'):
+                    self.db.register_face_async(full_identity_name, final_features)
+                    print("")
+                    UIHelper.log(f"🎉 PENDAFTARAN SUKSES: {full_identity_name} disimpan!", "SUCCESS")
+                self.stage = RegistrationStage.COMPLETE
+            else:
+                self.stage = RegistrationStage.FACEMESH
+
+        if self.stage == RegistrationStage.COMPLETE:
+            self.is_done = True
+            state.MODE = "MAIN"
+
+        UIHelper.draw_reg_ui(display, STAGE_NAMES.get(self.stage, "Lengkap"), self.st["instr"], self.st["prog"], self.st["hud_txt"], self.st["status"], self.st["bbox"], self.st["col"])
+        return display
+
+    def run_loop(self):
+        window_name = "Registrasi Wajah Mahasiswa"
         cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
-        
-        try:
-            while self.is_running and self.stage != RegistrationStage.COMPLETE:
-                ret, frame = self.cam.read()
-                if ret:
-                    with self.lock: self.shared_frame = frame.copy()
-                    
-                    display = frame.copy()
-                    
-                    st = self.ui_state
-                    if st.get("face_obj"):
-                        try: display = self.detector.draw(display, st["face_obj"])
-                        except: pass
-                    
-                    display = cv2.flip(display, 1)
-                    
-                    if "overlay_msg" in st:
-                        Helpers.show_msg(display, *st["overlay_msg"])
-                    else:
-                        Helpers.draw_hud(display, self.stage, st.get("instr",""), st.get("prog",""), st.get("hud_txt",""), st.get("status",""), st.get("bbox"), st.get("col", config.COLOR_CYAN))
-                    
-                    state.CURRENT_FRAME = display.copy() 
-                    cv2.imshow(window_name, display)
-                    
-                if cv2.waitKey(1) & 0xFF == ord("q"): self.is_running = False; break
-        finally: 
-            self.is_running = False; time.sleep(0.5)
-            self.cam.stop(); self.detector.close()
-            state.MODE = "MAIN" 
-            state.REG_NAMA = ""
-            state.REG_NIM = ""
+        while not self.is_done and state.MODE == "REGISTER":
+            display = self._process_frame()
+            if display is not None:
+                state.CURRENT_FRAME = display.copy()
+                cv2.imshow(window_name, display)
+            if cv2.waitKey(1) & 0xFF in [ord("q"), ord("Q")]: 
+                state.MODE = "MAIN"
+                break
+        cv2.destroyWindow(window_name)
 
 # ==============================================================================
-# 6. MAIN EXECUTION
+# 6. SERVER RUNNER & SCHEDULER
 # ==============================================================================
 def start_flask():
     import logging; log = logging.getLogger('werkzeug'); log.setLevel(logging.ERROR)
@@ -624,9 +582,10 @@ if __name__ == "__main__":
                 app = SmartDoorApp()
                 app.run() 
             elif state.MODE == "REGISTER":
-                full_identity = f"{state.REG_NIM} - {state.REG_NAMA}"
-                app = FaceRegistrationApp(full_identity)
-                app.run() 
-            cv2.destroyAllWindows()
+                temp_main = SmartDoorApp()
+                temp_main.running = False # Stop ai_worker agar resource kamera beralih bersih
+                reg_app = RegistrationApp(temp_main.db, temp_main.model, temp_main.detector, temp_main.cam)
+                reg_app.run_loop()
+            time.sleep(0.1)
     except KeyboardInterrupt:
         if GPIO_AVAILABLE: GPIO.cleanup()

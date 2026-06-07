@@ -56,9 +56,32 @@ def trigger_register():
     nama, nim = data.get('nama', '').strip(), data.get('nim', '').strip()
     if nama and nim:
         state.REG_NAMA, state.REG_NIM = nama, nim
-        state.MODE = "REGISTER"  
+        state.MODE = "REGISTER"
         return jsonify({"status": "success", "message": f"Raspi beralih ke mode registrasi untuk {nama}."})
     return jsonify({"status": "error", "message": "Nama dan NIM tidak boleh kosong!"}), 400
+
+# --- alias baru untuk VPS ---
+@app_api.route('/register', methods=['POST'])
+def register_alias():
+    data = request.get_json(silent=True) or {}
+    nama = (data.get('nama') or '').strip()
+    nim = (data.get('nim') or '').strip()
+
+    if not nama or not nim:
+        return jsonify({
+            "status": "error",
+            "message": "Nama dan NIM wajib diisi."
+        }), 400
+
+    state.REG_NAMA = nama
+    state.REG_NIM = nim
+    state.MODE = "REGISTER"
+
+    return jsonify({
+        "status": "success",
+        "message": f"Mode register diaktifkan untuk {nama}.",
+        "mode": state.MODE
+    })
 
 @app_api.route('/api/status', methods=['GET'])
 def get_status():

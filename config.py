@@ -1,7 +1,7 @@
 # ── Camera & Hardware ────────────────────────────────────────────────────────
 CAMERA_INDEX    = 0
-FRAME_WIDTH     = 1280
-FRAME_HEIGHT    = 720
+FRAME_WIDTH     = 640
+FRAME_HEIGHT    = 480
 FPS             = 30
 
 # ── Peningkatan Gambar (Low-Light & Backlight) ───────────────────────────────

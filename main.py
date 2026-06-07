@@ -82,7 +82,6 @@ class SmartDoorApp:
         self.detector = FaceMeshDetector(min_detection_confidence=0.5, min_tracking_confidence=0.5)
         self.door = DoorLock(getattr(config, 'LOCK_GPIO_PIN', 18), getattr(config, 'UNLOCK_DURATION', 5))
         
-        # Base Threshold diatur sangat rendah agar AI mengekstrak semua probabilitas kemiripan
         self.matcher = FaceMatcher(0.35) 
         
         try:
@@ -151,7 +150,6 @@ class SmartDoorApp:
 
         if h > int(config.FRAME_HEIGHT * 0.50): return self._fail("TERLALU DEKAT", config.COLOR_YELLOW, "Mundur sedikit")
         
-        # --- DETEKSI SPOOFING 3-ARAH ---
         sp = self.anti_spoof.is_real(raw, face.bbox)
         self.spoof_score = sp.get("score_real", 1.0)
         spoof_label = sp.get("label_name", "FOTO/VIDEO") 
@@ -204,11 +202,10 @@ class SmartDoorApp:
             best_name = match.get("name", "")
             best_score = match.get("score", 0.0)
 
-            # DYNAMIC THRESHOLD
             if "Normal" in l_str:
                 dyn_thr = getattr(config, 'MATCH_THRESHOLD', 0.48)
             else:
-                dyn_thr = 0.40 # Syarat diturunkan untuk Backlight & Lowlight
+                dyn_thr = 0.40 
                 
             is_recognized = best_name and (best_score >= dyn_thr)
             
@@ -263,12 +260,13 @@ class SmartDoorApp:
         mask[y1:y2, x1:x2] = False
         L_bg = np.mean(gray[mask]) if np.any(mask) else L_face
 
+        # --- UBAH HANYA TAMPILKAN B DI SINI ---
         if (L_bg - L_face) > 40 and L_bg > 120: 
-            light_cond = f"Backlight (F:{L_face:.0f}/B:{L_bg:.0f})"
+            light_cond = f"Backlight (B:{L_bg:.0f})"
         elif L_bg < 85 or L_face < 85: 
-            light_cond = f"Low Light (F:{L_face:.0f}/B:{L_bg:.0f})"
+            light_cond = f"Low Light (B:{L_bg:.0f})"
         else: 
-            light_cond = f"Normal (F:{L_face:.0f}/B:{L_bg:.0f})"
+            light_cond = f"Normal (B:{L_bg:.0f})"
 
         pure_similarity = self.match_score
         UIHelper.log(f"🧪 [DATA UJI PENGAKUAN] Cosine Similarity Murni: {pure_similarity:.4f}", "SYSTEM")
@@ -285,7 +283,6 @@ class SmartDoorApp:
             
         final_acc = min(100.0, max(0.0, final_acc))
         
-        # --- PERBAIKAN: AKURASI DESIMAL PRESISI DITAMPILKAN DI LAYAR (.2f) ---
         self.ui.update({"status": f"DIBUKA ({final_acc:.2f}%)", "color": config.COLOR_GREEN, "instr": ""})
         
         UIHelper.log(f"🔓 AKSES DIBERIKAN. Waktu: {time.time() - self.auth_start:.2f}s", "SUCCESS")
@@ -295,7 +292,6 @@ class SmartDoorApp:
     def run(self):
         window_name = "Smart Door Lock"
         try:
-            # --- PERBAIKAN: MODE JENDELA (TIDAK FULL SCREEN) ---
             cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
             
             while self.running:

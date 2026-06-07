@@ -181,12 +181,13 @@ class FaceRegistrationApp:
         mask[y1:y2, x1:x2] = False
         L_bg = np.mean(gray[mask]) if np.any(mask) else L
         
+        # --- UBAH HANYA TAMPILKAN B DI SINI ---
         if (L_bg - L) > 40 and L_bg > 120: 
-            light_cond = f"Backlight (F:{L:.0f}/B:{L_bg:.0f})"
+            light_cond = f"Backlight (B:{L_bg:.0f})"
         elif L_bg < 85 or L < 85: 
-            light_cond = f"Low Light (F:{L:.0f}/B:{L_bg:.0f})"
+            light_cond = f"Low Light (B:{L_bg:.0f})"
         else: 
-            light_cond = f"Normal (F:{L:.0f}/B:{L_bg:.0f})"
+            light_cond = f"Normal (B:{L_bg:.0f})"
 
         raw_emb = self.model.get_embedding(self.model.crop_face(frame, safe_bbox))
         
@@ -303,12 +304,13 @@ class FaceRegistrationApp:
                 mask_live[y1_l:y2_l, x1_l:x2_l] = False
                 L_bg_live = np.mean(gray_live[mask_live]) if np.any(mask_live) else L_live
 
+                # --- UBAH HANYA TAMPILKAN B DI SINI ---
                 if (L_bg_live - L_live) > 40 and L_bg_live > 120: 
-                    l_str = f"Backlight (F:{L_live:.0f}/B:{L_bg_live:.0f})"
+                    l_str = f"Backlight (B:{L_bg_live:.0f})"
                 elif L_bg_live < 85 or L_live < 85: 
-                    l_str = f"Low Light (F:{L_live:.0f}/B:{L_bg_live:.0f})"
+                    l_str = f"Low Light (B:{L_bg_live:.0f})"
                 else: 
-                    l_str = f"Normal (F:{L_live:.0f}/B:{L_bg_live:.0f})"
+                    l_str = f"Normal (B:{L_bg_live:.0f})"
 
                 hud_txt, term_txt = self._generate_metric_text(pose, ear_val, sp_score, l_str)
                 
@@ -350,7 +352,6 @@ class FaceRegistrationApp:
         if self.stage == RegistrationStage.COMPLETE: return
         threading.Thread(target=self._process_thread, daemon=True).start()
         try:
-            # --- PERBAIKAN: MODE JENDELA (TIDAK FULL SCREEN) ---
             cv2.namedWindow("Register", cv2.WINDOW_AUTOSIZE)
 
             while self.is_running and self.stage != RegistrationStage.COMPLETE:
@@ -367,7 +368,6 @@ class FaceRegistrationApp:
             cv2.destroyAllWindows()
             if GPIO_AVAILABLE: GPIO.cleanup()
 
-# --- PERBAIKAN: FITUR INPUT NAMA LALU NIM ---
 if __name__ == "__main__":
     print("\n" + "="*40)
     print("   SISTEM REGISTRASI WAJAH")
@@ -379,8 +379,6 @@ if __name__ == "__main__":
         nim_input = input("Masukan NIM  : ").strip()
         
         if nim_input:
-            # Gabungkan NIM dan Nama sebagai identitas unik di database
-            # Contoh hasil: "432007006 - Fahrul Rosi"
             full_identity = f"{nim_input} - {nama_input}"
             FaceRegistrationApp(full_identity).run()
         else:

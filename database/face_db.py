@@ -292,13 +292,14 @@ class FaceDatabase:
             conn.commit()
         self.sync_trigger.set() 
 
-    def log_spoofing_async(self, score, spoof_type):
+   # Pastikan definisinya persis seperti ini
+    def log_spoofing_async(self, w_score, k_score, l_score, terdeteksi):
         created_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        with self.db_lock, closing(self._get_connection()) as conn:
-            conn.execute("INSERT INTO spoofing_logs (spoof_score, spoof_type, created_at, is_synced) VALUES (?, ?, ?, 0)", 
-                         (float(score), spoof_type or "-", created_at))
+        with self.db_lock, sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO spoofing_logs (wajah_score, kertas_score, layar_score, terdeteksi, created_at, is_synced) VALUES (?, ?, ?, ?, ?, 0)", 
+                         (float(w_score), float(k_score), float(l_score), terdeteksi, created_at))
             conn.commit()
-        self.sync_trigger.set() 
+        self.sync_trigger.set()
 
     # ==============================================================================
     # 3. BACKGROUND WORKER: LIVE 2-WAY SYNC YANG TAHAN ERROR (ANTI CRASH)

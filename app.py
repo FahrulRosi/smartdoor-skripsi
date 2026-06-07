@@ -22,7 +22,7 @@ except ImportError:
     GPIO_AVAILABLE = False
 
 # ==============================================================================
-# 1. STATE & ENUMERASI (Dari main.py & register.py)
+# 1. STATE & ENUMERASI
 # ==============================================================================
 class ValidationState(Enum): IDLE=0; RECOGNIZING=1; CHALLENGE=2; UNMATCHED=3; UNLOCKED=4
 class RegistrationStage(Enum): IDLE=0; FACEMESH=1; YAW=2; PITCH=3; ROLL=4; BLINK=5; EXTRACTION=6; COMPLETE=7
@@ -41,10 +41,10 @@ STEP_TO_STAGE = {"FACEMESH": RegistrationStage.FACEMESH, "YAW": RegistrationStag
 # 2. GLOBAL STATE API (Untuk Web Admin)
 # ==============================================================================
 class SystemState:
-    MODE = "MAIN"         # Mode: "MAIN" atau "REGISTER"
+    MODE = "MAIN"         
     REG_NAMA = ""         
     REG_NIM = ""          
-    CURRENT_FRAME = None  # Buffer untuk live streaming web
+    CURRENT_FRAME = None  
     
 state = SystemState()
 app_api = Flask(__name__)
@@ -56,7 +56,7 @@ def trigger_register():
     nama, nim = data.get('nama', '').strip(), data.get('nim', '').strip()
     if nama and nim:
         state.REG_NAMA, state.REG_NIM = nama, nim
-        state.MODE = "REGISTER"  # Trigger ganti kamera
+        state.MODE = "REGISTER"  
         return jsonify({"status": "success", "message": f"Raspi beralih ke mode registrasi untuk {nama}."})
     return jsonify({"status": "error", "message": "Nama dan NIM tidak boleh kosong!"}), 400
 
@@ -76,7 +76,7 @@ def video_feed():
     return Response(generate_video_stream(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
 # ==============================================================================
-# 3. UI HELPERS (Digabungkan persis seperti aslinya)
+# 3. UI HELPERS
 # ==============================================================================
 class UIHelper:
     @staticmethod
@@ -152,8 +152,9 @@ class Helpers:
             cv2.putText(f, line, (45, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (240, 240, 240), 2)
             y_offset += 35
 
+
 # ==============================================================================
-# 4. APLIKASI SMART DOOR (Sama persis dengan main.py)
+# 4. APLIKASI SMART DOOR MAIN
 # ==============================================================================
 class SmartDoorApp:
     CHALLENGES = {"BLINK": "Kedipkan Mata", "KANAN": "Toleh KANAN", "KIRI": "Toleh KIRI", "ATAS": "Dongak ATAS", "BAWAH": "Tunduk BAWAH"}
@@ -246,12 +247,22 @@ class SmartDoorApp:
         sp = self.anti_spoof.is_real(raw, face.bbox)
         self.spoof_score = sp.get("score_real", 1.0)
         spoof_label = sp.get("label_name", "FOTO/VIDEO") 
+        
+        # --- PERBAIKAN: ARGUMEN FUNGSI log_spoofing_async BERDASARKAN POSISI ---
         if not sp.get("real", True):
             self.fake_frames += 1 
             if self.fake_frames == 10: 
-                if hasattr(self.db, 'log_spoofing_async'): self.db.log_spoofing_async(w_score=sp.get("score_real", 0.0), k_score=sp.get("score_photo", 0.0), l_score=sp.get("score_video", 0.0), terdeteksi=spoof_label)
+                if hasattr(self.db, 'log_spoofing_async'): 
+                    self.db.log_spoofing_async(
+                        sp.get("score_real", 0.0), 
+                        sp.get("score_photo", 0.0), 
+                        sp.get("score_video", 0.0), 
+                        spoof_label
+                    )
                 self._fail(f"{spoof_label} (Skor: {self.spoof_score:.2f})")
             return
+        # -------------------------------------------------------------------------
+        
         self.fake_frames = 0
         
         gray_live = cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY)
@@ -262,7 +273,12 @@ class SmartDoorApp:
         mask_live = np.ones((fh_l, fw_l), dtype=bool); mask_live[y1_l:y2_l, x1_l:x2_l] = False
         L_bg_live = np.mean(gray_live[mask_live]) if np.any(mask_live) else L_live
 
-        l_str = "Backlight" if (L_bg_live - L_live) > 40 and L_bg_live > 120 else "Low Light" if L_bg_live < 85 or L_live < 85 else "Normal"
+        if (L_bg_live - L_live) > 40 and L_bg_live > 120: 
+            l_str = f"Backlight (B:{L_bg_live:.0f})"
+        elif L_bg_live < 85 or L_live < 85: 
+            l_str = f"Low Light (B:{L_bg_live:.0f})"
+        else: 
+            l_str = f"Normal (B:{L_bg_live:.0f})"
 
         if self.state in (ValidationState.IDLE, ValidationState.RECOGNIZING):
             if self.state == ValidationState.IDLE: self.state, self.auth_start = ValidationState.RECOGNIZING, time.time(); return
@@ -303,16 +319,33 @@ class SmartDoorApp:
                     self._finalize_unlock(raw, face.bbox)
 
     def _finalize_unlock(self, raw, bbox):
+        gray = cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY)
+        fh, fw = gray.shape
+        x1, y1, x2, y2 = max(0, bbox[0]), max(0, bbox[1]), min(fw, bbox[0]+bbox[2]), min(fh, bbox[1]+bbox[3])
+        
+        face_roi = gray[y1:y2, x1:x2]
+        L_face = np.mean(face_roi) if face_roi.size > 0 else 100.0
+        
+        mask = np.ones((fh, fw), dtype=bool)
+        mask[y1:y2, x1:x2] = False
+        L_bg = np.mean(gray[mask]) if np.any(mask) else L_face
+
+        if (L_bg - L_face) > 40 and L_bg > 120: 
+            light_cond = f"Backlight (B:{L_bg:.0f})"
+        elif L_bg < 85 or L_face < 85: 
+            light_cond = f"Low Light (B:{L_bg:.0f})"
+        else: 
+            light_cond = f"Normal (B:{L_bg:.0f})"
+
         final_acc = min(100.0, max(0.0, 90.0 + ((self.match_score - getattr(self, 'active_dyn_thr', 0.48)) / (1.0 - getattr(self, 'active_dyn_thr', 0.48))) * 10.0))
         self.ui.update({"status": f"DIBUKA ({final_acc:.2f}%)", "color": config.COLOR_GREEN, "instr": ""})
-        if hasattr(self.db, 'push_access_log_async'): self.db.push_access_log_async(self.last_name, "UNLOCKED", final_acc, "Normal", self.access_details)
+        if hasattr(self.db, 'push_access_log_async'): self.db.push_access_log_async(self.last_name, "UNLOCKED", final_acc, light_cond, self.access_details)
 
     def run(self):
         window_name = "Sistem Edge"
         cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
         try:
             while self.running:
-                # DETEKSI TRIGGER WEB API
                 if state.MODE == "REGISTER": 
                     UIHelper.log("Sistem beralih ke Mode Registrasi...", "SYSTEM")
                     break 
@@ -324,7 +357,7 @@ class SmartDoorApp:
                     is_door_locked = getattr(self.door, 'locked', True) if hasattr(self, 'door') and self.door else True
                     UIHelper.draw_ui(display, self.ui, is_door_locked)
                     
-                    state.CURRENT_FRAME = display.copy() # Stream ke Web API
+                    state.CURRENT_FRAME = display.copy() 
                     cv2.imshow(window_name, display)
                 if cv2.waitKey(10) & 0xFF in [ord("q"), ord("Q")]: self.running = False; break
         finally: 
@@ -332,7 +365,7 @@ class SmartDoorApp:
             if hasattr(self, 'cam') and self.cam: self.cam.stop()
 
 # ==============================================================================
-# 5. APLIKASI REGISTRASI WAJAH (Sama persis dengan register.py)
+# 5. APLIKASI REGISTRASI WAJAH
 # ==============================================================================
 class FaceRegistrationApp:
     POSE_CFG = {RegistrationStage.YAW: ("yaw_snapshots", "yaw_left", "yaw_right", "yaw", getattr(config, 'YAW_THRESHOLD', 25.0)), RegistrationStage.PITCH: ("pitch_snapshots", "pitch_up", "pitch_down", "pitch", getattr(config, 'PITCH_THRESHOLD', 20.0)), RegistrationStage.ROLL: ("roll_snapshots", "roll_left", "roll_right", "roll", getattr(config, 'ROLL_THRESHOLD', 25.0))}
@@ -408,8 +441,27 @@ class FaceRegistrationApp:
         if missing: Helpers.show_msg(display, "❌ GAGAL!", f"Kurang: {','.join(missing)}", config.COLOR_RED); time.sleep(4); self.stage = RegistrationStage.COMPLETE; return
 
         bx, by, bw, bh = face.bbox
-        raw_emb = self.model.get_embedding(self.model.crop_face(frame, [max(0, bx), max(0, by), min(frame.shape[1], bx + bw) - max(0, bx), min(frame.shape[0], by + bh) - max(0, by)]))
+        fh, fw = frame.shape[:2]
+        x1, y1 = max(0, bx), max(0, by)
+        x2, y2 = min(fw, bx + bw), min(fh, by + bh)
+        safe_bbox = [x1, y1, x2 - x1, y2 - y1]
+
+        gray = cv2.cvtColor(raw_frame, cv2.COLOR_BGR2GRAY)
+        face_roi = gray[y1:y2, x1:x2]
+        L = np.mean(face_roi) if face_roi.size > 0 else 100.0
         
+        mask = np.ones((fh, fw), dtype=bool)
+        mask[y1:y2, x1:x2] = False
+        L_bg = np.mean(gray[mask]) if np.any(mask) else L
+        
+        if (L_bg - L) > 40 and L_bg > 120: 
+            light_cond = f"Backlight (B:{L_bg:.0f})"
+        elif L_bg < 85 or L < 85: 
+            light_cond = f"Low Light (B:{L_bg:.0f})"
+        else: 
+            light_cond = f"Normal (B:{L_bg:.0f})"
+
+        raw_emb = self.model.get_embedding(self.model.crop_face(frame, safe_bbox))
         if raw_emb is not None:
             emb_flat = np.array(raw_emb, dtype=np.float32).flatten()
             self.ext_embs.append(emb_flat / (np.linalg.norm(emb_flat) + 1e-6))
@@ -418,14 +470,14 @@ class FaceRegistrationApp:
         avg_emb = np.mean(self.ext_embs, axis=0)
         avg_emb = avg_emb / (np.linalg.norm(avg_emb) + 1e-6) 
         
-        self.cap_data.update({"headpose_vector": [float(pose["yaw"]), float(pose["pitch"]), float(pose["roll"])], "registration_accuracy": 100.0, "light_condition": "Normal"})
+        self.cap_data.update({"headpose_vector": [float(pose["yaw"]), float(pose["pitch"]), float(pose["roll"])], "registration_accuracy": 100.0, "light_condition": light_cond})
         match = self.matcher.match(avg_emb)
         self.last_match_score = match.get("score", 0.0)
         
         anti_dup_thr = getattr(config, 'ANTI_DUPLICATE_THRESHOLD', 0.48)
         if match.get("name") and self.last_match_score >= anti_dup_thr and os.getenv("ALLOW_DUPLICATE", "false").lower() != "true": 
             Helpers.show_msg(display, "❌ WAJAH SUDAH TERDAFTAR!", f"User: {match['name']} (Sim: {match['score']:.4f})", config.COLOR_RED)
-        elif self.db.save_face(self.name, self.name.split("-")[0].strip() if "-" in self.name else self.name, avg_emb.tolist(), self.cap_data): 
+        elif self.db.save_face(self.name, avg_emb.tolist(), self.cap_data): 
             Helpers.show_msg(display, "✅ REGISTRASI BERHASIL!", f"User: {self.name} | VektorTersimpan", config.COLOR_GREEN)
         else: 
             Helpers.show_msg(display, "❌ GAGAL!", "DB Error", config.COLOR_RED)
@@ -467,9 +519,25 @@ class FaceRegistrationApp:
                 sp_score, sp_real, sp_label = 1.0, True, "ASLI"
                 if self.stage in (RegistrationStage.FACEMESH, RegistrationStage.BLINK, RegistrationStage.EXTRACTION):
                     sp = self.anti_spoof.is_real(raw, face.bbox)
-                    sp_score, sp_real, sp_label = sp.get("score", 1.0), sp.get("real", True), sp.get("label_name", "FOTO").upper() 
+                    sp_score, sp_real, sp_label = sp.get("score_real", 1.0), sp.get("real", True), sp.get("label_name", "LAYAR/VIDEO").upper() 
                 
-                hud_txt, term_txt = self._generate_metric_text(pose, ear_val, sp_score, "Normal")
+                fh_l, fw_l = raw.shape[:2]
+                bx, by, bw, bh = face.bbox
+                x1_l, y1_l, x2_l, y2_l = max(0, bx), max(0, by), min(fw_l, bx+bw), min(fh_l, by+bh)
+                gray_live = cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY)
+                face_roi_live = gray_live[y1_l:y2_l, x1_l:x2_l]
+                L_live = np.mean(face_roi_live) if face_roi_live.size > 0 else 100.0
+                mask_live = np.ones((fh_l, fw_l), dtype=bool); mask_live[y1_l:y2_l, x1_l:x2_l] = False
+                L_bg_live = np.mean(gray_live[mask_live]) if np.any(mask_live) else L_live
+
+                if (L_bg_live - L_live) > 40 and L_bg_live > 120: 
+                    l_str = f"Backlight (B:{L_bg_live:.0f})"
+                elif L_bg_live < 85 or L_live < 85: 
+                    l_str = f"Low Light (B:{L_bg_live:.0f})"
+                else: 
+                    l_str = f"Normal (B:{L_bg_live:.0f})"
+                
+                hud_txt, term_txt = self._generate_metric_text(pose, ear_val, sp_score, l_str)
                 
                 if not sp_real:
                     self.fake_frames += 1
@@ -502,14 +570,13 @@ class FaceRegistrationApp:
                 with self.frame_lock: frame = self.display_frame.copy() if self.display_frame is not None else None
                 
                 if frame is not None: 
-                    state.CURRENT_FRAME = frame.copy() # Stream ke Web API
+                    state.CURRENT_FRAME = frame.copy() 
                     cv2.imshow("Sistem Edge", frame)
                     
                 if cv2.waitKey(1) & 0xFF == ord("q"): self.is_running = False; break
         finally: 
             self.is_running = False; time.sleep(0.5)
             self.cam.stop(); self.detector.close()
-            # JIKA SELESAI -> KEMBALI KE MAIN LOOP
             state.MODE = "MAIN" 
             state.REG_NAMA = ""
             state.REG_NIM = ""

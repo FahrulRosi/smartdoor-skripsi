@@ -71,7 +71,6 @@ def start_registration():
     print(f"[{datetime.now().strftime('%H:%M:%S')}] [SYSTEM] Menerima Perintah Registrasi Web -> {nim} - {nama}")
     return jsonify({"success": True, "message": f"Memulai registrasi untuk {nama}"})
 
-# --- alias route registrasi vps ---
 @app_api.route('/register', methods=['POST'])
 def register_alias():
     data = request.get_json(silent=True) or {}
@@ -209,10 +208,7 @@ class SmartDoorApp:
     def _reset_state(self):
         self.state, self.last_name, self.match_score, self.auth_start = ValidationState.IDLE, "", 0.0, 0.0
         self.seq, self.step_idx, self.reg_pose, self.pose_hold, self.prev_center = [], 0, [0.0, 0.0, 0.0], 0, None
-        
-        # --- TRACKING WAKTU PER TAHAPAN LIVENESS (MAINSTREAM) ---
         self.current_stage_start = 0.0
-        
         self.wait_center, self.center_hold, self.blink_passed, self.blink_hold, self.ear_hist, self.print_counter, self.access_details = False, 0, False, 0, [], 0, []
 
     def _fail(self, status, color=config.COLOR_RED, instr="", wait=False):
@@ -289,23 +285,25 @@ class SmartDoorApp:
         
         self.fake_frames = 0
         
+        # --- PERBAIKAN LOGIKA CAHAYA (HANYA MENGGUNAKAN BACKGROUND) ---
         gray_live = cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY)
         fh_l, fw_l = gray_live.shape
         x1_l, y1_l, x2_l, y2_l = max(0, x), max(0, y), min(fw_l, x+w), min(fh_l, y+h)
-        face_roi_live = gray_live[y1_l:y2_l, x1_l:x2_l]
-        L_live = np.mean(face_roi_live) if face_roi_live.size > 0 else 100.0
-        mask_live = np.ones((fh_l, fw_l), dtype=bool); mask_live[y1_l:y2_l, x1_l:x2_l] = False
-        L_bg_live = np.mean(gray_live[mask_live]) if np.any(mask_live) else L_live
+        
+        mask_live = np.ones((fh_l, fw_l), dtype=bool)
+        mask_live[y1_l:y2_l, x1_l:x2_l] = False
+        L_bg_live = np.mean(gray_live[mask_live]) if np.any(mask_live) else 100.0
 
-        if (L_bg_live - L_live) > 40 and L_bg_live > 120: l_str = f"Backlight (B:{L_bg_live:.0f})"
-        elif L_bg_live < 85 or L_live < 85: l_str = f"Low Light (B:{L_bg_live:.0f})"
-        else: l_str = f"Normal (B:{L_bg_live:.0f})"
+        if L_bg_live > 140: 
+            l_str = f"Backlight (B:{L_bg_live:.0f})"
+        elif L_bg_live < 85: 
+            l_str = f"Low Light (B:{L_bg_live:.0f})"
+        else: 
+            l_str = f"Normal (B:{L_bg_live:.0f})"
 
         if self.state in (ValidationState.IDLE, ValidationState.RECOGNIZING):
             if self.state == ValidationState.IDLE: 
                 self.state = ValidationState.RECOGNIZING
-                
-                # --- CATAT WAKTU MULAI END-TO-END DAN RECOGNIZING ---
                 self.auth_start = time.time()
                 self.current_stage_start = time.time()
                 
@@ -326,8 +324,6 @@ class SmartDoorApp:
             dyn_thr = getattr(config, 'MATCH_THRESHOLD', 0.48) if "Normal" in l_str else 0.40 
             
             if best_name and (best_score >= dyn_thr):
-                
-                # --- WAKTU DIBULATKAN (2 DESIMAL) ---
                 recog_duration = round(time.time() - self.current_stage_start, 2)
                 self.access_details.append({"tahap": "RECOGNIZING", "latency_sec": recog_duration})
                 
@@ -365,8 +361,6 @@ class SmartDoorApp:
                 print(f"\r\033[K[Tantangan {self.step_idx+1}/{len(self.seq)}] Aktual: {val:.2f}{unit} | Target: {tgt:.2f}{unit}", end="", flush=True)
             
             if passed:
-                
-                # --- WAKTU DIBULATKAN (2 DESIMAL) ---
                 chal_duration = round(time.time() - self.current_stage_start, 2)
                 self.access_details.append({
                     "tantangan": inst, 
@@ -389,22 +383,25 @@ class SmartDoorApp:
                     self._finalize_unlock(raw, face.bbox)
 
     def _finalize_unlock(self, raw, bbox):
+        # --- PERBAIKAN LOGIKA CAHAYA (HANYA MENGGUNAKAN BACKGROUND) ---
         gray = cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY)
         fh, fw = gray.shape
         x1, y1, x2, y2 = max(0, bbox[0]), max(0, bbox[1]), min(fw, bbox[0]+bbox[2]), min(fh, bbox[1]+bbox[3])
-        face_roi = gray[y1:y2, x1:x2]
-        L_face = np.mean(face_roi) if face_roi.size > 0 else 100.0
-        mask = np.ones((fh, fw), dtype=bool); mask[y1:y2, x1:x2] = False
-        L_bg = np.mean(gray[mask]) if np.any(mask) else L_face
+        
+        mask = np.ones((fh, fw), dtype=bool)
+        mask[y1:y2, x1:x2] = False
+        L_bg = np.mean(gray[mask]) if np.any(mask) else 100.0
 
-        if (L_bg - L_face) > 40 and L_bg > 120: light_cond = f"Backlight (B:{L_bg:.0f})"
-        elif L_bg < 85 or L_face < 85: light_cond = f"Low Light (B:{L_bg:.0f})"
-        else: light_cond = f"Normal (B:{L_bg:.0f})"
+        if L_bg > 140: 
+            light_cond = f"Backlight (B:{L_bg:.0f})"
+        elif L_bg < 85: 
+            light_cond = f"Low Light (B:{L_bg:.0f})"
+        else: 
+            light_cond = f"Normal (B:{L_bg:.0f})"
 
         final_acc = min(100.0, max(0.0, 90.0 + ((self.match_score - getattr(self, 'active_dyn_thr', 0.48)) / (1.0 - getattr(self, 'active_dyn_thr', 0.48))) * 10.0))
         self.ui.update({"status": f"DIBUKA ({final_acc:.2f}%)", "color": config.COLOR_GREEN, "instr": ""})
         
-        # --- TOTAL WAKTU DIBULATKAN (2 DESIMAL) ---
         total_auth_time = round(time.time() - self.auth_start, 2)
         
         print("") 
@@ -463,7 +460,6 @@ class RegistrationApp:
         
         self.st = {"instr": "Tatap lurus kamera untuk inisialisasi FaceMesh", "prog": "Progress: 0%", "hud_txt": "", "status": "MENUNGGU WAJAH", "bbox": None, "col": config.COLOR_WHITE}
         
-        # --- TRACKING WAKTU REGISTRASI ---
         self.reg_start_time = time.time()
         self.stage_start_time = time.time()
         self.stage_durations = {}
@@ -522,17 +518,21 @@ class RegistrationApp:
             
         self.fake_frames = 0
 
+        # --- PERBAIKAN LOGIKA CAHAYA (HANYA MENGGUNAKAN BACKGROUND) ---
         gray_live = cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY)
         fh_l, fw_l = gray_live.shape
         x1_l, y1_l, x2_l, y2_l = max(0, x), max(0, y), min(fw_l, x+w), min(fh_l, y+h)
-        face_roi_live = gray_live[y1_l:y2_l, x1_l:x2_l]
-        L_live = np.mean(face_roi_live) if face_roi_live.size > 0 else 100.0
-        mask_live = np.ones((fh_l, fw_l), dtype=bool); mask_live[y1_l:y2_l, x1_l:x2_l] = False
-        L_bg_live = np.mean(gray_live[mask_live]) if np.any(mask_live) else L_live
+        
+        mask_live = np.ones((fh_l, fw_l), dtype=bool)
+        mask_live[y1_l:y2_l, x1_l:x2_l] = False
+        L_bg_live = np.mean(gray_live[mask_live]) if np.any(mask_live) else 100.0
 
-        if (L_bg_live - L_live) > 40 and L_bg_live > 120: l_str = f"Backlight (B:{L_bg_live:.0f})"
-        elif L_bg_live < 85 or L_live < 85: l_str = f"Low Light (B:{L_bg_live:.0f})"
-        else: l_str = f"Normal (B:{L_bg_live:.0f})"
+        if L_bg_live > 140: 
+            l_str = f"Backlight (B:{L_bg_live:.0f})"
+        elif L_bg_live < 85: 
+            l_str = f"Low Light (B:{L_bg_live:.0f})"
+        else: 
+            l_str = f"Normal (B:{L_bg_live:.0f})"
 
         # --- MACHINE STATE REGISTRASI ---
         if self.stage == RegistrationStage.FACEMESH:
@@ -590,12 +590,10 @@ class RegistrationApp:
                 final_features = self.liveness.compile_registration_data()
                 final_features["embedding"] = [float(val) for val in np.array(raw_emb).flatten()]
                 
-                # --- TAMBAHKAN METRIK LATENSI KE PAYLOAD ---
                 final_features["reg_latency_sec"] = total_time
                 final_features["stage_durations_exact"] = self.stage_durations
                 final_features["light_condition"] = l_str
                 
-                # Gunakan metode save_face agar sejalan dengan standarisasi face_db.py
                 if hasattr(self.db, 'save_face'):
                     if self.db.save_face(self.nama, self.nim, final_features["embedding"], final_features):
                         print("")
@@ -644,7 +642,7 @@ if __name__ == "__main__":
                 app.run() 
             elif state.MODE == "REGISTER":
                 temp_main = SmartDoorApp()
-                temp_main.running = False # Stop ai_worker agar resource kamera beralih bersih
+                temp_main.running = False 
                 reg_app = RegistrationApp(temp_main.db, temp_main.model, temp_main.detector, temp_main.cam)
                 reg_app.run_loop()
             time.sleep(0.1)

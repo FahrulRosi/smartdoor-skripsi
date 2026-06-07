@@ -186,10 +186,13 @@ class SmartDoorApp:
         L_live = np.mean(face_roi_live) if face_roi_live.size > 0 else 100.0
         mask_live = np.ones((fh_l, fw_l), dtype=bool); mask_live[y1_l:y2_l, x1_l:x2_l] = False
         L_bg_live = np.mean(gray_live[mask_live]) if np.any(mask_live) else L_live
-
-        if (L_bg_live - L_live) > 40 and L_bg_live > 120: l_str = f"Backlight (B:{L_bg_live:.0f})"
-        elif L_bg_live < 85 or L_live < 85: l_str = f"Low Light (B:{L_bg_live:.0f})"
-        else: l_str = f"Normal (B:{L_bg_live:.0f})"
+# Hanya menggunakan L_bg_live (Background)
+        if L_bg_live > 140: # Anda bisa menaikkan/menurunkan angka 140 ini sesuai tes di lokasi
+            l_str = f"Backlight (B:{L_bg_live:.0f})"
+        elif L_bg_live < 85: 
+            l_str = f"Low Light (B:{L_bg_live:.0f})"
+        else: 
+            l_str = f"Normal (B:{L_bg_live:.0f})"
 
         if self.state in (ValidationState.IDLE, ValidationState.RECOGNIZING):
             if self.state == ValidationState.IDLE: 

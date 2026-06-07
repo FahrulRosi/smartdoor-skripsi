@@ -104,7 +104,6 @@ class FaceRegistrationApp:
         
         self.liveness.start_register()
         
-        # --- TRACKING WAKTU REGISTRASI ---
         self.reg_start_time = time.time()
         self.stage_start_time = time.time()  
         self.stage_durations = {}            
@@ -182,16 +181,14 @@ class FaceRegistrationApp:
         x2, y2 = min(fw, bx + bw), min(fh, by + bh)
         safe_bbox = [x1, y1, x2 - x1, y2 - y1]
 
+        # --- PERBAIKAN LOGIKA CAHAYA (HANYA MENGGUNAKAN BACKGROUND) ---
         gray = cv2.cvtColor(raw_frame, cv2.COLOR_BGR2GRAY)
-        face_roi = gray[y1:y2, x1:x2]
-        L = np.mean(face_roi) if face_roi.size > 0 else 100.0
-        
         mask = np.ones((fh, fw), dtype=bool)
         mask[y1:y2, x1:x2] = False
-        L_bg = np.mean(gray[mask]) if np.any(mask) else L
+        L_bg = np.mean(gray[mask]) if np.any(mask) else 100.0
         
-        if (L_bg - L) > 40 and L_bg > 120: light_cond = f"Backlight (B:{L_bg:.0f})"
-        elif L_bg < 85 or L < 85: light_cond = f"Low Light (B:{L_bg:.0f})"
+        if L_bg > 140: light_cond = f"Backlight (B:{L_bg:.0f})"
+        elif L_bg < 85: light_cond = f"Low Light (B:{L_bg:.0f})"
         else: light_cond = f"Normal (B:{L_bg:.0f})"
 
         raw_emb = self.model.get_embedding(self.model.crop_face(frame, safe_bbox))
@@ -219,7 +216,6 @@ class FaceRegistrationApp:
             _log(f"GAGAL: Terdeteksi duplikat dgn {match['name']} (Sim: {match['score']:.4f}) | Kondisi: {light_cond}", "ERROR")
             
         else:
-            # --- WAKTU DIBULATKAN KE 2 DESIMAL ---
             total_time = round(time.time() - self.reg_start_time, 2)
             self.cap_data["reg_latency_sec"] = total_time
             
@@ -238,10 +234,9 @@ class FaceRegistrationApp:
         time.sleep(1.5); self.stage = RegistrationStage.COMPLETE 
 
     def _log_transition(self, old_stage):
-        # --- PERHITUNGAN WAKTU PER TAHAP DIBULATKAN (2 DESIMAL) ---
         stage_duration = round(time.time() - self.stage_start_time, 2)
         self.stage_durations[old_stage.name] = stage_duration
-        self.stage_start_time = time.time() # Reset stopwatch
+        self.stage_start_time = time.time() 
         
         if old_stage == RegistrationStage.FACEMESH: 
             _log(f"✅ TAHAP 1 (FaceMesh): {stage_duration} detik", "SUCCESS")
@@ -316,16 +311,14 @@ class FaceRegistrationApp:
                 fh_l, fw_l = raw.shape[:2]
                 x1_l, y1_l, x2_l, y2_l = max(0, bx), max(0, by), min(fw_l, bx+bw), min(fh_l, by+bh)
                 
+                # --- PERBAIKAN LOGIKA CAHAYA (HANYA MENGGUNAKAN BACKGROUND) ---
                 gray_live = cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY)
-                face_roi_live = gray_live[y1_l:y2_l, x1_l:x2_l]
-                L_live = np.mean(face_roi_live) if face_roi_live.size > 0 else 100.0
-                
                 mask_live = np.ones((fh_l, fw_l), dtype=bool)
                 mask_live[y1_l:y2_l, x1_l:x2_l] = False
-                L_bg_live = np.mean(gray_live[mask_live]) if np.any(mask_live) else L_live
+                L_bg_live = np.mean(gray_live[mask_live]) if np.any(mask_live) else 100.0
 
-                if (L_bg_live - L_live) > 40 and L_bg_live > 120: l_str = f"Backlight (B:{L_bg_live:.0f})"
-                elif L_bg_live < 85 or L_live < 85: l_str = f"Low Light (B:{L_bg_live:.0f})"
+                if L_bg_live > 140: l_str = f"Backlight (B:{L_bg_live:.0f})"
+                elif L_bg_live < 85: l_str = f"Low Light (B:{L_bg_live:.0f})"
                 else: l_str = f"Normal (B:{L_bg_live:.0f})"
 
                 hud_txt, term_txt = self._generate_metric_text(pose, ear_val, sp_score, l_str)

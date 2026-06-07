@@ -67,16 +67,18 @@ def get_status():
 def generate_video_stream():
     while True:
         if state.CURRENT_FRAME is not None:
-            ret, buffer = cv2.imencode('.jpg', state.CURRENT_FRAME, [cv2.IMWRITE_JPEG_QUALITY, 70])
+            # Kecilkan ukuran stream ke web admin agar CPU Raspi tidak hang
+            small_stream = cv2.resize(state.CURRENT_FRAME, (640, 360))
+            ret, buffer = cv2.imencode('.jpg', small_stream, [cv2.IMWRITE_JPEG_QUALITY, 50])
             if ret: yield (b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
-        time.sleep(0.05)
+        time.sleep(0.15) 
 
 @app_api.route('/api/video_feed')
 def video_feed():
     return Response(generate_video_stream(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
 # ==============================================================================
-# 3. UI HELPERS
+# 3. UI HELPERS 
 # ==============================================================================
 class UIHelper:
     @staticmethod
@@ -84,7 +86,11 @@ class UIHelper:
 
     @staticmethod
     def enhance_frame(frame):
-        if not getattr(config, 'ENABLE_CLAHE_ENHANCEMENT', True): return frame
+        if not getattr(config, 'ENABLE_CLAHE_ENHANCEMENT', False): 
+            # Solusi ringan untuk menerangkan gambar (convertScaleAbs)
+            return cv2.convertScaleAbs(frame, alpha=1.1, beta=25)
+        
+        # Jika CLAHE diaktifkan (berat)
         denoised = cv2.bilateralFilter(frame, d=3, sigmaColor=30, sigmaSpace=30)
         img_yuv = cv2.cvtColor(denoised, cv2.COLOR_BGR2YUV)
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
@@ -101,6 +107,7 @@ class UIHelper:
 
     @staticmethod
     def draw_ui(d, ui, locked):
+        fw, fh = d.shape[1], d.shape[0]
         if ui.get("instr"):
             w, h = cv2.getTextSize(ui.get("instr"), cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0]
             cv2.rectangle(d, (10, 10), (w+40, h+30), (0,0,0), -1)
@@ -108,13 +115,13 @@ class UIHelper:
         if ui.get("wait"): cv2.putText(d, "Menunggu Wajah...", (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, config.COLOR_YELLOW, 2)
         elif ui.get("bbox"):
             x, y, w, h = ui["bbox"]
-            fx, c = config.FRAME_WIDTH - x - w, ui.get("color", config.COLOR_WHITE)
+            fx, c = fw - x - w, ui.get("color", config.COLOR_WHITE)
             cv2.rectangle(d, (fx, y), (fx+w, y+h), c, 3)
             if stat := ui.get("status", ""):
                 tw = cv2.getTextSize(stat, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)[0][0]
                 cv2.rectangle(d, (fx, y-35), (fx+tw+15, y-5), c, -1)
                 cv2.putText(d, stat, (fx+8, y-12), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255,255,255), 2)
-        cv2.putText(d, f"PINTU: {'TERKUNCI' if locked else 'TERBUKA'}", (10, config.FRAME_HEIGHT-30), cv2.FONT_HERSHEY_SIMPLEX, 0.75, config.COLOR_RED if locked else config.COLOR_GREEN, 2)
+        cv2.putText(d, f"PINTU: {'TERKUNCI' if locked else 'TERBUKA'}", (10, fh-30), cv2.FONT_HERSHEY_SIMPLEX, 0.75, config.COLOR_RED if locked else config.COLOR_GREEN, 2)
 
 class Helpers:
     @staticmethod
@@ -127,16 +134,21 @@ class Helpers:
 
     @staticmethod
     def draw_hud(f, stg, instr, prog, score_txt, status, bbox, col):
+        fw, fh = f.shape[1], f.shape[0]
         if bbox:
             bx, by, bw, bh = bbox
-            bx = config.FRAME_WIDTH - bx - bw
+            bx = fw - bx - bw
             cv2.rectangle(f, (bx, by), (bx+bw, by+bh), col, 3)
             cv2.rectangle(f, (bx, by-35), (bx+200, by-5), col, -1)
             cv2.putText(f, status, (bx+5, by-12), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255,255,255), 2)
-        cv2.rectangle(f, (0, 50), (config.FRAME_WIDTH, 185), (20,20,20), -1); cv2.rectangle(f, (0, 50), (config.FRAME_WIDTH, 185), config.COLOR_CYAN, 2)
+        
+        cv2.rectangle(f, (0, 50), (fw, 185), (20,20,20), -1)
+        cv2.rectangle(f, (0, 50), (fw, 185), config.COLOR_CYAN, 2)
+        
         for txt, yp, c, sz, t in [(STAGE_NAMES.get(stg, "Proses..."), 75, config.COLOR_GREEN, 0.85, 2), (instr, 105, config.COLOR_YELLOW, 0.65, 2), (prog, 130, config.COLOR_CYAN, 0.6, 1), (score_txt, 160, config.COLOR_WHITE, 0.55, 1)]:
             if txt: cv2.putText(f, txt, (20, yp), cv2.FONT_HERSHEY_SIMPLEX, sz, c, t)
-        bx_bar, by_bar, bw_bar, bh_bar, sv = (config.FRAME_WIDTH-350)//2, 15, 350, 25, min(stg.value, 6)
+            
+        bx_bar, by_bar, bw_bar, bh_bar, sv = (fw-350)//2, 15, 350, 25, min(stg.value, 6)
         cv2.rectangle(f, (bx_bar, by_bar), (bx_bar+bw_bar, by_bar+bh_bar), (30,30,30), -1)
         if sv > 0: cv2.rectangle(f, (bx_bar, by_bar), (bx_bar + int(bw_bar*(sv-1)/6), by_bar+bh_bar), config.COLOR_GREEN, -1)
         cv2.rectangle(f, (bx_bar, by_bar), (bx_bar+bw_bar, by_bar+bh_bar), config.COLOR_WHITE, 2)
@@ -144,10 +156,11 @@ class Helpers:
 
     @staticmethod
     def show_msg(f, t_title, t_sub, col):
-        cv2.rectangle(f, (0, 0), (config.FRAME_WIDTH, config.FRAME_HEIGHT), (15, 15, 15), -1)
-        cv2.rectangle(f, (15, 15), (config.FRAME_WIDTH - 15, config.FRAME_HEIGHT - 15), col, 8)
-        cv2.putText(f, t_title, (40, config.FRAME_HEIGHT // 2 - 50), cv2.FONT_HERSHEY_SIMPLEX, 1.2, col, 3)
-        y_offset = config.FRAME_HEIGHT // 2 + 10
+        fw, fh = f.shape[1], f.shape[0]
+        cv2.rectangle(f, (0, 0), (fw, fh), (15, 15, 15), -1)
+        cv2.rectangle(f, (15, 15), (fw - 15, fh - 15), col, 8)
+        cv2.putText(f, t_title, (40, fh // 2 - 50), cv2.FONT_HERSHEY_SIMPLEX, 1.2, col, 3)
+        y_offset = fh // 2 + 10
         for line in t_sub.split(" | "):
             cv2.putText(f, line, (45, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (240, 240, 240), 2)
             y_offset += 35
@@ -248,20 +261,13 @@ class SmartDoorApp:
         self.spoof_score = sp.get("score_real", 1.0)
         spoof_label = sp.get("label_name", "FOTO/VIDEO") 
         
-        # --- PERBAIKAN: ARGUMEN FUNGSI log_spoofing_async BERDASARKAN POSISI ---
         if not sp.get("real", True):
             self.fake_frames += 1 
             if self.fake_frames == 10: 
                 if hasattr(self.db, 'log_spoofing_async'): 
-                    self.db.log_spoofing_async(
-                        sp.get("score_real", 0.0), 
-                        sp.get("score_photo", 0.0), 
-                        sp.get("score_video", 0.0), 
-                        spoof_label
-                    )
+                    self.db.log_spoofing_async(sp.get("score_real", 0.0), sp.get("score_photo", 0.0), sp.get("score_video", 0.0), spoof_label)
                 self._fail(f"{spoof_label} (Skor: {self.spoof_score:.2f})")
             return
-        # -------------------------------------------------------------------------
         
         self.fake_frames = 0
         
@@ -273,12 +279,9 @@ class SmartDoorApp:
         mask_live = np.ones((fh_l, fw_l), dtype=bool); mask_live[y1_l:y2_l, x1_l:x2_l] = False
         L_bg_live = np.mean(gray_live[mask_live]) if np.any(mask_live) else L_live
 
-        if (L_bg_live - L_live) > 40 and L_bg_live > 120: 
-            l_str = f"Backlight (B:{L_bg_live:.0f})"
-        elif L_bg_live < 85 or L_live < 85: 
-            l_str = f"Low Light (B:{L_bg_live:.0f})"
-        else: 
-            l_str = f"Normal (B:{L_bg_live:.0f})"
+        if (L_bg_live - L_live) > 40 and L_bg_live > 120: l_str = f"Backlight (B:{L_bg_live:.0f})"
+        elif L_bg_live < 85 or L_live < 85: l_str = f"Low Light (B:{L_bg_live:.0f})"
+        else: l_str = f"Normal (B:{L_bg_live:.0f})"
 
         if self.state in (ValidationState.IDLE, ValidationState.RECOGNIZING):
             if self.state == ValidationState.IDLE: self.state, self.auth_start = ValidationState.RECOGNIZING, time.time(); return
@@ -330,12 +333,9 @@ class SmartDoorApp:
         mask[y1:y2, x1:x2] = False
         L_bg = np.mean(gray[mask]) if np.any(mask) else L_face
 
-        if (L_bg - L_face) > 40 and L_bg > 120: 
-            light_cond = f"Backlight (B:{L_bg:.0f})"
-        elif L_bg < 85 or L_face < 85: 
-            light_cond = f"Low Light (B:{L_bg:.0f})"
-        else: 
-            light_cond = f"Normal (B:{L_bg:.0f})"
+        if (L_bg - L_face) > 40 and L_bg > 120: light_cond = f"Backlight (B:{L_bg:.0f})"
+        elif L_bg < 85 or L_face < 85: light_cond = f"Low Light (B:{L_bg:.0f})"
+        else: light_cond = f"Normal (B:{L_bg:.0f})"
 
         final_acc = min(100.0, max(0.0, 90.0 + ((self.match_score - getattr(self, 'active_dyn_thr', 0.48)) / (1.0 - getattr(self, 'active_dyn_thr', 0.48))) * 10.0))
         self.ui.update({"status": f"DIBUKA ({final_acc:.2f}%)", "color": config.COLOR_GREEN, "instr": ""})
@@ -343,12 +343,13 @@ class SmartDoorApp:
 
     def run(self):
         window_name = "Sistem Edge"
+        
+        # --- KEMBALI KE WINDOW AUTOSIZE SESUAI CONFIG ---
         cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
+        
         try:
             while self.running:
-                if state.MODE == "REGISTER": 
-                    UIHelper.log("Sistem beralih ke Mode Registrasi...", "SYSTEM")
-                    break 
+                if state.MODE == "REGISTER": break 
 
                 ret, frame = self.cam.read()
                 if ret:
@@ -365,7 +366,7 @@ class SmartDoorApp:
             if hasattr(self, 'cam') and self.cam: self.cam.stop()
 
 # ==============================================================================
-# 5. APLIKASI REGISTRASI WAJAH
+# 5. APLIKASI REGISTRASI WAJAH (Optimized Async)
 # ==============================================================================
 class FaceRegistrationApp:
     POSE_CFG = {RegistrationStage.YAW: ("yaw_snapshots", "yaw_left", "yaw_right", "yaw", getattr(config, 'YAW_THRESHOLD', 25.0)), RegistrationStage.PITCH: ("pitch_snapshots", "pitch_up", "pitch_down", "pitch", getattr(config, 'PITCH_THRESHOLD', 20.0)), RegistrationStage.ROLL: ("roll_snapshots", "roll_left", "roll_right", "roll", getattr(config, 'ROLL_THRESHOLD', 25.0))}
@@ -375,13 +376,15 @@ class FaceRegistrationApp:
         self.last_match_score, self.fake_frames, self.latency = 0.0, 0, 0.0 
         self.ext_embs = [] 
         
-        self.is_running, self.display_frame, self.frame_lock = True, None, threading.Lock()
+        self.is_running, self.lock, self.shared_frame = True, threading.Lock(), None
+        self.ui_state = {"face_obj": None, "bbox": None, "hud_txt": "", "term_txt": "", "instr": "", "prog": "", "status": "Mencari...", "col": config.COLOR_CYAN}
+        
         self.cap_data = {"facemesh_vector": None, "yaw_snapshots": [], "pitch_snapshots": [], "roll_snapshots": [], "blink_closed": None, "blink_open": None, "headpose_vector": None}
         self._pose_buf, self._blink_buf, self._prev_step = {"yaw": {}, "pitch": {}, "roll": {}}, {"closed": None, "open": None}, "FACEMESH"
         
         self.db = FaceDatabase()
         if self.db.check_user_exists(self.name): 
-            UIHelper.log(f"'{self.name}' sudah terdaftar!", "ERROR")
+            self.ui_state["overlay_msg"] = ("❌ SUDAH TERDAFTAR!", f"User: {self.name}", config.COLOR_RED)
             self.stage = RegistrationStage.COMPLETE; return
 
         self.cam = CameraStream(config.CAMERA_INDEX, config.FRAME_WIDTH, config.FRAME_HEIGHT).start()
@@ -436,32 +439,28 @@ class FaceRegistrationApp:
             self.cap_data.update({"blink_closed": bc, "blink_open": bo})
         self._prev_step, self.stage = cur_step, STEP_TO_STAGE.get(cur_step, self.stage)
 
-    def _process_extraction(self, raw_frame, frame, face, display, pose, score_txt, sp_score):
+    def _process_extraction(self, raw_frame, frame, face, pose, score_txt, sp_score):
         missing = [k for k, v in [("FaceMesh", self.cap_data["facemesh_vector"] is not None), ("Yaw", len(self.cap_data["yaw_snapshots"])>1), ("Pitch", len(self.cap_data["pitch_snapshots"])>1), ("Roll", len(self.cap_data["roll_snapshots"])>1), ("Blink", self.cap_data["blink_closed"] is not None)] if not v]
-        if missing: Helpers.show_msg(display, "❌ GAGAL!", f"Kurang: {','.join(missing)}", config.COLOR_RED); time.sleep(4); self.stage = RegistrationStage.COMPLETE; return
+        if missing: 
+            self.ui_state["overlay_msg"] = ("❌ GAGAL!", f"Kurang: {','.join(missing)}", config.COLOR_RED)
+            time.sleep(3); self.stage = RegistrationStage.COMPLETE; return
 
         bx, by, bw, bh = face.bbox
         fh, fw = frame.shape[:2]
         x1, y1 = max(0, bx), max(0, by)
         x2, y2 = min(fw, bx + bw), min(fh, by + bh)
-        safe_bbox = [x1, y1, x2 - x1, y2 - y1]
 
         gray = cv2.cvtColor(raw_frame, cv2.COLOR_BGR2GRAY)
         face_roi = gray[y1:y2, x1:x2]
         L = np.mean(face_roi) if face_roi.size > 0 else 100.0
-        
-        mask = np.ones((fh, fw), dtype=bool)
-        mask[y1:y2, x1:x2] = False
+        mask = np.ones((fh, fw), dtype=bool); mask[y1:y2, x1:x2] = False
         L_bg = np.mean(gray[mask]) if np.any(mask) else L
         
-        if (L_bg - L) > 40 and L_bg > 120: 
-            light_cond = f"Backlight (B:{L_bg:.0f})"
-        elif L_bg < 85 or L < 85: 
-            light_cond = f"Low Light (B:{L_bg:.0f})"
-        else: 
-            light_cond = f"Normal (B:{L_bg:.0f})"
+        if (L_bg - L) > 40 and L_bg > 120: light_cond = f"Backlight (B:{L_bg:.0f})"
+        elif L_bg < 85 or L < 85: light_cond = f"Low Light (B:{L_bg:.0f})"
+        else: light_cond = f"Normal (B:{L_bg:.0f})"
 
-        raw_emb = self.model.get_embedding(self.model.crop_face(frame, safe_bbox))
+        raw_emb = self.model.get_embedding(self.model.crop_face(frame, [x1, y1, x2-x1, y2-y1]))
         if raw_emb is not None:
             emb_flat = np.array(raw_emb, dtype=np.float32).flatten()
             self.ext_embs.append(emb_flat / (np.linalg.norm(emb_flat) + 1e-6))
@@ -476,42 +475,33 @@ class FaceRegistrationApp:
         
         anti_dup_thr = getattr(config, 'ANTI_DUPLICATE_THRESHOLD', 0.48)
         if match.get("name") and self.last_match_score >= anti_dup_thr and os.getenv("ALLOW_DUPLICATE", "false").lower() != "true": 
-            Helpers.show_msg(display, "❌ WAJAH SUDAH TERDAFTAR!", f"User: {match['name']} (Sim: {match['score']:.4f})", config.COLOR_RED)
+            self.ui_state["overlay_msg"] = ("❌ WAJAH SUDAH TERDAFTAR!", f"User: {match['name']} (Sim: {match['score']:.4f})", config.COLOR_RED)
         elif self.db.save_face(self.name, avg_emb.tolist(), self.cap_data): 
-            Helpers.show_msg(display, "✅ REGISTRASI BERHASIL!", f"User: {self.name} | VektorTersimpan", config.COLOR_GREEN)
+            self.ui_state["overlay_msg"] = ("✅ REGISTRASI BERHASIL!", f"User: {self.name} | Disimpan", config.COLOR_GREEN)
         else: 
-            Helpers.show_msg(display, "❌ GAGAL!", "DB Error", config.COLOR_RED)
+            self.ui_state["overlay_msg"] = ("❌ GAGAL!", "Database Error", config.COLOR_RED)
             
-        with self.frame_lock: self.display_frame = display.copy()
-        time.sleep(1.5); self.stage = RegistrationStage.COMPLETE 
+        time.sleep(2.0); self.stage = RegistrationStage.COMPLETE 
 
     def _process_thread(self):
         try:
-            bbox_memory = None
             while self.is_running and self.stage != RegistrationStage.COMPLETE:
                 t_start = time.time()
-                ret, frame = self.cam.read()
-                if not ret: time.sleep(0.01); continue
+                with self.lock: raw = self.shared_frame.copy() if self.shared_frame is not None else None
+                if raw is None: time.sleep(0.01); continue
                 
-                raw = frame.copy()
                 enhanced = UIHelper.enhance_frame(raw)
-                display = raw.copy()
                 faces = self.detector.detect(enhanced)
                 
                 if not faces: 
                     self.missed_frames += 1
                     if self.missed_frames >= 5: 
-                        bbox_memory = None; display = cv2.flip(display, 1) 
-                        Helpers.draw_hud(display, self.stage, "Hadapkan wajah", "", "", "NO FACE", None, config.COLOR_RED)
-                    elif bbox_memory: 
-                        display = cv2.flip(display, 1) 
-                        Helpers.draw_hud(display, self.stage, "Menganalisa...", "", "", "TRACKING", bbox_memory, config.COLOR_YELLOW)
-                    with self.frame_lock: self.display_frame = display
+                        self.ui_state.update({"face_obj": None, "bbox": None, "instr": "Hadapkan wajah", "status": "NO FACE", "col": config.COLOR_RED})
                     continue
                 
                 self.missed_frames = 0
-                face = faces[0]; bbox_memory = face.bbox
-                display = cv2.flip(self.detector.draw(display, face), 1)
+                face = faces[0]
+                self.ui_state["face_obj"] = face 
                 
                 pose = self.liveness.pose_estimator.estimate(face, self.detector)
                 ear_val = (Helpers.capture_blink(face) or {}).get("avg_ear", 0.0)
@@ -519,7 +509,7 @@ class FaceRegistrationApp:
                 sp_score, sp_real, sp_label = 1.0, True, "ASLI"
                 if self.stage in (RegistrationStage.FACEMESH, RegistrationStage.BLINK, RegistrationStage.EXTRACTION):
                     sp = self.anti_spoof.is_real(raw, face.bbox)
-                    sp_score, sp_real, sp_label = sp.get("score_real", 1.0), sp.get("real", True), sp.get("label_name", "LAYAR/VIDEO").upper() 
+                    sp_score, sp_real, sp_label = sp.get("score_real", 1.0), sp.get("real", True), sp.get("label_name", "LAYAR").upper() 
                 
                 fh_l, fw_l = raw.shape[:2]
                 bx, by, bw, bh = face.bbox
@@ -530,48 +520,63 @@ class FaceRegistrationApp:
                 mask_live = np.ones((fh_l, fw_l), dtype=bool); mask_live[y1_l:y2_l, x1_l:x2_l] = False
                 L_bg_live = np.mean(gray_live[mask_live]) if np.any(mask_live) else L_live
 
-                if (L_bg_live - L_live) > 40 and L_bg_live > 120: 
-                    l_str = f"Backlight (B:{L_bg_live:.0f})"
-                elif L_bg_live < 85 or L_live < 85: 
-                    l_str = f"Low Light (B:{L_bg_live:.0f})"
-                else: 
-                    l_str = f"Normal (B:{L_bg_live:.0f})"
+                if (L_bg_live - L_live) > 40 and L_bg_live > 120: l_str = f"Backlight (B:{L_bg_live:.0f})"
+                elif L_bg_live < 85 or L_live < 85: l_str = f"Low Light (B:{L_bg_live:.0f})"
+                else: l_str = f"Normal (B:{L_bg_live:.0f})"
                 
                 hud_txt, term_txt = self._generate_metric_text(pose, ear_val, sp_score, l_str)
                 
                 if not sp_real:
                     self.fake_frames += 1
-                    Helpers.draw_hud(display, self.stage, "❌ DETEKSI SPOOFING!", f"Palsu: {sp_score:.2f}", hud_txt, f"{sp_label} (Spoof: {sp_score:.2f})", face.bbox, config.COLOR_RED)
-                    with self.frame_lock: self.display_frame = display
+                    if hasattr(self.db, 'log_spoofing_async') and self.fake_frames == 10:
+                        self.db.log_spoofing_async(sp.get("score_real", 0.0), sp.get("score_photo", 0.0), sp.get("score_video", 0.0), sp_label)
+                    self.ui_state.update({"bbox": face.bbox, "instr": "❌ DETEKSI SPOOFING!", "prog": f"Palsu: {sp_score:.2f}", "hud_txt": hud_txt, "status": f"{sp_label} (Spoof: {sp_score:.2f})", "col": config.COLOR_RED})
                     continue 
                 else: self.fake_frames = 0
 
-                instr = ""
                 if self.stage != RegistrationStage.EXTRACTION and not self.in_ext:
                     self._record_data_buffers(face, pose) 
                     res = self.liveness.update_register(face, self.detector)
                     self._commit_stage_data(res["step"])
-                    instr = res.get("instruction", "")
-                    Helpers.draw_hud(display, self.stage, instr, res.get("progress",""), hud_txt, "VALIDATING", face.bbox, config.COLOR_GREEN if res["step"] == "DONE" else config.COLOR_CYAN)
+                    self.ui_state.update({"bbox": face.bbox, "instr": res.get("instruction", ""), "prog": res.get("progress",""), "hud_txt": hud_txt, "status": "VALIDATING", "col": config.COLOR_GREEN if res["step"] == "DONE" else config.COLOR_CYAN})
                 elif not self.in_ext: 
-                    self._process_extraction(raw, enhanced, face, display, pose, hud_txt, sp_score)
+                    self._process_extraction(raw, enhanced, face, pose, hud_txt, sp_score)
 
                 self.latency = (time.time() - t_start) * 1000.0
-                with self.frame_lock: self.display_frame = display
         finally: 
             self.is_running = False
 
     def run(self):
         if self.stage == RegistrationStage.COMPLETE: return
         threading.Thread(target=self._process_thread, daemon=True).start()
+        
+        window_name = "Sistem Edge"
+        
+        # --- KEMBALI KE WINDOW AUTOSIZE SESUAI CONFIG ---
+        cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
+        
         try:
-            cv2.namedWindow("Sistem Edge", cv2.WINDOW_AUTOSIZE)
             while self.is_running and self.stage != RegistrationStage.COMPLETE:
-                with self.frame_lock: frame = self.display_frame.copy() if self.display_frame is not None else None
-                
-                if frame is not None: 
-                    state.CURRENT_FRAME = frame.copy() 
-                    cv2.imshow("Sistem Edge", frame)
+                ret, frame = self.cam.read()
+                if ret:
+                    with self.lock: self.shared_frame = frame.copy()
+                    
+                    display = frame.copy()
+                    
+                    st = self.ui_state
+                    if st.get("face_obj"):
+                        try: display = self.detector.draw(display, st["face_obj"])
+                        except: pass
+                    
+                    display = cv2.flip(display, 1)
+                    
+                    if "overlay_msg" in st:
+                        Helpers.show_msg(display, *st["overlay_msg"])
+                    else:
+                        Helpers.draw_hud(display, self.stage, st.get("instr",""), st.get("prog",""), st.get("hud_txt",""), st.get("status",""), st.get("bbox"), st.get("col", config.COLOR_CYAN))
+                    
+                    state.CURRENT_FRAME = display.copy() 
+                    cv2.imshow(window_name, display)
                     
                 if cv2.waitKey(1) & 0xFF == ord("q"): self.is_running = False; break
         finally: 

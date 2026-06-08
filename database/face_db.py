@@ -119,6 +119,7 @@ class FaceDatabase:
 
     def _get_connection(self):
         conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=10.0)
+        conn.execute("PRAGMA foreign_keys = ON;") # PASTIKAN FOREIGN KEY AKTIF DI SQLITE
         conn.execute("PRAGMA journal_mode = MEMORY;") 
         conn.execute("PRAGMA synchronous = NORMAL;")
         return conn
@@ -127,21 +128,25 @@ class FaceDatabase:
         with self.db_lock, closing(self._get_connection()) as conn:
             c = conn.cursor()
             
-            # --- PENYESUAIAN: Menggunakan reg_latency_ms dan auth_latency_ms ---
+            # Master Data
             c.execute('''CREATE TABLE IF NOT EXISTS registered_faces (
                 nim TEXT PRIMARY KEY, name TEXT, embedding TEXT, liveness_config TEXT,
                 yaw_score TEXT, pitch_score TEXT, roll_score TEXT, blink_score TEXT,
                 reg_latency_ms REAL, created_at TEXT, is_synced INTEGER DEFAULT 0)''')
             
+            # PERBAIKAN: Mengaitkan nim sebagai FOREIGN KEY ke registered_faces(nim)
             c.execute('''CREATE TABLE IF NOT EXISTS register_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, nim TEXT, status TEXT,
                 yaw_score TEXT, pitch_score TEXT, roll_score TEXT, blink_score TEXT,
-                light_condition TEXT, reg_latency_ms REAL, created_at TEXT, is_synced INTEGER DEFAULT 0)''')
+                light_condition TEXT, reg_latency_ms REAL, created_at TEXT, is_synced INTEGER DEFAULT 0,
+                FOREIGN KEY(nim) REFERENCES registered_faces(nim) ON DELETE CASCADE)''')
             
+            # PERBAIKAN: Mengaitkan nim sebagai FOREIGN KEY ke registered_faces(nim)
             c.execute('''CREATE TABLE IF NOT EXISTS access_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, nim TEXT, status TEXT,
                 headpose_score TEXT, blink_score TEXT, accuracy REAL, light_condition TEXT,
-                auth_latency_ms REAL, created_at TEXT, is_synced INTEGER DEFAULT 0)''')
+                auth_latency_ms REAL, created_at TEXT, is_synced INTEGER DEFAULT 0,
+                FOREIGN KEY(nim) REFERENCES registered_faces(nim) ON DELETE SET NULL)''')
             
             c.execute('''CREATE TABLE IF NOT EXISTS spoofing_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, spoof_score REAL, spoof_type TEXT,
@@ -182,12 +187,12 @@ class FaceDatabase:
             p = DataTransformer.prepare_payload(name, nim, embedding, cap_data)
             lc = cap_data.get("light_condition", "N/A")
             created_at = p.get("registered_at", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
-            
-            # PENYESUAIAN: Tarik metrik latensi ms dari parameter cap_data
             reg_lat = float(cap_data.get("reg_latency_ms", 0.0))
 
             with self.db_lock, closing(self._get_connection()) as conn:
                 c = conn.cursor()
+                
+                # 1. Simpan/Update data induk terlebih dahulu agar tidak melanggar aturan Foreign Key di tabel log
                 c.execute("""INSERT INTO registered_faces 
                     (nim, name, embedding, liveness_config, yaw_score, pitch_score, roll_score, blink_score, reg_latency_ms, created_at, is_synced)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
@@ -198,6 +203,7 @@ class FaceDatabase:
                     (nim, name, json.dumps(p["embedding"]), json.dumps(p.get("liveness_config", {})), 
                      p["yaw_score_clean"] or "-", p["pitch_score_clean"] or "-", p["roll_score_clean"] or "-", p["blink_score_clean"] or "-", reg_lat, created_at))
                 
+                # 2. Simpan log transaksi (Aman karena master data sudah ada)
                 c.execute("""INSERT INTO register_logs 
                     (name, nim, status, yaw_score, pitch_score, roll_score, blink_score, light_condition, reg_latency_ms, created_at, is_synced)
                     VALUES (?, ?, 'SUCCESS', ?, ?, ?, ?, ?, ?, ?, 0)""",
@@ -209,6 +215,7 @@ class FaceDatabase:
             return True
         except Exception: 
             traceback.print_exc()
+            # Jika registrasi gagal total ke tabel induk, log_register_async tetap dipanggil (NIM tidak wajib terdaftar dulu jika status FAILED)
             self.log_register_async(name, nim, "FAILED", light_cond="N/A", cap_data=cap_data)
             return False
 
@@ -242,15 +249,17 @@ class FaceDatabase:
             for r in res.data:
                 cursor.execute(f"SELECT 1 FROM {table_name} WHERE created_at = ?", (r["created_at"],))
                 if not cursor.fetchone():
+                    # Jika data NIM log tidak ada di local induk, abaikan baris ini untuk mencegah kegagalan Foreign Key
+                    if "nim" in r and r["nim"] is not None:
+                        cursor.execute("SELECT 1 FROM registered_faces WHERE nim = ?", (r["nim"],))
+                        if not cursor.fetchone(): continue
+
                     placeholders = ", ".join(["?"] * (len(columns) + 1))
                     cols_str = ", ".join(columns) + ", is_synced"
                     num_fields = ["accuracy", "spoof_score", "reg_latency_ms", "auth_latency_ms", "spoof_latency_ms"]
                     vals = [r.get(c, (0.0 if c in num_fields else "-")) for c in columns] + [1]
                     cursor.execute(f"INSERT INTO {table_name} ({cols_str}) VALUES ({placeholders})", vals)
 
-    # --- FUNGSI LOGGING BACKGROUND (ANTI-LAG) ---
-    # DIPERBAIKI: Timestamp dibuat di MAIN THREAD agar urutan terjaga kronologis
-    
     def log_register_async(self, name, nim, status, message=None, light_cond="N/A", cap_data=None):
         created_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         def _task():
@@ -270,6 +279,13 @@ class FaceDatabase:
                 
             try:
                 with self.db_lock, closing(self._get_connection()) as conn:
+                    # PERBAIKAN VALIDASI: Cek apakah NIM terdaftar sebelum log sukses dimasukkan
+                    if status == "SUCCESS":
+                        conn.cursor().execute("SELECT 1 FROM registered_faces WHERE nim = ?", (nim,))
+                        if not conn.cursor().fetchone(): 
+                            print(f"[DB Error] Gagal mencatat log SUCCESS karena NIM {nim} tidak ada di master.")
+                            return
+                    
                     conn.execute("""INSERT INTO register_logs 
                         (name, nim, status, yaw_score, pitch_score, roll_score, blink_score, light_condition, reg_latency_ms, created_at, is_synced)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
@@ -295,10 +311,19 @@ class FaceDatabase:
 
             try:
                 with self.db_lock, closing(self._get_connection()) as conn:
+                    # PERBAIKAN VALIDASI: Jika status sukses/dikenali, pastikan NIM ada di data induk.
+                    # Jika tidak ada (anonim/orang asing), set NIM jadi NULL agar tidak melanggar Foreign Key CONSTRAINT.
+                    target_nim = nim
+                    if target_nim:
+                        c_check = conn.cursor()
+                        c_check.execute("SELECT 1 FROM registered_faces WHERE nim = ?", (target_nim,))
+                        if not c_check.fetchone():
+                            target_nim = None # Jadikan NULL jika wajah tidak dikenali/tidak ada di database master
+                    
                     conn.execute("""INSERT INTO access_logs 
                         (name, nim, status, headpose_score, blink_score, accuracy, light_condition, auth_latency_ms, created_at, is_synced)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
-                        (user_name, nim, status, headpose_str.strip(" | ") or "-", blink_str.strip(" | ") or "-", float(accuracy), light_cond, float(auth_latency_ms), created_at))
+                        (user_name, target_nim, status, headpose_str.strip(" | ") or "-", blink_str.strip(" | ") or "-", float(accuracy), light_cond, float(auth_latency_ms), created_at))
                     conn.commit()
                 self.sync_trigger.set() 
             except Exception as e:
@@ -362,6 +387,11 @@ class FaceDatabase:
                     try:
                         c.execute("SELECT id, name, nim, status, yaw_score, pitch_score, roll_score, blink_score, light_condition, reg_latency_ms, created_at FROM register_logs WHERE is_synced = 0")
                         for r in c.fetchall():
+                            # Cek validasi Foreign Key sebelum push cloud
+                            if r[2] is not None:
+                                c.execute("SELECT 1 FROM registered_faces WHERE nim = ?", (r[2],))
+                                if not c.fetchone(): continue
+                                
                             payload = {"name": r[1], "nim": r[2], "status": r[3], "yaw_score": r[4] or "-", "pitch_score": r[5] or "-", "roll_score": r[6] or "-", "blink_score": r[7] or "-", "light_condition": r[8] or "-", "reg_latency_ms": float(r[9] or 0.0), "created_at": r[10]}
                             self.client.table("register_logs").insert(payload).execute()
                             c.execute("UPDATE register_logs SET is_synced = 1 WHERE id = ?", (r[0],))
@@ -371,6 +401,11 @@ class FaceDatabase:
                     try:
                         c.execute("SELECT id, name, nim, status, headpose_score, blink_score, accuracy, light_condition, auth_latency_ms, created_at FROM access_logs WHERE is_synced = 0")
                         for r in c.fetchall():
+                            # Cek validasi Foreign Key sebelum push cloud
+                            if r[2] is not None:
+                                c.execute("SELECT 1 FROM registered_faces WHERE nim = ?", (r[2],))
+                                if not c.fetchone(): continue
+
                             payload = {"name": r[1], "nim": r[2], "status": r[3], "headpose_score": r[4] or "-", "blink_score": r[5] or "-", "accuracy": float(r[6] or 0.0), "light_condition": r[7] or "-", "auth_latency_ms": float(r[8] or 0.0), "created_at": r[9]}
                             self.client.table("access_logs").insert(payload).execute()
                             c.execute("UPDATE access_logs SET is_synced = 1 WHERE id = ?", (r[0],))

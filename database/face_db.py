@@ -134,14 +134,12 @@ class FaceDatabase:
                 yaw_score TEXT, pitch_score TEXT, roll_score TEXT, blink_score TEXT,
                 reg_latency_ms REAL, created_at TEXT, is_synced INTEGER DEFAULT 0)''')
             
-            # PERBAIKAN: Mengaitkan nim sebagai FOREIGN KEY ke registered_faces(nim)
             c.execute('''CREATE TABLE IF NOT EXISTS register_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, nim TEXT, status TEXT,
                 yaw_score TEXT, pitch_score TEXT, roll_score TEXT, blink_score TEXT,
                 light_condition TEXT, reg_latency_ms REAL, created_at TEXT, is_synced INTEGER DEFAULT 0,
                 FOREIGN KEY(nim) REFERENCES registered_faces(nim) ON DELETE CASCADE)''')
             
-            # PERBAIKAN: Mengaitkan nim sebagai FOREIGN KEY ke registered_faces(nim)
             c.execute('''CREATE TABLE IF NOT EXISTS access_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, nim TEXT, status TEXT,
                 headpose_score TEXT, blink_score TEXT, accuracy REAL, light_condition TEXT,
@@ -192,7 +190,6 @@ class FaceDatabase:
             with self.db_lock, closing(self._get_connection()) as conn:
                 c = conn.cursor()
                 
-                # 1. Simpan/Update data induk terlebih dahulu agar tidak melanggar aturan Foreign Key di tabel log
                 c.execute("""INSERT INTO registered_faces 
                     (nim, name, embedding, liveness_config, yaw_score, pitch_score, roll_score, blink_score, reg_latency_ms, created_at, is_synced)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
@@ -203,7 +200,6 @@ class FaceDatabase:
                     (nim, name, json.dumps(p["embedding"]), json.dumps(p.get("liveness_config", {})), 
                      p["yaw_score_clean"] or "-", p["pitch_score_clean"] or "-", p["roll_score_clean"] or "-", p["blink_score_clean"] or "-", reg_lat, created_at))
                 
-                # 2. Simpan log transaksi (Aman karena master data sudah ada)
                 c.execute("""INSERT INTO register_logs 
                     (name, nim, status, yaw_score, pitch_score, roll_score, blink_score, light_condition, reg_latency_ms, created_at, is_synced)
                     VALUES (?, ?, 'SUCCESS', ?, ?, ?, ?, ?, ?, ?, 0)""",
@@ -213,9 +209,9 @@ class FaceDatabase:
             print(f"\n[Database] ✅ Wajah '{name} ({nim})' tersimpan (Latensi Total: {reg_lat:.2f}ms). Memicu sinkronisasi ke Supabase...")
             self.sync_trigger.set() 
             return True
-        except Exception: 
+        except Exception as e: 
+            print(f"❌ [Database Error] Gagal save_face ke SQLite lokal: {e}")
             traceback.print_exc()
-            # Jika registrasi gagal total ke tabel induk, log_register_async tetap dipanggil (NIM tidak wajib terdaftar dulu jika status FAILED)
             self.log_register_async(name, nim, "FAILED", light_cond="N/A", cap_data=cap_data)
             return False
 
@@ -249,7 +245,6 @@ class FaceDatabase:
             for r in res.data:
                 cursor.execute(f"SELECT 1 FROM {table_name} WHERE created_at = ?", (r["created_at"],))
                 if not cursor.fetchone():
-                    # Jika data NIM log tidak ada di local induk, abaikan baris ini untuk mencegah kegagalan Foreign Key
                     if "nim" in r and r["nim"] is not None:
                         cursor.execute("SELECT 1 FROM registered_faces WHERE nim = ?", (r["nim"],))
                         if not cursor.fetchone(): continue
@@ -275,15 +270,15 @@ class FaceDatabase:
                     p = p_dummy.get("pitch_score_log", "-")
                     r = p_dummy.get("roll_score_log", "-")
                     b = p_dummy.get("blink_score_log", "-")
-                except Exception: pass
+                except Exception as e: 
+                    print(f"⚠️ [DB Warning] log_register_async gagal memparsing data dummy: {e}")
                 
             try:
                 with self.db_lock, closing(self._get_connection()) as conn:
-                    # PERBAIKAN VALIDASI: Cek apakah NIM terdaftar sebelum log sukses dimasukkan
                     if status == "SUCCESS":
                         conn.cursor().execute("SELECT 1 FROM registered_faces WHERE nim = ?", (nim,))
                         if not conn.cursor().fetchone(): 
-                            print(f"[DB Error] Gagal mencatat log SUCCESS karena NIM {nim} tidak ada di master.")
+                            print(f"❌ [DB Error] Gagal mencatat log SUCCESS karena NIM {nim} tidak ada di master.")
                             return
                     
                     conn.execute("""INSERT INTO register_logs 
@@ -293,7 +288,7 @@ class FaceDatabase:
                     conn.commit()
                 self.sync_trigger.set() 
             except Exception as e:
-                print(f"[DB Error] log_register_async: {e}")
+                print(f"❌ [DB Error] log_register_async: {e}")
                 
         threading.Thread(target=_task, daemon=True).start()
 
@@ -311,14 +306,12 @@ class FaceDatabase:
 
             try:
                 with self.db_lock, closing(self._get_connection()) as conn:
-                    # PERBAIKAN VALIDASI: Jika status sukses/dikenali, pastikan NIM ada di data induk.
-                    # Jika tidak ada (anonim/orang asing), set NIM jadi NULL agar tidak melanggar Foreign Key CONSTRAINT.
                     target_nim = nim
                     if target_nim:
                         c_check = conn.cursor()
                         c_check.execute("SELECT 1 FROM registered_faces WHERE nim = ?", (target_nim,))
                         if not c_check.fetchone():
-                            target_nim = None # Jadikan NULL jika wajah tidak dikenali/tidak ada di database master
+                            target_nim = None
                     
                     conn.execute("""INSERT INTO access_logs 
                         (name, nim, status, headpose_score, blink_score, accuracy, light_condition, auth_latency_ms, created_at, is_synced)
@@ -327,7 +320,7 @@ class FaceDatabase:
                     conn.commit()
                 self.sync_trigger.set() 
             except Exception as e:
-                print(f"[DB Error] push_access_log_async: {e}")
+                print(f"❌ [DB Error] push_access_log_async: {e}")
                 
         threading.Thread(target=_task, daemon=True).start()
 
@@ -341,7 +334,7 @@ class FaceDatabase:
                     conn.commit()
                 self.sync_trigger.set()
             except Exception as e:
-                print(f"[DB Error] log_spoofing_async: {e}")
+                print(f"❌ [DB Error] log_spoofing_async: {e}")
                 
         threading.Thread(target=_task, daemon=True).start()
 
@@ -370,8 +363,10 @@ class FaceDatabase:
                                 else: self.client.table(tbl).delete().eq('created_at', rec_id).execute()
                                 
                                 c.execute("DELETE FROM sync_deletes WHERE id = ?", (del_id,))
-                            except Exception as e: pass
-                    except Exception as e: pass
+                            except Exception as e: 
+                                print(f"❌ [Sync Error] Gagal delete cloud pada tabel {tbl}: {e}")
+                    except Exception as e: 
+                        print(f"❌ [Sync Error] Gagal membaca sync_deletes lokal: {e}")
                     
                     synced_count = 0
                     
@@ -382,12 +377,12 @@ class FaceDatabase:
                             self.client.table("registered_faces").upsert(payload, on_conflict="nim").execute()
                             c.execute("UPDATE registered_faces SET is_synced = 1 WHERE nim = ?", (r[0],))
                             synced_count += 1
-                    except Exception as e: pass
+                    except Exception as e: 
+                        print(f"❌ [Sync Error] Gagal PUSH registered_faces (Master): {e}")
                     
                     try:
                         c.execute("SELECT id, name, nim, status, yaw_score, pitch_score, roll_score, blink_score, light_condition, reg_latency_ms, created_at FROM register_logs WHERE is_synced = 0")
                         for r in c.fetchall():
-                            # Cek validasi Foreign Key sebelum push cloud
                             if r[2] is not None:
                                 c.execute("SELECT 1 FROM registered_faces WHERE nim = ?", (r[2],))
                                 if not c.fetchone(): continue
@@ -396,12 +391,12 @@ class FaceDatabase:
                             self.client.table("register_logs").insert(payload).execute()
                             c.execute("UPDATE register_logs SET is_synced = 1 WHERE id = ?", (r[0],))
                             synced_count += 1
-                    except Exception as e: pass
+                    except Exception as e: 
+                        print(f"❌ [Sync Error] Gagal PUSH register_logs: {e}")
                         
                     try:
                         c.execute("SELECT id, name, nim, status, headpose_score, blink_score, accuracy, light_condition, auth_latency_ms, created_at FROM access_logs WHERE is_synced = 0")
                         for r in c.fetchall():
-                            # Cek validasi Foreign Key sebelum push cloud
                             if r[2] is not None:
                                 c.execute("SELECT 1 FROM registered_faces WHERE nim = ?", (r[2],))
                                 if not c.fetchone(): continue
@@ -410,7 +405,8 @@ class FaceDatabase:
                             self.client.table("access_logs").insert(payload).execute()
                             c.execute("UPDATE access_logs SET is_synced = 1 WHERE id = ?", (r[0],))
                             synced_count += 1
-                    except Exception as e: pass
+                    except Exception as e: 
+                        print(f"❌ [Sync Error] Gagal PUSH access_logs: {e}")
                         
                     try:
                         c.execute("SELECT id, spoof_score, spoof_type, spoof_latency_ms, created_at FROM spoofing_logs WHERE is_synced = 0")
@@ -424,7 +420,8 @@ class FaceDatabase:
                             self.client.table("spoofing_logs").insert(payload).execute()
                             c.execute("UPDATE spoofing_logs SET is_synced = 1 WHERE id = ?", (r[0],))
                             synced_count += 1
-                    except Exception as e: print(f"[Sync Error] Gagal push spoofing_logs: {e}")
+                    except Exception as e: 
+                        print(f"❌ [Sync Error] Gagal PUSH spoofing_logs: {e}")
                     
                     if synced_count > 0: print(f"\n[Background Sync] ☁️ Berhasil UPLOAD {synced_count} baris data ke Supabase!")
 
@@ -448,17 +445,21 @@ class FaceDatabase:
                                     blink_score=excluded.blink_score, reg_latency_ms=excluded.reg_latency_ms, is_synced=1""",
                                     (r.get("nim", "-"), r.get("name", "-"), json.dumps(r["embedding"]), json.dumps(r.get("liveness_config", {})), 
                                      r.get("yaw_score", "-"), r.get("pitch_score", "-"), r.get("roll_score", "-"), r.get("blink_score", "-"), float(r.get("reg_latency_ms", 0.0)), r.get("created_at", "")))
-                    except Exception as e: pass
+                    except Exception as e: 
+                        print(f"❌ [Sync Error] Gagal PULL registered_faces (Master): {e}")
 
                     try: self._pull_logs_from_supabase(c, "register_logs", ["name", "nim", "status", "yaw_score", "pitch_score", "roll_score", "blink_score", "light_condition", "reg_latency_ms", "created_at"])
-                    except Exception as e: pass
+                    except Exception as e: 
+                        print(f"❌ [Sync Error] Gagal PULL register_logs: {e}")
                     
                     try: self._pull_logs_from_supabase(c, "access_logs", ["name", "nim", "status", "headpose_score", "blink_score", "accuracy", "light_condition", "auth_latency_ms", "created_at"])
-                    except Exception as e: pass
+                    except Exception as e: 
+                        print(f"❌ [Sync Error] Gagal PULL access_logs: {e}")
                     
                     try: self._pull_logs_from_supabase(c, "spoofing_logs", ["spoof_score", "spoof_type", "spoof_latency_ms", "created_at"])
-                    except Exception as e: print(f"[Sync Error] Gagal pull spoofing_logs: {e}")
+                    except Exception as e: 
+                        print(f"❌ [Sync Error] Gagal PULL spoofing_logs: {e}")
                         
                     conn.commit()
             except Exception as e: 
-                print(f"[Fatal Sync Error] Koneksi ke database lokal terganggu: {e}")
+                print(f"❌ [Fatal Sync Error] Koneksi ke database lokal terganggu: {e}")

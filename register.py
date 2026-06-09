@@ -66,31 +66,66 @@ class Helpers:
 
     @staticmethod
     def draw_hud(f, stg, instr, prog, score_txt, status, bbox, col):
+        """Menggambar komponen HUD secara responsif mengikuti aspek rasio LCD 3.5 Inch (480x320)"""
+        h, w = f.shape[:2]
+        
+        # 1. Bounding Box Wajah (Mirror Preview)
         if bbox:
             bx, by, bw, bh = bbox
-            bx = config.FRAME_WIDTH - bx - bw
-            cv2.rectangle(f, (bx, by), (bx+bw, by+bh), col, 3)
-            cv2.rectangle(f, (bx, by-35), (bx+200, by-5), col, -1)
-            cv2.putText(f, status, (bx+5, by-12), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255,255,255), 2)
-        cv2.rectangle(f, (0, 50), (config.FRAME_WIDTH, 185), (20,20,20), -1); cv2.rectangle(f, (0, 50), (config.FRAME_WIDTH, 185), config.COLOR_CYAN, 2)
-        for txt, yp, c, sz, t in [(STAGE_NAMES.get(stg, "Proses..."), 75, config.COLOR_GREEN, 0.85, 2), (instr, 105, config.COLOR_YELLOW, 0.65, 2), (prog, 130, config.COLOR_CYAN, 0.6, 1), (score_txt, 160, config.COLOR_WHITE, 0.55, 1)]:
-            if txt: cv2.putText(f, txt, (20, yp), cv2.FONT_HERSHEY_SIMPLEX, sz, c, t)
-        bx_bar, by_bar, bw_bar, bh_bar, sv = (config.FRAME_WIDTH-350)//2, 15, 350, 25, min(stg.value, 6)
-        cv2.rectangle(f, (bx_bar, by_bar), (bx_bar+bw_bar, by_bar+bh_bar), (30,30,30), -1)
-        if sv > 0: cv2.rectangle(f, (bx_bar, by_bar), (bx_bar + int(bw_bar*(sv-1)/6), by_bar+bh_bar), config.COLOR_GREEN, -1)
-        cv2.rectangle(f, (bx_bar, by_bar), (bx_bar+bw_bar, by_bar+bh_bar), config.COLOR_WHITE, 2)
-        cv2.putText(f, f"Tahap {sv if sv<=5 else 6}/6", (bx_bar+130, by_bar+18), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,255,255), 1)
+            bx = w - bx - bw
+            cv2.rectangle(f, (bx, by), (bx+bw, by+bh), col, 2)
+            
+            # Label mini status di atas kotak wajah
+            lbl_h = 20
+            lbl_y = max(lbl_h, by)
+            cv2.rectangle(f, (bx, lbl_y - lbl_h), (bx + 110, lbl_y), col, -1)
+            cv2.putText(f, status, (bx + 5, lbl_y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255,255,255), 1, cv2.LINE_AA)
+            
+        # 2. Header Status Atas (Samping Kiri) & Progress Bar Tahap (Samping Kanan)
+        cv2.rectangle(f, (0, 0), (w, 32), (25, 25, 25), -1)
+        
+        # Nama Tahap Aktif
+        stage_txt = STAGE_NAMES.get(stg, "Proses...")
+        cv2.putText(f, stage_txt, (10, 21), cv2.FONT_HERSHEY_SIMPLEX, 0.42, config.COLOR_GREEN, 1, cv2.LINE_AA)
+        
+        # Progress Bar Mini (Aman & Proporsional untuk Lebar 480px)
+        sv = min(stg.value, 6)
+        bw_bar, bh_bar = 160, 14
+        bx_bar, by_bar = w - bw_bar - 10, 9
+        cv2.rectangle(f, (bx_bar, by_bar), (bx_bar+bw_bar, by_bar+bh_bar), (45, 45, 45), -1)
+        if sv > 0:
+            cv2.rectangle(f, (bx_bar, by_bar), (bx_bar + int(bw_bar*(sv-1)/6), by_bar+bh_bar), config.COLOR_GREEN, -1)
+        cv2.rectangle(f, (bx_bar, by_bar), (bx_bar+bw_bar, by_bar+bh_bar), (255,255,255), 1)
+        cv2.putText(f, f"Tahap {sv if sv<=5 else 6}/6", (bx_bar + 45, by_bar + 11), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255,255,255), 1, cv2.LINE_AA)
+
+        # 3. Footer Bar Bawah (Menampung Instruksi & Metrik Interaktif)
+        cv2.rectangle(f, (0, h - 70), (w, h), (15, 15, 15), -1)
+        cv2.line(f, (0, h - 70), (w, h - 70), config.COLOR_CYAN, 1)
+        
+        y_pos = h - 52
+        if instr:
+            cv2.putText(f, instr, (15, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.45, config.COLOR_YELLOW, 1, cv2.LINE_AA)
+            y_pos += 18
+        if prog:
+            cv2.putText(f, prog, (15, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.40, config.COLOR_CYAN, 1, cv2.LINE_AA)
+            y_pos += 16
+        if score_txt:
+            cv2.putText(f, score_txt, (15, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.38, config.COLOR_WHITE, 1, cv2.LINE_AA)
 
     @staticmethod
     def show_msg(f, t_title, t_sub, col):
-        cv2.rectangle(f, (0, 0), (config.FRAME_WIDTH, config.FRAME_HEIGHT), (15, 15, 15), -1)
-        cv2.rectangle(f, (15, 15), (config.FRAME_WIDTH - 15, config.FRAME_HEIGHT - 15), col, 8)
-        cv2.putText(f, t_title, (40, config.FRAME_HEIGHT // 2 - 50), cv2.FONT_HERSHEY_SIMPLEX, 1.2, col, 3)
+        """Menggambar layar penuh informasi status akhir secara dinamis dan responsif"""
+        h, w = f.shape[:2]
+        cv2.rectangle(f, (0, 0), (w, h), (15, 15, 15), -1)
+        cv2.rectangle(f, (10, 10), (w - 10, h - 10), col, 4)
+        
+        cv2.putText(f, t_title, (25, h // 2 - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.75, col, 2, cv2.LINE_AA)
+        
         lines = t_sub.split(" | ")
-        y_offset = config.FRAME_HEIGHT // 2 + 10
+        y_offset = h // 2 + 10
         for line in lines:
-            cv2.putText(f, line, (45, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (240, 240, 240), 2)
-            y_offset += 35
+            cv2.putText(f, line, (25, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (240, 240, 240), 1, cv2.LINE_AA)
+            y_offset += 22
 
 class FaceRegistrationApp:
     POSE_CFG = {RegistrationStage.YAW: ("yaw_snapshots", "yaw_left", "yaw_right", "yaw", getattr(config, 'YAW_THRESHOLD', 25.0)), RegistrationStage.PITCH: ("pitch_snapshots", "pitch_up", "pitch_down", "pitch", getattr(config, 'PITCH_THRESHOLD', 20.0)), RegistrationStage.ROLL: ("roll_snapshots", "roll_left", "roll_right", "roll", getattr(config, 'ROLL_THRESHOLD', 25.0))}
@@ -134,7 +169,6 @@ class FaceRegistrationApp:
         
         _log(f"✅ Sistem Inisialisasi Selesai untuk {self.name}.", "SYSTEM")
 
-    # PERBAIKAN: Hapus sp_score dari parameter karena sudah tidak dipakai di log terminal
     def _record_data_buffers(self, face, pose):
         if not self.action_start_time: return
 
@@ -177,7 +211,6 @@ class FaceRegistrationApp:
                         }.get(tag, tag)
                         
                         self.individual_latencies[friendly_name] = current_action_latency
-                        # PERBAIKAN: Menampilkan derajat kemiringan (val)
                         _log(f"   -> [{friendly_name:<12}] Berhasil     | Sudut: {abs(val):>6.1f}° | Latensi: {current_action_latency:>8.2f} ms", "SUCCESS")
                         
                         self.action_start_time = time.time() 
@@ -203,8 +236,7 @@ class FaceRegistrationApp:
                     self._blink_buf["closed"] = bv
                     self._blink_buf["logged_closed"] = True
                     self.individual_latencies["Mata Menutup"] = current_action_latency
-                    # PERBAIKAN: Menampilkan EAR mata
-                    _log(f"   -> [MATA MENUTUP] Berhasil     | EAR  : {bv['avg_ear']:>6.2f}  | Latensi: {current_action_latency:>8.2f} ms", "SUCCESS")
+                    _log(f"   -> [MATA MENUTUP] Berhasil     | EAR   : {bv['avg_ear']:>6.2f}  | Latensi: {current_action_latency:>8.2f} ms", "SUCCESS")
                     self.action_start_time = time.time() 
                     
                 elif bv["avg_ear"] >= min_open and self._blink_buf.get("logged_closed") and not self._blink_buf.get("logged_open"):
@@ -213,8 +245,7 @@ class FaceRegistrationApp:
                     self._blink_buf["open"] = bv
                     self._blink_buf["logged_open"] = True
                     self.individual_latencies["Mata Membuka"] = current_action_latency
-                    # PERBAIKAN: Menampilkan EAR mata
-                    _log(f"   -> [MATA MEMBUKA] Berhasil     | EAR  : {bv['avg_ear']:>6.2f}  | Latensi: {current_action_latency:>8.2f} ms", "SUCCESS")
+                    _log(f"   -> [MATA MEMBUKA] Berhasil     | EAR   : {bv['avg_ear']:>6.2f}  | Latensi: {current_action_latency:>8.2f} ms", "SUCCESS")
                     self.action_start_time = time.time() 
                 
                 if self._blink_buf.get("closed") and bv["avg_ear"] < self._blink_buf["closed"]["avg_ear"]: 
@@ -389,7 +420,6 @@ class FaceRegistrationApp:
                 else: self.fake_frames = 0
 
                 if self.stage != RegistrationStage.EXTRACTION and not self.in_ext:
-                    # PERBAIKAN: Memanggil _record_data_buffers HANYA dengan parameter face dan pose
                     self._record_data_buffers(face, pose) 
                     res = self.liveness.update_register(face, self.detector)
                     
@@ -431,7 +461,7 @@ class FaceRegistrationApp:
                     frame = self.display_frame.copy() if self.display_frame is not None else None
                 if frame is not None: cv2.imshow("Register", frame)
                 if cv2.waitKey(1) & 0xFF == ord("q"): self.is_running = False; break
-        finally: 
+        finally:
             self.is_running = False; time.sleep(0.5); self.cam.stop(); self.detector.close(); cv2.destroyAllWindows()
             try:
                 if GPIO_AVAILABLE: GPIO.cleanup()

@@ -22,7 +22,6 @@ class UIHelper:
 
     @staticmethod
     def print_inline(msg):
-        # Menggunakan ljust untuk memastikan teks sebelumnya tertimpa bersih
         sys.stdout.write(f"\r ⏳ {msg}".ljust(120))
         sys.stdout.flush()
 
@@ -45,28 +44,49 @@ class UIHelper:
 
     @staticmethod
     def draw_ui(d, ui, locked):
+        """Penggambaran UI Responsif untuk LCD 3.5 Inch (480x320)"""
         fw, fh = d.shape[1], d.shape[0]
-        if ui.get("instr"):
-            w, h = cv2.getTextSize(ui.get("instr"), cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0]
-            cv2.rectangle(d, (10, 10), (w+40, h+30), (0,0,0), -1)
-            cv2.putText(d, ui.get("instr"), (20, h+20), cv2.FONT_HERSHEY_SIMPLEX, 0.7, config.COLOR_YELLOW, 2)
-        if ui.get("wait"): cv2.putText(d, "Menunggu Wajah...", (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, config.COLOR_YELLOW, 2)
+        
+        # 1. Bounding Box & Status Pengenalan
+        if ui.get("wait"): 
+            cv2.putText(d, "Mencari Wajah...", (15, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.45, config.COLOR_YELLOW, 1, cv2.LINE_AA)
         elif ui.get("bbox"):
             x, y, w, h = ui["bbox"]
+            # Mirroring koordinat bounding box
             fx, c = fw - x - w, ui.get("color", config.COLOR_WHITE)
-            cv2.rectangle(d, (fx, y), (fx+w, y+h), c, 3)
+            
+            # Gambar kotak wajah
+            cv2.rectangle(d, (fx, y), (fx+w, y+h), c, 2)
+            
+            # Label Nama/Status di atas Bounding Box (Adaptive agar tidak out of bounds)
             if stat := ui.get("status", ""):
-                tw = cv2.getTextSize(stat, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)[0][0]
-                cv2.rectangle(d, (fx, y-35), (fx+tw+15, y-5), c, -1)
-                cv2.putText(d, stat, (fx+8, y-12), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255,255,255), 2)
-        cv2.putText(d, f"PINTU: {'TERKUNCI' if locked else 'TERBUKA'}", (10, fh-30), cv2.FONT_HERSHEY_SIMPLEX, 0.75, config.COLOR_RED if locked else config.COLOR_GREEN, 2)
+                tw, th = cv2.getTextSize(stat, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)[0]
+                lbl_y = max(y, th + 10) # Mencegah teks terpotong di batas atas layar
+                
+                cv2.rectangle(d, (fx, lbl_y - th - 8), (fx + tw + 10, lbl_y), c, -1)
+                text_col = (0,0,0) if c == config.COLOR_WHITE or c == config.COLOR_YELLOW else (255,255,255)
+                cv2.putText(d, stat, (fx + 5, lbl_y - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.45, text_col, 1, cv2.LINE_AA)
+                
+        # 2. Header Instruksi Tantangan (Kiri Atas)
+        if ui.get("instr"):
+            instr = ui.get("instr")
+            tw, th = cv2.getTextSize(instr, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)[0]
+            cv2.rectangle(d, (5, 5), (tw + 25, th + 15), (25, 25, 25), -1)
+            cv2.putText(d, instr, (15, th + 10), cv2.FONT_HERSHEY_SIMPLEX, 0.45, config.COLOR_YELLOW, 1, cv2.LINE_AA)
+
+        # 3. Footer Status Pintu (Bawah)
+        cv2.rectangle(d, (0, fh - 28), (fw, fh), (20, 20, 20), -1)
+        door_txt = f"STATUS PINTU: {'TERKUNCI' if locked else 'TERBUKA'}"
+        door_c = config.COLOR_RED if locked else config.COLOR_GREEN
+        cv2.putText(d, door_txt, (10, fh - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.45, door_c, 1, cv2.LINE_AA)
+
 
 class SmartDoorApp:
     CHALLENGES = {"BLINK": "Kedipkan Mata", "KANAN": "Toleh KANAN", "KIRI": "Toleh KIRI", "ATAS": "Dongak ATAS", "BAWAH": "Tunduk BAWAH"}
 
     def __init__(self):
         print("\n" + "="*50)
-        UIHelper.log("SISTEM SMART DOOR LOCK AKTIF", "SYSTEM")
+        UIHelper.log("SISTEM SMART DOOR LOCK AKTIF (LCD 3.5\")", "SYSTEM")
         print("="*50 + "\n")
         self.lock, self.running, self.shared_frame = threading.Lock(), True, None
         self.ui, self.missed_frames, self.spoof_score = {"wait": True, "bbox": None, "status": "", "color": config.COLOR_WHITE, "instr": ""}, 0, 1.0
@@ -79,6 +99,17 @@ class SmartDoorApp:
         self.anti_spoof = SilentAntiSpoofing(getattr(config, 'ANTI_SPOOFING_MODEL', "liveness/antispoofing.onnx"), spoof_thr)
         self.detector = FaceMeshDetector(min_detection_confidence=0.5, min_tracking_confidence=0.5)
         self.door = DoorLock(getattr(config, 'LOCK_GPIO_PIN', 18), getattr(config, 'UNLOCK_DURATION', 5))
+        
+        # Inisialisasi Hardware Push Button (GPIO Interupsi)
+        if GPIO_AVAILABLE:
+            btn_pin = getattr(config, 'BUTTON_PIN', 26)
+            try:
+                GPIO.setup(btn_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+                GPIO.add_event_detect(btn_pin, GPIO.FALLING, callback=self._manual_unlock, bouncetime=500)
+                UIHelper.log(f"Push Button siap pada GPIO {btn_pin} (Internal Pull-Up)", "SYSTEM")
+            except Exception as e:
+                UIHelper.log(f"Gagal inisialisasi Push Button: {e}", "ERROR")
+
         self.matcher = FaceMatcher(0.35) 
         try:
             if (raw := self.db.load_all_faces()):
@@ -111,7 +142,6 @@ class SmartDoorApp:
                 if self.blink_hold >= 1: self.blink_passed = True
                 self.blink_hold = 0
             
-            # NORMALISASI KEDIPAN: Hanya menampilkan 0.0 (Belum) atau 1.0 (Sudah)
             val_display = 1.0 if self.blink_passed else 0.0
             return self.blink_passed, val_display, 1.0, False  
 
@@ -127,9 +157,7 @@ class SmartDoorApp:
 
         raw_val, tgt, passed = {"KANAN": (dy, ty, dy>ty), "KIRI": (-dy, ty, -dy>ty), "ATAS": (-dp, tp, -dp>tp), "BAWAH": (dp, tp, dp>tp)}.get(action, (0.0, 1.0, False))
         
-        # NORMALISASI HEADPOSE: Mencegah nilai turun di bawah 0°
         val_display = max(0.0, float(raw_val))
-        
         self.pose_hold = self.pose_hold + 1 if passed else 0
         return self.pose_hold >= 5, val_display, tgt, status_salah
 
@@ -156,7 +184,9 @@ class SmartDoorApp:
             UIHelper.log("⚠️ Peringatan: Wajah berganti di tengah proses! Reset ke awal.", "WARNING")
             return self._fail("WAJAH BERGANTI", instr="Mulai Ulang")
         self.prev_center = (cx, cy) 
-        if h > int(config.FRAME_HEIGHT * 0.50): 
+        
+        # Jarak muka disesuaikan untuk layar rasio 480x320 agar toleransi tidak terlalu sempit
+        if h > int(config.FRAME_HEIGHT * 0.70): 
             return self._fail("TERLALU DEKAT", config.COLOR_YELLOW, "Mundur sedikit")
         
         sp = self.anti_spoof.is_real(raw, face.bbox)
@@ -234,14 +264,12 @@ class SmartDoorApp:
                 recog_duration = (time.time() - self.current_stage_start) * 1000
                 self.access_details.append({"tahap": "RECOGNIZING", "latensi_ms": recog_duration})
                 print("") 
-                # MENAMPILKAN LATENSI VALIDASI DI SINI
                 UIHelper.log(f"Wajah Berhasil Dikenali: {best_name} (Akurasi: {final_acc_live:.2f}% | Latensi Validasi: {recog_duration:.0f} ms)", "SUCCESS")
                 
                 self.last_name, self.match_score, self.state, self.step_idx, self.wait_center, self.center_hold = best_name, smoothed_score, ValidationState.CHALLENGE, 0, True, 0
                 self.seq = [random.choice([k for k in self.CHALLENGES if k != "BLINK"]), "BLINK"]
                 self.active_dyn_thr = dyn_thr
                 
-                # RESET WAKTU KE 0 SEBELUM MASUK TAHAP CHALLENGE
                 self.current_stage_start = time.time()
                 self.challenge_start_time = time.time() 
             else: 
@@ -251,7 +279,7 @@ class SmartDoorApp:
             curr = self.pose_estimator.estimate(face, self.detector)
             if self.wait_center:
                 self.wait_center, self.center_hold, self.reg_pose = False, 0, [curr.get(k, 0) for k in ("yaw", "pitch", "roll")]
-                self.challenge_start_time = time.time() # PASTIKAN WAKTU TER-RESET KE 0.0 SAAT POSISI DIKUNCI
+                self.challenge_start_time = time.time() 
                 print("") 
                 UIHelper.log("🎯 Posisi wajah dikunci. Memulai tantangan liveness...", "INFO")
                 
@@ -259,8 +287,6 @@ class SmartDoorApp:
             self.ui.update({"status": f"{self.last_name} ({l_str})", "color": config.COLOR_CYAN, "instr": f"Tahap {self.step_idx+1}/{len(self.seq)}: {inst}"})
             
             passed, val, tgt, status_salah = self._check_action(act, face)
-            
-            # PENGHITUNGAN WAKTU BERJALAN DARI 0.0
             waktu_berjalan = time.time() - self.challenge_start_time
             
             if status_salah:
@@ -278,7 +304,6 @@ class SmartDoorApp:
             self.print_counter += 1
             if self.print_counter % 3 == 0:
                 unit = "x" if act == "BLINK" else "°"
-                # OUTPUT TERMINAL MENAMPILKAN SKOR AKTUAL & WAKTU YANG SELALU MULAI DARI 0
                 UIHelper.print_inline(f"Tahap {self.step_idx+1}/{len(self.seq)} [{inst}] - Aktual: {val:.1f}{unit} | Target: {tgt:.1f}{unit} | Waktu: {waktu_berjalan:.1f}s / 8.0s")
             
             if passed:
@@ -293,8 +318,6 @@ class SmartDoorApp:
                 
                 if self.step_idx < len(self.seq): 
                     self.reg_pose, self.wait_center = [curr.get(k, 0) for k in ("yaw", "pitch", "roll")], False 
-                    
-                    # RESET SEMUA TIMER KE 0 LAGI UNTUK TANTANGAN BERIKUTNYA
                     self.current_stage_start = time.time()
                     self.challenge_start_time = time.time()
                 else:
@@ -333,6 +356,18 @@ class SmartDoorApp:
                 parts = self.last_name.split(" - ", 1)
                 nim_val, name_val = parts[0], parts[1]
             self.db.push_access_log_async(name_val, nim_val, "UNLOCKED", final_acc, light_cond, self.access_details, total_auth_time)
+
+    def _manual_unlock(self, channel):
+        """Callback ketika push button ditekan fisik"""
+        print("")
+        UIHelper.log("🔘 Push Button Ditekan: Membuka pintu secara manual!", "INFO")
+        if getattr(self.door, 'locked', True):
+            threading.Thread(target=self.door.unlock, daemon=True).start()
+            self.ui.update({
+                "status": "DIBUKA (MANUAL)", 
+                "color": config.COLOR_GREEN, 
+                "instr": "Via Push Button"
+            })
 
     def run(self):
         window_name = "Smart Door Lock"

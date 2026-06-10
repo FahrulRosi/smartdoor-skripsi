@@ -43,6 +43,32 @@ class UIHelper:
         return ((n(p[1]-p[5])+n(p[2]-p[4]))/(2.0*n(p[0]-p[3])+1e-6) + (n(p[7]-p[11])+n(p[8]-p[10]))/(2.0*n(p[6]-p[9])+1e-6)) / 2.0
 
     @staticmethod
+    def get_light_condition(raw_frame, bbox):
+        if not bbox: return "Normal"
+        bx, by, bw, bh = bbox
+        fh, fw = raw_frame.shape[:2]
+        x1, y1 = max(0, bx), max(0, by)
+        x2, y2 = min(fw, bx + bw), min(fh, by + bh)
+        gray = cv2.cvtColor(raw_frame, cv2.COLOR_BGR2GRAY)
+        face_roi = gray[y1:y2, x1:x2]
+        L = np.mean(face_roi) if face_roi.size > 0 else 100.0
+        
+        top_bg = gray[0:max(0, y1-10), max(0, x1-30):min(fw, x2+30)]
+        L_top_bg = np.mean(top_bg) if top_bg.size > 0 else L
+        
+        mask = np.ones((fh, fw), dtype=bool)
+        mask[y1:y2, x1:x2] = False
+        L_bg = np.mean(gray[mask]) if np.any(mask) else L
+        L_bg_effective = max(L_bg, L_top_bg)
+        
+        if (L_bg_effective - L) > 40 and L_bg_effective > 160: 
+            return "Backlight"
+        elif L_bg < 70 or L < 70: 
+            return "Low Light"
+        else: 
+            return "Normal"
+
+    @staticmethod
     def draw_ui(d, ui, locked):
         fw, fh = d.shape[1], d.shape[0]
         if ui.get("wait"): 
@@ -87,6 +113,17 @@ class SmartDoorApp:
         self.anti_spoof = SilentAntiSpoofing(getattr(config, 'ANTI_SPOOFING_MODEL', "liveness/antispoofing.onnx"), getattr(config, 'ANTI_SPOOFING_THRESHOLD', 0.70))
         self.detector = FaceMeshDetector(min_detection_confidence=0.5, min_tracking_confidence=0.5)
         self.door = DoorLock(getattr(config, 'LOCK_GPIO_PIN', 18), getattr(config, 'UNLOCK_DURATION', 5))
+        
+        # ------------------------------------------------------------------
+        # SETUP TOMBOL MANUAL (INTERRUPT)
+        # ------------------------------------------------------------------
+        if GPIO_AVAILABLE:
+            button_pin = getattr(config, 'BUTTON_PIN', 26)
+            GPIO.setup(button_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+            GPIO.add_event_detect(button_pin, GPIO.FALLING, callback=self._manual_unlock, bouncetime=1000)
+            print(f"[System] Push Button aktif mendengarkan Pin GPIO {button_pin}.")
+        # ------------------------------------------------------------------
+
         self.matcher = FaceMatcher(0.35) 
         try:
             if (raw := self.db.load_all_faces()):
@@ -95,6 +132,27 @@ class SmartDoorApp:
         except Exception: pass
         self.cam = CameraStream(config.CAMERA_INDEX, config.FRAME_WIDTH, config.FRAME_HEIGHT).start()
         threading.Thread(target=self._ai_worker, daemon=True).start()
+
+    def _manual_unlock(self, channel):
+        """Fungsi ini otomatis dijalankan oleh Raspberry Pi saat tombol fisik ditekan"""
+        print("\n" + "="*60)
+        UIHelper.log("🔓 PINTU DIBUKA MANUAL VIA TOMBOL (PUSH BUTTON)", "SUCCESS")
+        print("="*60 + "\n")
+
+        # Batalkan sementara proses deteksi wajah jika sedang berjalan
+        self._reset_state()
+        
+        # Tampilkan status di UI Layar LCD (Tanpa Log Database)
+        self.ui.update({
+            "wait": False, 
+            "bbox": None, 
+            "status": "DIBUKA MANUAL", 
+            "color": config.COLOR_GREEN, 
+            "instr": "Tombol Ditekan"
+        })
+        
+        # Buka Solenoid/Relay langsung via Hardware thread
+        threading.Thread(target=self.door.unlock, daemon=True).start()
 
     def _reset_state(self):
         self.state, self.last_name, self.match_score, self.auth_start = ValidationState.IDLE, "", 0.0, 0.0
@@ -148,13 +206,16 @@ class SmartDoorApp:
             time.sleep(0.01) 
 
     def _process_face(self, raw, enhanced, face):
+        # Proteksi: Jika sedang mode buka manual, kunci pelacakan wajah sesaat agar tidak tabrakan
+        if self.ui.get("status") == "DIBUKA MANUAL" and not getattr(self.door, 'locked', True):
+            return
+
         x, y, w, h = face.bbox; cx, cy = x + w//2, y + h//2
         if self.state.value > 1 and self.prev_center and np.hypot(cx-self.prev_center[0], cy-self.prev_center[1]) > max(w, h)*0.40: 
             return self._fail("WAJAH BERGANTI", instr="Mulai Ulang")
         self.prev_center = (cx, cy) 
         if h > int(config.FRAME_HEIGHT * 0.70): return self._fail("TERLALU DEKAT", config.COLOR_YELLOW, "Mundur")
         
-        # LOGIC SPOOF TETAP
         t_sp_start = time.time()
         sp = self.anti_spoof.is_real(raw, face.bbox)
         sp_latency = (time.time() - t_sp_start) * 1000
@@ -183,18 +244,7 @@ class SmartDoorApp:
             return 
             
         self.fake_frames = 0
-        
-        # MENDETEKSI 3 KONDISI CAHAYA SAAT LIVE
-        gray_live = cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY)
-        fh_l, fw_l = gray_live.shape
-        x1_l, y1_l, x2_l, y2_l = max(0, x), max(0, y), min(fw_l, x+w), min(fh_l, y+h)
-        mask_live = np.ones((fh_l, fw_l), dtype=bool)
-        mask_live[y1_l:y2_l, x1_l:x2_l] = False
-        L_bg_live = np.mean(gray_live[mask_live]) if np.any(mask_live) else 100.0
-
-        if L_bg_live > 140: l_str = "Backlight"
-        elif L_bg_live < 85: l_str = "Low Light"
-        else: l_str = "Normal"
+        l_str = UIHelper.get_light_condition(raw, face.bbox)
 
         if self.state in (ValidationState.IDLE, ValidationState.RECOGNIZING):
             if self.state == ValidationState.IDLE: 
@@ -202,8 +252,6 @@ class SmartDoorApp:
                 return
 
             fh, fw = enhanced.shape[:2]
-            
-            # Wajah murni diekstraksi tanpa konversi/normalisasi (Murni Raw Data Gambar Saat Ini)
             cropped_live = self.model.crop_face(enhanced, [max(0, x), max(0, y), min(fw, x+w)-max(0, x), min(fh, y+h)-max(0, y)])
             if cropped_live is None or cropped_live.size == 0: return
             
@@ -220,20 +268,11 @@ class SmartDoorApp:
                 smoothed_score = np.mean(self.score_history[best_name])
             else: smoothed_score = 0.0
 
-            # =========================================================================
-            # KECERDASAN SISTEM (SMART ADAPTIVE THRESHOLD)
-            # Threshold akan menyesuaikan kelonggarannya berdasarkan cahaya lingkungan.
-            # Mengakomodasi drop vektor alami di Backlight / Lowlight.
-            # =========================================================================
             base_thr = getattr(config, 'MATCH_THRESHOLD', 0.45)
-            if l_str == "Normal":
-                dyn_thr = base_thr          # Standar Ketat: Misal 0.45
-            elif l_str == "Low Light":
-                dyn_thr = base_thr - 0.05   # Turun sedikit untuk toleransi gelap: Misal 0.40
-            else: # Backlight
-                dyn_thr = base_thr - 0.08   # Turun lebih besar untuk toleransi silau: Misal 0.37
+            if l_str == "Normal": dyn_thr = base_thr          
+            elif l_str == "Low Light": dyn_thr = base_thr - 0.05   
+            else: dyn_thr = base_thr - 0.08   
             
-            # Rumus Mentah Tetap Murni:
             final_acc_live = smoothed_score * 100.0 if smoothed_score >= dyn_thr else 0.0
 
             self.print_counter += 1
@@ -279,7 +318,6 @@ class SmartDoorApp:
                     self._finalize_unlock(l_str)
 
     def _finalize_unlock(self, l_str):
-        # Akurasi Final yang murni tanpa rumus buatan
         final_acc = self.match_score * 100.0
         
         self.ui.update({"status": f"{self.last_name} ({final_acc:.1f}%)", "color": config.COLOR_GREEN, "instr": f"Akses Diterima ({l_str})"})

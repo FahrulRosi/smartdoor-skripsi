@@ -106,6 +106,10 @@ class SmartDoorApp:
         self.ui, self.missed_frames = {"wait": True, "bbox": None, "status": "", "color": config.COLOR_WHITE, "instr": ""}, 0
         self._reset_state(); self.fake_frames = 0
         self.last_spoof_log_time = 0.0  
+        
+        # Disable peringatan GPIO sebelum melakukan apa-apa
+        if GPIO_AVAILABLE: GPIO.setwarnings(False)
+        
         self._init_heavy_models()
 
     def _init_heavy_models(self):
@@ -115,13 +119,27 @@ class SmartDoorApp:
         self.door = DoorLock(getattr(config, 'LOCK_GPIO_PIN', 18), getattr(config, 'UNLOCK_DURATION', 5))
         
         # ------------------------------------------------------------------
-        # SETUP TOMBOL MANUAL (INTERRUPT)
+        # SETUP TOMBOL MANUAL (SISTEM TANGGUH / FALLBACK)
         # ------------------------------------------------------------------
         if GPIO_AVAILABLE:
             button_pin = getattr(config, 'BUTTON_PIN', 26)
+            
+            # Coba bersihkan pin 26 jika tersangkut dari program sebelumnya
+            try: GPIO.cleanup(button_pin)
+            except: pass
+            
+            GPIO.setmode(GPIO.BCM)
             GPIO.setup(button_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-            GPIO.add_event_detect(button_pin, GPIO.FALLING, callback=self._manual_unlock, bouncetime=1000)
-            print(f"[System] Push Button aktif mendengarkan Pin GPIO {button_pin}.")
+            
+            try:
+                # Coba hapus event sebelumnya (jika ada) lalu pasang yang baru
+                GPIO.remove_event_detect(button_pin)
+                GPIO.add_event_detect(button_pin, GPIO.FALLING, callback=self._manual_unlock, bouncetime=1000)
+                print(f"[System] Push Button aktif (Interrupt Mode) di Pin {button_pin}.")
+            except Exception as e:
+                # JIKA GAGAL (KARENA BUG LINUX KERNEL), OTOMATIS BERALIH KE MODE SOFTWARE POLLING
+                print(f"[System] Interrupt gagal. Beralih ke Polling Mode untuk Pin {button_pin}.")
+                threading.Thread(target=self._button_polling_worker, args=(button_pin,), daemon=True).start()
         # ------------------------------------------------------------------
 
         self.matcher = FaceMatcher(0.35) 
@@ -133,8 +151,22 @@ class SmartDoorApp:
         self.cam = CameraStream(config.CAMERA_INDEX, config.FRAME_WIDTH, config.FRAME_HEIGHT).start()
         threading.Thread(target=self._ai_worker, daemon=True).start()
 
+    def _button_polling_worker(self, pin):
+        """Mode Pengganti jika Interrupt Bawaan Raspberry Pi Mengalami Error"""
+        last_state = GPIO.HIGH
+        while getattr(self, 'running', True):
+            try:
+                current_state = GPIO.input(pin)
+                # Jika status berubah dari HIGH (dilepas) menjadi LOW (ditekan ke Ground)
+                if last_state == GPIO.HIGH and current_state == GPIO.LOW:
+                    self._manual_unlock(pin)
+                    time.sleep(1.5)  # Jeda agar tidak tereksekusi ganda (software debounce)
+                last_state = current_state
+            except: pass
+            time.sleep(0.05) # Loop cepat setiap 50ms (sangat ringan untuk CPU)
+
     def _manual_unlock(self, channel):
-        """Fungsi ini otomatis dijalankan oleh Raspberry Pi saat tombol fisik ditekan"""
+        """Fungsi ini otomatis dijalankan saat tombol fisik ditekan"""
         print("\n" + "="*60)
         UIHelper.log("🔓 PINTU DIBUKA MANUAL VIA TOMBOL (PUSH BUTTON)", "SUCCESS")
         print("="*60 + "\n")
@@ -142,7 +174,7 @@ class SmartDoorApp:
         # Batalkan sementara proses deteksi wajah jika sedang berjalan
         self._reset_state()
         
-        # Tampilkan status di UI Layar LCD (Tanpa Log Database)
+        # Tampilkan status di UI Layar LCD (Sesuai request: Tidak pakai log database)
         self.ui.update({
             "wait": False, 
             "bbox": None, 
@@ -350,6 +382,7 @@ class SmartDoorApp:
                 if cv2.waitKey(10) & 0xFF == ord("q"): self.running = False
         finally: 
             self.running = False; self.cam.stop(); cv2.destroyAllWindows()
+            if GPIO_AVAILABLE: GPIO.cleanup()
 
 if __name__ == "__main__":
     app = SmartDoorApp()

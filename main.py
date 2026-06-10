@@ -94,7 +94,7 @@ class SmartDoorApp:
     def _init_heavy_models(self):
         self.db, self.model, self.pose_estimator = FaceDatabase(), MobileFaceNet(), HeadPoseEstimator()
         self.anti_spoof = SilentAntiSpoofing(getattr(config, 'ANTI_SPOOFING_MODEL', "liveness/antispoofing.onnx"), getattr(config, 'ANTI_SPOOFING_THRESHOLD', 0.70))
-        self.detector = FaceMeshDetector(0.5, 0.5)
+        self.detector = FaceMeshDetector(min_detection_confidence=0.5, min_tracking_confidence=0.5)
         self.door = DoorLock(getattr(config, 'LOCK_GPIO_PIN', 18), getattr(config, 'UNLOCK_DURATION', 5))
         
         if GPIO_AVAILABLE:

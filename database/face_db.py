@@ -144,7 +144,7 @@ class FaceDatabase:
                 yaw_score TEXT, pitch_score TEXT, roll_score TEXT, blink_score TEXT,
                 light_condition TEXT, reg_latency_ms REAL, created_at TEXT, is_synced INTEGER DEFAULT 0)''')
             
-            # TABEL LOG: access_logs (Menyimpan face_val_latency_ms)
+            # TABEL LOG: access_logs
             c.execute('''CREATE TABLE IF NOT EXISTS access_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, 
                 nim TEXT REFERENCES registered_faces(nim) ON DELETE SET NULL, 
@@ -289,7 +289,6 @@ class FaceDatabase:
             except Exception: pass
         threading.Thread(target=_task, daemon=True).start()
 
-    # 💡 Ditambahkan parameter face_val_latency_ms
     def push_access_log_async(self, user_name, nim, status, accuracy, light_cond="N/A", access_details=None, auth_latency_ms=0.0, face_val_latency_ms=0.0):
         created_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         def _task():
@@ -311,7 +310,6 @@ class FaceDatabase:
                         c_check.execute("SELECT 1 FROM registered_faces WHERE nim = ?", (target_nim,))
                         if not c_check.fetchone(): target_nim = None
                     
-                    # Insert field face_val_latency_ms alih-alih model_name
                     conn.execute("""INSERT INTO access_logs (name, nim, status, face_val_latency_ms, headpose_score, blink_score, accuracy, light_condition, auth_latency_ms, created_at, is_synced)
                                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""", (clean_name, target_nim, status, float(face_val_latency_ms), headpose_str.strip(" | ") or "-", blink_str.strip(" | ") or "-", float(accuracy), light_cond, float(auth_latency_ms), created_at))
                     conn.commit()
@@ -421,7 +419,6 @@ class FaceDatabase:
                     try: self._pull_logs_from_supabase(c, "register_logs", ["name", "nim", "status", "yaw_score", "pitch_score", "roll_score", "blink_score", "light_condition", "reg_latency_ms", "created_at"])
                     except Exception: pass
                     
-                    # 💡 Memasukkan face_val_latency_ms untuk Sync down dari cloud
                     try: self._pull_logs_from_supabase(c, "access_logs", ["name", "nim", "status", "face_val_latency_ms", "headpose_score", "blink_score", "accuracy", "light_condition", "auth_latency_ms", "created_at"])
                     except Exception: pass
                     

@@ -127,7 +127,7 @@ class FaceDatabase:
         with self.db_lock, closing(self._get_connection()) as conn:
             c = conn.cursor()
             
-            # TABEL UTAMA: registered_faces (Menggantikan users)
+            # TABEL UTAMA: registered_faces (Kembali Bersih Semula)
             c.execute('''CREATE TABLE IF NOT EXISTS registered_faces (
                 nim TEXT PRIMARY KEY, 
                 name TEXT NOT NULL, 
@@ -136,7 +136,7 @@ class FaceDatabase:
                 yaw_score TEXT, pitch_score TEXT, roll_score TEXT, blink_score TEXT,
                 reg_latency_ms REAL, created_at TEXT, is_synced INTEGER DEFAULT 0)''')
             
-            # TABEL LOG: Referensi langsung ke registered_faces
+            # TABEL LOG: register_logs
             c.execute('''CREATE TABLE IF NOT EXISTS register_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, 
                 nim TEXT REFERENCES registered_faces(nim) ON DELETE CASCADE, 
@@ -144,10 +144,12 @@ class FaceDatabase:
                 yaw_score TEXT, pitch_score TEXT, roll_score TEXT, blink_score TEXT,
                 light_condition TEXT, reg_latency_ms REAL, created_at TEXT, is_synced INTEGER DEFAULT 0)''')
             
+            # TABEL LOG: access_logs (model_name Khusus Validasi Wajah Tetap Di Sini)
             c.execute('''CREATE TABLE IF NOT EXISTS access_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, 
                 nim TEXT REFERENCES registered_faces(nim) ON DELETE SET NULL, 
                 status TEXT NOT NULL,
+                model_name TEXT DEFAULT 'MobileFaceNet',
                 headpose_score TEXT, blink_score TEXT, accuracy REAL, light_condition TEXT,
                 auth_latency_ms REAL, created_at TEXT, is_synced INTEGER DEFAULT 0)''')
             
@@ -158,7 +160,6 @@ class FaceDatabase:
             c.execute('''CREATE TABLE IF NOT EXISTS sync_deletes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, table_name TEXT, record_id TEXT)''')
 
-            # Hapus trigger users karena tabel sudah tidak dipakai
             triggers = [("registered_faces", "nim"), ("register_logs", "created_at"), ("access_logs", "created_at"), ("spoofing_logs", "created_at")]
             for tbl, col in triggers:
                 c.execute(f'''CREATE TRIGGER IF NOT EXISTS trg_del_{tbl} AFTER DELETE ON {tbl} FOR EACH ROW BEGIN INSERT INTO sync_deletes (table_name, record_id) VALUES ('{tbl}', OLD.{col}); END;''')
@@ -174,7 +175,6 @@ class FaceDatabase:
     def check_user_exists(self, nim):
         with self.db_lock, closing(self._get_connection()) as conn:
             c = conn.cursor()
-            # Pengecekan sekarang langsung ke registered_faces
             c.execute("SELECT 1 FROM registered_faces WHERE nim = ?", (nim,))
             return c.fetchone() is not None
 
@@ -189,7 +189,6 @@ class FaceDatabase:
             with self.db_lock, closing(self._get_connection()) as conn:
                 c = conn.cursor()
                 
-                # 1. Simpan Master Embedding Langsung ke registered_faces (Tanpa tabel users)
                 c.execute("""INSERT INTO registered_faces 
                     (nim, name, embedding, liveness_config, yaw_score, pitch_score, roll_score, blink_score, reg_latency_ms, created_at, is_synced)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
@@ -200,7 +199,6 @@ class FaceDatabase:
                     (nim, pure_name, json.dumps(p["embedding"]), json.dumps(p.get("liveness_config", {})), 
                      p["yaw_score_clean"] or "-", p["pitch_score_clean"] or "-", p["roll_score_clean"] or "-", p["blink_score_clean"] or "-", reg_lat, created_at))
                 
-                # 2. Log Pendaftaran
                 c.execute("""INSERT INTO register_logs (name, nim, status, yaw_score, pitch_score, roll_score, blink_score, light_condition, reg_latency_ms, created_at, is_synced)
                              VALUES (?, ?, 'SUCCESS', ?, ?, ?, ?, ?, ?, ?, 0)""",
                              (pure_name, nim, p["yaw_score_log"] or "-", p["pitch_score_log"] or "-", p["roll_score_log"] or "-", p["blink_score_log"] or "-", lc, reg_lat, created_at))
@@ -245,7 +243,6 @@ class FaceDatabase:
                 remote_created_at = str(r["created_at"]).replace("+00:00", "Z")
                 cursor.execute(f"SELECT 1 FROM {table_name} WHERE created_at = ?", (remote_created_at,))
                 if not cursor.fetchone():
-                    # Foreign key check sekarang mengarah ke registered_faces
                     if "nim" in r and r["nim"] is not None:
                         cursor.execute("SELECT 1 FROM registered_faces WHERE nim = ?", (r["nim"],))
                         if not cursor.fetchone(): continue
@@ -282,7 +279,6 @@ class FaceDatabase:
             try:
                 with self.db_lock, closing(self._get_connection()) as conn:
                     if status == "SUCCESS":
-                        # Cek FK ke registered_faces
                         conn.cursor().execute("SELECT 1 FROM registered_faces WHERE nim = ?", (nim,))
                         if not conn.cursor().fetchone(): return
                     
@@ -311,12 +307,12 @@ class FaceDatabase:
                     target_nim = nim
                     if target_nim:
                         c_check = conn.cursor()
-                        # Cek FK ke registered_faces
                         c_check.execute("SELECT 1 FROM registered_faces WHERE nim = ?", (target_nim,))
                         if not c_check.fetchone(): target_nim = None
                     
-                    conn.execute("""INSERT INTO access_logs (name, nim, status, headpose_score, blink_score, accuracy, light_condition, auth_latency_ms, created_at, is_synced)
-                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""", (clean_name, target_nim, status, headpose_str.strip(" | ") or "-", blink_str.strip(" | ") or "-", float(accuracy), light_cond, float(auth_latency_ms), created_at))
+                    # model_name otomatis di-hardcode ke 'MobileFaceNet' saat validasi real-time pintu dibuka
+                    conn.execute("""INSERT INTO access_logs (name, nim, status, model_name, headpose_score, blink_score, accuracy, light_condition, auth_latency_ms, created_at, is_synced)
+                                    VALUES (?, ?, ?, 'MobileFaceNet', ?, ?, ?, ?, ?, ?, 0)""", (clean_name, target_nim, status, headpose_str.strip(" | ") or "-", blink_str.strip(" | ") or "-", float(accuracy), light_cond, float(auth_latency_ms), created_at))
                     conn.commit()
                 self.sync_trigger.set() 
             except Exception: pass
@@ -345,7 +341,6 @@ class FaceDatabase:
                 with self.db_lock, closing(self._get_connection()) as conn:
                     c = conn.cursor()
                     
-                    # --- EXECUTE DELETES ---
                     try:
                         c.execute("SELECT id, table_name, record_id FROM sync_deletes")
                         for row in c.fetchall():
@@ -359,7 +354,7 @@ class FaceDatabase:
                     
                     synced_count = 0
 
-                    # --- PUSH FACES (Tabel Induk Utama) ---
+                    # --- PUSH FACES (Kembali Bersih Tanpa model_name) ---
                     try:
                         c.execute("SELECT nim, name, embedding, liveness_config, yaw_score, pitch_score, roll_score, blink_score, reg_latency_ms, created_at FROM registered_faces WHERE is_synced = 0")
                         for r in c.fetchall():
@@ -369,7 +364,6 @@ class FaceDatabase:
                             synced_count += 1
                     except Exception as e: print(f"❌ [Sync Error] PUSH registered_faces: {e}")
                     
-                    # --- PUSH LOGS ---
                     try:
                         c.execute("SELECT id, name, nim, status, yaw_score, pitch_score, roll_score, blink_score, light_condition, reg_latency_ms, created_at FROM register_logs WHERE is_synced = 0")
                         for r in c.fetchall():
@@ -379,10 +373,11 @@ class FaceDatabase:
                             synced_count += 1
                     except Exception: pass
                         
+                    # --- PUSH ACCESS LOGS (model_name Dikirim untuk Validasi Wajah Skripsi) ---
                     try:
-                        c.execute("SELECT id, name, nim, status, headpose_score, blink_score, accuracy, light_condition, auth_latency_ms, created_at FROM access_logs WHERE is_synced = 0")
+                        c.execute("SELECT id, name, nim, status, headpose_score, blink_score, accuracy, light_condition, auth_latency_ms, created_at, model_name FROM access_logs WHERE is_synced = 0")
                         for r in c.fetchall():
-                            payload = {"name": r[1], "nim": r[2], "status": r[3], "headpose_score": r[4] or "-", "blink_score": r[5] or "-", "accuracy": float(r[6] or 0.0), "light_condition": r[7] or "-", "auth_latency_ms": float(r[8] or 0.0), "created_at": r[9]}
+                            payload = {"name": r[1], "nim": r[2], "status": r[3], "headpose_score": r[4] or "-", "blink_score": r[5] or "-", "accuracy": float(r[6] or 0.0), "light_condition": r[7] or "-", "auth_latency_ms": float(r[8] or 0.0), "created_at": r[9], "model_name": r[10]}
                             self.client.table("access_logs").insert(payload).execute()
                             c.execute("UPDATE access_logs SET is_synced = 1 WHERE id = ?", (r[0],))
                             synced_count += 1
@@ -399,7 +394,7 @@ class FaceDatabase:
                     
                     if synced_count > 0: print(f"\n[Background Sync] ☁️ Berhasil UPLOAD {synced_count} baris data ke Supabase!")
 
-                    # --- PULL DARI CLOUD (Hanya registered_faces dan log) ---
+                    # --- PULL DARI CLOUD (Tabel Induk registered_faces Bersih) ---
                     try:
                         res = self.client.table("registered_faces").select("*").execute()
                         if res.data is not None:
@@ -425,7 +420,7 @@ class FaceDatabase:
 
                     try: self._pull_logs_from_supabase(c, "register_logs", ["name", "nim", "status", "yaw_score", "pitch_score", "roll_score", "blink_score", "light_condition", "reg_latency_ms", "created_at"])
                     except Exception: pass
-                    try: self._pull_logs_from_supabase(c, "access_logs", ["name", "nim", "status", "headpose_score", "blink_score", "accuracy", "light_condition", "auth_latency_ms", "created_at"])
+                    try: self._pull_logs_from_supabase(c, "access_logs", ["name", "nim", "status", "model_name", "headpose_score", "blink_score", "accuracy", "light_condition", "auth_latency_ms", "created_at"])
                     except Exception: pass
                     try: self._pull_logs_from_supabase(c, "spoofing_logs", ["spoof_score", "spoof_type", "spoof_latency_ms", "created_at"])
                     except Exception: pass

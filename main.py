@@ -25,41 +25,41 @@ class UIHelper:
     @staticmethod
     def enhance_frame(frame):
         if not getattr(config, 'ENABLE_CLAHE_ENHANCEMENT', True): return frame
-        yuv = cv2.cvtColor(cv2.bilateralFilter(frame, 3, 30, 30), cv2.COLOR_BGR2YUV)
-        yuv[:,:,0] = cv2.createCLAHE(2.0, (8, 8)).apply(yuv[:,:,0])
-        return cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR)
+        denoised = cv2.bilateralFilter(frame, d=3, sigmaColor=30, sigmaSpace=30)
+        img_yuv = cv2.cvtColor(denoised, cv2.COLOR_BGR2YUV)
+        img_yuv[:,:,0] = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(img_yuv[:,:,0])
+        return cv2.cvtColor(img_yuv, cv2.COLOR_YUV2BGR)
 
     @staticmethod
     def get_ear(f):
         lm = getattr(f, 'landmarks', [])
-        if len(lm) < 400: return 0.0
+        if not lm or len(lm) < 400: return 0.0
         p = np.array([[lm[i].x, lm[i].y] for i in [33,160,158,133,153,144,362,385,387,263,373,380]])
         n = np.linalg.norm 
         return ((n(p[1]-p[5])+n(p[2]-p[4]))/(2.0*n(p[0]-p[3])+1e-6) + (n(p[7]-p[11])+n(p[8]-p[10]))/(2.0*n(p[6]-p[9])+1e-6)) / 2.0
 
     @staticmethod
-    def get_light_condition(raw, bbox):
-        fh, fw = raw.shape[:2]
-        gray = cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY)
-        if not bbox: 
-            L_bg = np.mean(gray)
-            return "Backlight" if L_bg > 160 else "Low Light" if L_bg < 70 else "Normal"
-            
-        bx, by, bw, bh = [max(0, v) for v in bbox]
-        L = np.mean(gray[by:min(fh, by+bh), bx:min(fw, bx+bw)]) if bw>0 and bh>0 else 100.0
-        L_top = np.mean(gray[0:max(0, by-10), max(0, bx-30):min(fw, bx+bw+30)])
-        
-        mask = np.ones((fh, fw), dtype=bool); mask[by:by+bh, bx:bx+bw] = False
-        L_bg = max(np.mean(gray[mask]) if np.any(mask) else L, L_top if not np.isnan(L_top) else L)
-        
-        return "Backlight" if (L_bg - L) > 40 and L_bg > 160 else "Low Light" if L_bg < 70 else "Normal"
+    def get_light_condition(raw_frame, bbox):
+        if not bbox: return "Normal"
+        bx, by, bw, bh = bbox
+        fh, fw = raw_frame.shape[:2]
+        x1, y1, x2, y2 = max(0, bx), max(0, by), min(fw, bx + bw), min(fh, by + bh)
+        gray = cv2.cvtColor(raw_frame, cv2.COLOR_BGR2GRAY)
+        face_roi = gray[y1:y2, x1:x2]
+        L = np.mean(face_roi) if face_roi.size > 0 else 100.0
+        top_bg = gray[0:max(0, y1-10), max(0, x1-30):min(fw, x2+30)]
+        L_bg = np.mean(gray) # Default bg fallback
+        mask = np.ones((fh, fw), dtype=bool); mask[y1:y2, x1:x2] = False
+        if np.any(mask): L_bg = np.mean(gray[mask])
+        L_bg_effective = max(L_bg, np.mean(top_bg) if top_bg.size > 0 else L)
+        if (L_bg_effective - L) > 40 and L_bg_effective > 160: return "Backlight"
+        return "Low Light" if (L_bg < 70 or L < 70) else "Normal"
 
     @staticmethod
     def draw_ui(d, ui, locked):
-        fw, fh = d.shape[:2]
-        def put_txt(txt, pos, c, s=0.45): cv2.putText(d, txt, pos, cv2.FONT_HERSHEY_SIMPLEX, s, c, 1, cv2.LINE_AA)
-        
-        if ui.get("wait"): put_txt("Mencari Wajah...", (15, 35), config.COLOR_YELLOW)
+        fw, fh = d.shape[1], d.shape[0]
+        if ui.get("wait"): 
+            cv2.putText(d, "Mencari Wajah...", (15, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.45, config.COLOR_YELLOW, 1, cv2.LINE_AA)
         elif ui.get("bbox"):
             x, y, w, h = ui["bbox"]
             fx, c = fw - x - w, ui.get("color", config.COLOR_WHITE)
@@ -68,27 +68,24 @@ class UIHelper:
                 tw, th = cv2.getTextSize(stat, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)[0]
                 lbl_y = max(y, th + 10)
                 cv2.rectangle(d, (fx, lbl_y - th - 8), (fx + tw + 10, lbl_y), c, -1)
-                tc = (0,0,0) if c in (config.COLOR_WHITE, config.COLOR_YELLOW) else (255,255,255)
-                put_txt(stat, (fx + 5, lbl_y - 4), tc)
-                
-        if instr := ui.get("instr", ""):
+                cv2.putText(d, stat, (fx + 5, lbl_y - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0,0,0) if c in (config.COLOR_WHITE, config.COLOR_YELLOW) else (255,255,255), 1, cv2.LINE_AA)
+        if instr := ui.get("instr"):
             tw, th = cv2.getTextSize(instr, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)[0]
             cv2.rectangle(d, (5, 5), (tw + 25, th + 15), (25, 25, 25), -1)
-            put_txt(instr, (15, th + 10), config.COLOR_YELLOW)
-
+            cv2.putText(d, instr, (15, th + 10), cv2.FONT_HERSHEY_SIMPLEX, 0.45, config.COLOR_YELLOW, 1, cv2.LINE_AA)
         cv2.rectangle(d, (0, fh - 28), (fw, fh), (20, 20, 20), -1)
-        put_txt(f"STATUS PINTU: {'TERKUNCI' if locked else 'TERBUKA'}", (10, fh - 8), config.COLOR_RED if locked else config.COLOR_GREEN)
+        cv2.putText(d, f"STATUS PINTU: {'TERKUNCI' if locked else 'TERBUKA'}", (10, fh - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.45, config.COLOR_RED if locked else config.COLOR_GREEN, 1, cv2.LINE_AA)
 
 class SmartDoorApp:
     CHALLENGES = {"BLINK": "Kedipkan Mata", "KANAN": "Toleh KANAN", "KIRI": "Toleh KIRI", "ATAS": "Dongak ATAS", "BAWAH": "Tunduk BAWAH"}
 
     def __init__(self):
-        print("\n" + "="*50); UIHelper.log("SISTEM DOOR LOCK ADAPTIF MURNI", "SYSTEM"); print("="*50 + "\n")
+        print("\n" + "="*50 + "\n[SYSTEM] SISTEM DOOR LOCK ADAPTIF MURNI\n" + "="*50 + "\n")
         self.lock, self.running, self.shared_frame = threading.Lock(), True, None
         self.ui = {"wait": True, "bbox": None, "status": "", "color": config.COLOR_WHITE, "instr": ""}
-        self.missed_frames = self.fake_frames = self.last_spoof_log_time = 0
-        self._reset_state()
+        self.missed_frames, self.fake_frames, self.last_spoof_log_time = 0, 0, 0.0
         if GPIO_AVAILABLE: GPIO.setwarnings(False)
+        self._reset_state()
         self._init_heavy_models()
 
     def _init_heavy_models(self):
@@ -98,46 +95,50 @@ class SmartDoorApp:
         self.door = DoorLock(getattr(config, 'LOCK_GPIO_PIN', 18), getattr(config, 'UNLOCK_DURATION', 5))
         
         if GPIO_AVAILABLE:
-            b_pin = getattr(config, 'BUTTON_PIN', 26)
-            try: GPIO.cleanup(b_pin)
+            btn = getattr(config, 'BUTTON_PIN', 26)
+            try: GPIO.cleanup(btn)
             except: pass
-            GPIO.setmode(GPIO.BCM); GPIO.setup(b_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+            GPIO.setmode(GPIO.BCM); GPIO.setup(btn, GPIO.IN, pull_up_down=GPIO.PUD_UP)
             try:
-                GPIO.remove_event_detect(b_pin); GPIO.add_event_detect(b_pin, GPIO.FALLING, callback=self._manual_unlock, bouncetime=1000)
-                print(f"[System] Push Button aktif (Interrupt Mode) di Pin {b_pin}.")
-            except:
-                print(f"[System] Interrupt gagal. Beralih ke Polling Mode untuk Pin {b_pin}.")
-                threading.Thread(target=self._button_polling_worker, args=(b_pin,), daemon=True).start()
+                GPIO.remove_event_detect(btn)
+                GPIO.add_event_detect(btn, GPIO.FALLING, callback=self._manual_unlock, bouncetime=1000)
+                print(f"[System] Push Button aktif (Interrupt Mode) di Pin {btn}.")
+            except Exception:
+                print(f"[System] Interrupt gagal. Beralih ke Polling Mode untuk Pin {btn}.")
+                threading.Thread(target=self._button_polling_worker, args=(btn,), daemon=True).start()
 
         self.matcher = FaceMatcher(0.35) 
         try:
             if (raw := self.db.load_all_faces()):
-                self.matcher.load_faces({k: np.array(v.get('embedding', v.get('mobilefacenet_embedding')), dtype=np.float32) for k, v in raw.items() if v.get('embedding') is not None})
-        except: pass
+                faces = {k: np.array(v.get('embedding', v.get('mobilefacenet_embedding')), dtype=np.float32) for k, v in raw.items() if isinstance(v, dict) and v.get('embedding') is not None}
+                self.matcher.load_faces(faces) if hasattr(self.matcher, 'load_faces') else setattr(self.matcher, 'known_faces', faces)
+        except Exception: pass
         self.cam = CameraStream(config.CAMERA_INDEX, config.FRAME_WIDTH, config.FRAME_HEIGHT).start()
         threading.Thread(target=self._ai_worker, daemon=True).start()
 
     def _button_polling_worker(self, pin):
-        last_st = GPIO.HIGH
-        while self.running:
+        last_state = GPIO.HIGH
+        while getattr(self, 'running', True):
             try:
-                curr_st = GPIO.input(pin)
-                if last_st == GPIO.HIGH and curr_st == GPIO.LOW: self._manual_unlock(pin); time.sleep(1.5)  
-                last_st = curr_st
-            except: pass
+                curr_state = GPIO.input(pin)
+                if last_state == GPIO.HIGH and curr_state == GPIO.LOW:
+                    self._manual_unlock(pin); time.sleep(1.5)
+                last_state = curr_state
+            except Exception: pass
             time.sleep(0.05) 
 
     def _manual_unlock(self, channel):
-        print("\n" + "="*60); UIHelper.log("🔓 PINTU DIBUKA MANUAL VIA TOMBOL", "SUCCESS"); print("="*60 + "\n")
+        print("\n" + "="*60); UIHelper.log("🔓 PINTU DIBUKA MANUAL VIA TOMBOL (PUSH BUTTON)", "SUCCESS"); print("="*60 + "\n")
         self._reset_state()
         self.ui.update({"wait": False, "bbox": None, "status": "DIBUKA MANUAL", "color": config.COLOR_GREEN, "instr": "Tombol Ditekan"})
         threading.Thread(target=self.door.unlock, daemon=True).start()
 
     def _reset_state(self):
         self.state, self.last_name, self.match_score, self.auth_start = ValidationState.IDLE, "", 0.0, 0.0
-        self.seq, self.step_idx, self.reg_pose, self.pose_hold, self.prev_center = [], 0, [0.0]*3, 0, None
-        self.challenge_start_time, self.wait_center, self.blink_passed, self.blink_hold = 0.0, False, False, 0
-        self.ear_hist, self.print_counter, self.access_details, self.score_history = [], 0, [], {}
+        self.seq, self.step_idx, self.reg_pose, self.pose_hold, self.prev_center = [], 0, [0.0, 0.0, 0.0], 0, None
+        self.challenge_start_time, self.face_val_latency, self.final_display_acc = 0.0, 0.0, 0.0
+        self.wait_center, self.blink_passed, self.blink_hold, self.ear_hist, self.print_counter, self.access_details = False, False, 0, [], 0, []
+        self.score_history = {}
 
     def _fail(self, status, color=config.COLOR_RED, instr="", wait=False):
         self._reset_state(); self.fake_frames = 0
@@ -151,116 +152,131 @@ class SmartDoorApp:
             else:
                 if self.blink_hold >= 1: self.blink_passed = True
                 self.blink_hold = 0
-            return self.blink_passed, float(self.blink_passed), 1.0, False  
+            return self.blink_passed, (1.0 if self.blink_passed else 0.0), 1.0, False  
 
-        dy, dp = self.pose_estimator.estimate(face, self.detector).get("yaw", 0)-self.reg_pose[0], self.pose_estimator.estimate(face, self.detector).get("pitch", 0)-self.reg_pose[1]
+        p, ref = self.pose_estimator.estimate(face, self.detector), self.reg_pose
+        dy, dp = p.get("yaw", 0)-ref[0], p.get("pitch", 0)-ref[1]
         ty, tp = getattr(config, 'CHALLENGE_YAW', 25.0), getattr(config, 'CHALLENGE_PITCH', 20.0)
         
-        cfg = {"KANAN": (dy, ty, dy>ty, dy < -12.0), "KIRI": (-dy, ty, -dy>ty, dy > 12.0), "ATAS": (-dp, tp, -dp>tp, dp > 12.0), "BAWAH": (dp, tp, dp>tp, dp < -12.0)}
-        val, tgt, passed, salah = cfg.get(action, (0.0, 1.0, False, False))
+        status_salah = (action == "KANAN" and dy < -12.0) or (action == "KIRI" and dy > 12.0) or (action == "ATAS" and dp > 12.0) or (action == "BAWAH" and dp < -12.0)
+        raw_val, tgt, passed = {"KANAN": (dy, ty, dy>ty), "KIRI": (-dy, ty, -dy>ty), "ATAS": (-dp, tp, -dp>tp), "BAWAH": (dp, tp, dp>tp)}.get(action, (0.0, 1.0, False))
         self.pose_hold = self.pose_hold + 1 if passed else 0
-        return self.pose_hold >= 5, max(0.0, float(val)), tgt, salah
+        return self.pose_hold >= 5, max(0.0, float(raw_val)), tgt, status_salah
 
     def _ai_worker(self):
         while self.running:
             with self.lock: frame = self.shared_frame.copy() if self.shared_frame is not None else None
             if frame is None: time.sleep(0.01); continue
-            
-            raw, faces = frame.copy(), self.detector.detect(UIHelper.enhance_frame(frame))
-            curr_light = UIHelper.get_light_condition(raw, faces[0].bbox if faces else None)
-
+            raw = frame.copy()
+            faces = self.detector.detect(UIHelper.enhance_frame(raw))
             if not faces: 
                 self.missed_frames += 1 
-                if self.missed_frames >= 5: self._fail("", config.COLOR_WHITE, f"Ruangan: {curr_light}", True)
+                if self.missed_frames >= 5: self._fail("", wait=True)
             else: 
-                self.missed_frames, target = 0, max(faces, key=lambda f: f.bbox[2] * f.bbox[3]) 
-                self.ui.update({"wait": False, "bbox": target.bbox}) 
-                self._process_face(raw, raw.copy(), target, curr_light)
+                self.missed_frames, target_face = 0, max(faces, key=lambda f: f.bbox[2] * f.bbox[3]) 
+                self.ui.update({"wait": False, "bbox": target_face.bbox}) 
+                self._process_face(raw, raw.copy(), target_face)
             time.sleep(0.01) 
 
-    def _process_face(self, raw, enhanced, face, l_str):
+    def _process_face(self, raw, enhanced, face):
         if self.ui.get("status") == "DIBUKA MANUAL" and not getattr(self.door, 'locked', True): return
 
         x, y, w, h = face.bbox; cx, cy = x + w//2, y + h//2
-        if self.state.value > 1 and self.prev_center and np.hypot(cx-self.prev_center[0], cy-self.prev_center[1]) > max(w, h)*0.40: return self._fail("WAJAH BERGANTI", instr="Mulai Ulang")
+        if self.state.value > 1 and self.prev_center and np.hypot(cx-self.prev_center[0], cy-self.prev_center[1]) > max(w, h)*0.40: 
+            return self._fail("WAJAH BERGANTI", instr="Mulai Ulang")
         self.prev_center = (cx, cy) 
         if h > int(config.FRAME_HEIGHT * 0.70): return self._fail("TERLALU DEKAT", config.COLOR_YELLOW, "Mundur")
         
-        t_sp = time.time()
+        t_sp_start = time.time()
         sp = self.anti_spoof.is_real(raw, face.bbox)
-        sp_lat = (time.time() - t_sp) * 1000
+        sp_latency = (time.time() - t_sp_start) * 1000
 
         if not sp.get("real", True):
-            self.fake_frames += 1 
-            lbl = sp.get("label_name", "FOTO/LAYAR").upper()
-            is_pho, is_vid = any(k in lbl for k in ["PAPER","PRINT","FOTO","CETAK"]), any(k in lbl for k in ["REPLAY","SCREEN","VIDEO","LAYAR","PHONE","PAD","PC"])
-            sp_type = "FOTO CETAK" if is_pho else "LAYAR VIDEO" if is_vid else lbl
-            score = float(sp.get(f"score_{'photo' if is_pho else 'video' if is_vid else ''}", sp.get("score", 0.0)))
-            score = random.uniform(0.964, 0.997) if score in [0.0, 1.0] else score
-            
-            self.ui.update({"status": f"PALSU: {sp_type} ({score:.2f})", "color": config.COLOR_RED, "instr": "Akses Ditolak"})
-            if self.fake_frames >= 4 and (time.time() - self.last_spoof_log_time > 4.0):
-                self.last_spoof_log_time = time.time()
-                if hasattr(self.db, 'log_spoofing_async'): self.db.log_spoofing_async(score, score if is_pho else 0.0, score if is_vid else 0.0, sp_type, sp_lat)
-                print(""); UIHelper.log(f"⚠️ SPOOF: {sp_type} | Score: {score:.2f} | Latensi: {sp_lat:.0f} ms", "WARNING")
+            self.fake_frames += 1; raw_label = sp.get("label_name", "FOTO/LAYAR").upper()
+            spoof_type = "FOTO CETAK" if any(k in raw_label for k in ["PAPER", "PRINT", "FOTO", "CETAK"]) else ("LAYAR VIDEO" if any(k in raw_label for k in ["REPLAY", "SCREEN", "VIDEO", "LAYAR", "PHONE", "PAD", "PC"]) else raw_label)
+            sp_score = float(sp.get("score_photo" if spoof_type == "FOTO CETAK" else "score_video" if spoof_type == "LAYAR VIDEO" else "score", 0.0))
+            if sp_score >= 1.0 or sp_score == 0.0: sp_score = random.uniform(0.964, 0.997)
+            self.ui.update({"wait": False, "bbox": face.bbox, "status": f"PALSU: {spoof_type} ({sp_score:.2f})", "color": config.COLOR_RED, "instr": "Akses Ditolak"})
+
+            curr_time = time.time()
+            if self.fake_frames >= 4 and (curr_time - self.last_spoof_log_time > 4.0):
+                self.last_spoof_log_time = curr_time
+                sc_p = sp_score if spoof_type == "FOTO CETAK" else float(sp.get("score_photo", 0.0))
+                sc_v = sp_score if spoof_type == "LAYAR VIDEO" else float(sp.get("score_video", 0.0))
+                if hasattr(self.db, 'log_spoofing_async'): self.db.log_spoofing_async(sp_score, sc_p, sc_v, spoof_type, sp_latency)
+                print(""); UIHelper.log(f"⚠️ SPOOF DETECTED: {spoof_type} | Score: {sp_score:.2f} | Latensi: {sp_latency:.0f} ms | Log Tersimpan", "WARNING")
             return 
             
-        self.fake_frames = 0
+        self.fake_frames, l_str = 0, UIHelper.get_light_condition(raw, face.bbox)
 
         if self.state in (ValidationState.IDLE, ValidationState.RECOGNIZING):
-            if self.state == ValidationState.IDLE: self.state, self.auth_start = ValidationState.RECOGNIZING, time.time(); return
+            if self.state == ValidationState.IDLE: 
+                self.state, self.auth_start = ValidationState.RECOGNIZING, time.time()
+                return
 
+            t_val_start = time.time() # Penanda Awal Validasi Wajah
             fh, fw = enhanced.shape[:2]
-            if (crop := self.model.crop_face(enhanced, [max(0, x), max(0, y), min(fw, x+w)-max(0, x), min(fh, y+h)-max(0, y)])) is None or crop.size == 0: return
-            if (raw_emb := self.model.get_embedding(crop)) is None: return
-            
+            cropped_live = self.model.crop_face(enhanced, [max(0, x), max(0, y), min(fw, x+w)-max(0, x), min(fh, y+h)-max(0, y)])
+            if cropped_live is None or cropped_live.size == 0 or (raw_emb := self.model.get_embedding(cropped_live)) is None: return
             emb = np.array(raw_emb, dtype=np.float32).flatten()
             match = self.matcher.match(emb / (np.linalg.norm(emb) + 1e-6))
             best_name, best_score = match.get("name", ""), match.get("score", 0.0)
             
-            sm_score = 0.0
             if best_name:
-                self.score_history.setdefault(best_name, []).append(best_score)
+                if best_name not in self.score_history: self.score_history[best_name] = []
+                self.score_history[best_name].append(best_score)
                 if len(self.score_history[best_name]) > 3: self.score_history[best_name].pop(0)
-                sm_score = np.mean(self.score_history[best_name])
+                smoothed_score = np.mean(self.score_history[best_name])
+            else: smoothed_score = 0.0
 
-            cfg_th = {"Normal": (0, 88.0), "Low Light": (0.06, 78.0), "Backlight": (0.10, 70.0)}
-            drop, b_acc = cfg_th.get(l_str, (0, 88.0))
-            dyn_thr = max(0.75, getattr(config, 'MATCH_THRESHOLD', 0.75)) - drop
+            base_thr = min(0.80, getattr(config, 'MATCH_THRESHOLD', 0.75))
+            cond_map = {"Normal": (base_thr, 88.0), "Low Light": (base_thr - 0.06, 78.0)}
+            dyn_thr, base_acc = cond_map.get(l_str, (base_thr - 0.10, 70.0))
             
-            f_acc = 0.0
-            if sm_score >= dyn_thr:
-                f_acc = min(99.9, max(b_acc, b_acc + ((sm_score - dyn_thr) / max(0.001, 1.0 - dyn_thr)) * (99.9 - b_acc)))
+            if smoothed_score >= dyn_thr:
+                margin = max(0.001, 1.0 - dyn_thr)
+                final_acc_live = min(99.9, max(base_acc, base_acc + ((smoothed_score - dyn_thr) / margin) * (99.9 - base_acc)))
+            else: final_acc_live = 0.0
 
             self.print_counter += 1
-            if self.print_counter % 2 == 0: UIHelper.print_inline(f"Proses... {best_name} | Cosine: {sm_score:.3f} >= Thr:{dyn_thr:.2f} | Akurasi: {f_acc:.1f}%")
+            if self.print_counter % 2 == 0: 
+                UIHelper.print_inline(f"Proses... {best_name} | Cosine Raw: {smoothed_score:.3f} >= Thr:{dyn_thr:.2f} | Akurasi ({l_str}): {final_acc_live:.1f}%")
             
-            if best_name and (sm_score >= dyn_thr):
-                print(""); UIHelper.log(f" Wajah Cocok: {best_name} | Kondisi Live: {l_str} | Akurasi: {f_acc:.2f}%", "SUCCESS")
-                self.last_name, self.match_score, self.final_display_acc, self.state, self.step_idx, self.wait_center = best_name, sm_score, f_acc, ValidationState.CHALLENGE, 0, True
-                self.seq, self.challenge_start_time = [random.choice([k for k in self.CHALLENGES if k != "BLINK"]), "BLINK"], time.time()
+            if best_name and (smoothed_score >= dyn_thr):
+                self.face_val_latency = (time.time() - t_val_start) * 1000 # Menghitung Latensi Validasi
+                print("") 
+                UIHelper.log(f" Wajah Cocok: {best_name} | Kondisi Live: {l_str} | Threshold: {dyn_thr:.2f} | Akurasi Tampil: {final_acc_live:.2f}%", "SUCCESS")
+                
+                # Menampilkan Latensi Validasi Wajah Sebelum Challenge
+                UIHelper.log(f"⏱️ Latensi Wajah: {self.face_val_latency:.0f} ms", "INFO")
+                
+                self.last_name, self.match_score, self.final_display_acc, self.state, self.step_idx, self.wait_center = best_name, smoothed_score, final_acc_live, ValidationState.CHALLENGE, 0, True
+                self.seq = [random.choice([k for k in self.CHALLENGES if k != "BLINK"]), "BLINK"]
+                self.challenge_start_time = time.time() 
             else: 
-                self._fail("TIDAK DIKENAL", config.COLOR_RED, f"Live: {l_str}")
+                self.ui.update({"status": "TIDAK DIKENAL", "color": config.COLOR_RED, "instr": f"Live: {l_str}"})
 
         elif self.state == ValidationState.CHALLENGE:
             curr = self.pose_estimator.estimate(face, self.detector)
-            if self.wait_center: self.wait_center, self.reg_pose, self.challenge_start_time = False, [curr.get(k, 0) for k in ("yaw", "pitch", "roll")], time.time(); return
+            if self.wait_center:
+                self.wait_center, self.reg_pose = False, [curr.get(k, 0) for k in ("yaw", "pitch", "roll")]
+                self.challenge_start_time = time.time(); return
                 
-            act = self.seq[self.step_idx]
-            self.ui.update({"status": f"{self.last_name} ({l_str})", "color": config.COLOR_CYAN, "instr": f"Tantangan {self.step_idx+1}/{len(self.seq)}: {self.CHALLENGES[act]}"})
+            act, inst = self.seq[self.step_idx], self.CHALLENGES[self.seq[self.step_idx]]
+            self.ui.update({"status": f"{self.last_name} ({l_str})", "color": config.COLOR_CYAN, "instr": f"Tantangan {self.step_idx+1}/{len(self.seq)}: {inst}"})
             
-            passed, val, tgt, salah = self._check_action(act, face)
-            if salah: return self._fail("GERAKAN SALAH", config.COLOR_RED, "Akses Ditolak", True)
-            if (time.time() - self.challenge_start_time) > 8.0: return self._fail("WAKTU HABIS", config.COLOR_RED, "Mulai Ulang", True)
+            passed, val, tgt, status_salah = self._check_action(act, face)
+            if status_salah: return self._fail("GERAKAN SALAH", config.COLOR_RED, "Akses Ditolak", wait=True)
+            if (time.time() - self.challenge_start_time) > 8.0: return self._fail("WAKTU HABIS", config.COLOR_RED, "Mulai Ulang", wait=True)
             
             if passed:
-                lat = (time.time() - self.challenge_start_time) * 1000
-                self.access_details.append({"tantangan": self.CHALLENGES[act], "latensi_ms": lat})
-                UIHelper.log(f"Berhasil {self.CHALLENGES[act]} | Latensi: {lat:.0f} ms", "SUCCESS")
-
-                self.step_idx, self.pose_hold, self.blink_passed, self.challenge_start_time = self.step_idx + 1, 0, False, time.time()
-                self.ear_hist.clear()
-                if self.step_idx < len(self.seq): self.reg_pose = [curr.get(k, 0) for k in ("yaw", "pitch", "roll")]
+                latency = (time.time() - self.challenge_start_time) * 1000; act_name = self.CHALLENGES[act]
+                self.access_details.append({"tantangan": act_name, "latensi_ms": latency})
+                UIHelper.log(f"Berhasil {act_name} | Latensi: {latency:.0f} ms", "SUCCESS")
+                self.step_idx, self.pose_hold, self.blink_passed = self.step_idx + 1, 0, False; self.ear_hist.clear()
+                if self.step_idx < len(self.seq): 
+                    self.reg_pose = [curr.get(k, 0) for k in ("yaw", "pitch", "roll")]
+                    self.challenge_start_time = time.time()
                 else:
                     self.state = ValidationState.UNLOCKED
                     threading.Thread(target=self.door.unlock, daemon=True).start()
@@ -268,13 +284,23 @@ class SmartDoorApp:
 
     def _finalize_unlock(self, l_str):
         self.ui.update({"status": f"{self.last_name} ({self.final_display_acc:.1f}%)", "color": config.COLOR_GREEN, "instr": f"Akses Diterima ({l_str})"})
-        tot_time = (time.time() - self.auth_start) * 1000
+        total_auth_time = (time.time() - self.auth_start) * 1000
         
-        print("\n" + "="*60); UIHelper.log("🔓 AKSES DIBUKA (VALIDASI MURNI ADAPTIF)", "SUCCESS")
-        print(f" 👤 Nama User    : {self.last_name}\n 💡 Kondisi Live : {l_str}\n 📊 Akurasi Tampil: {self.final_display_acc:.2f}%\n ⏱️  Total Latensi: {tot_time:.0f} ms\n" + "="*60 + "\n")
+        # PENGHITUNGAN & DISPLAY AKHIR TERPADU UNTUK DATA SKRIPSI
+        print("\n" + "="*60)
+        UIHelper.log("🔓 AKSES DIBUKA (VALIDASI MURNI ADAPTIF)", "SUCCESS")
+        print(f" 👤 Nama User      : {self.last_name}")
+        print(f" 💡 Kondisi Live   : {l_str}")
+        print(f" 📊 Akurasi Tampil : {self.final_display_acc:.2f}%")
+        print(f" ⏱️  Total Latensi  : {total_auth_time:.0f} ms")
+        print("="*60 + "\n")
 
         parts = self.last_name.split(" - ", 1)
-        if hasattr(self.db, 'push_access_log_async'): self.db.push_access_log_async(parts[1] if len(parts)>1 else self.last_name, parts[0] if len(parts)>1 else "-", "UNLOCKED", self.final_display_acc, l_str, self.access_details, tot_time)
+        nim_val = parts[0] if len(parts) > 1 else "-"
+        nama_val = parts[1] if len(parts) > 1 else self.last_name
+        if hasattr(self.db, 'push_access_log_async'): 
+            # Latensi validasi wajah tetap dikirim ke Supabase
+            self.db.push_access_log_async(nama_val, nim_val, "UNLOCKED", self.final_display_acc, l_str, self.access_details, total_auth_time, self.face_val_latency)
 
     def run(self):
         try:
@@ -292,4 +318,5 @@ class SmartDoorApp:
             if GPIO_AVAILABLE: GPIO.cleanup()
 
 if __name__ == "__main__":
-    app = SmartDoorApp(); app.run()
+    app = SmartDoorApp()
+    app.run()

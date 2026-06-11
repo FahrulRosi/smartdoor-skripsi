@@ -7,7 +7,7 @@ FPS             = 30
 
 # ── Peningkatan Gambar (Low-Light & Backlight) ───────────────────────────────
 ENABLE_CLAHE_ENHANCEMENT = True
-CLAHE_CLIP_LIMIT         = 2.5
+CLAHE_CLIP_LIMIT         = 1.2
 CLAHE_TILE_GRID_SIZE     = (8, 8)
 
 # ── Database Supabase ────────────────────────────────────────────────────────
@@ -15,8 +15,8 @@ SUPABASE_URL = "https://gwwxebdmavlmxxcdrlge.supabase.co"
 SUPABASE_KEY = "sb_publishable_tUsmI6J1BubOlRf9YhtNPQ_F9dWIyOv"
 
 # ── FaceMesh ─────────────────────────────────────────────────────────────────
-MIN_DETECTION_CONFIDENCE = 0.5
-MIN_TRACKING_CONFIDENCE  = 0.5
+MIN_DETECTION_CONFIDENCE = 0.75
+MIN_TRACKING_CONFIDENCE  = 0.7
 
 # ── Register Liveness Thresholds ─────────────────────────────────────────────
 MAX_YAW   = 12.0  
@@ -47,7 +47,7 @@ MIN_BLINK_DELTA      = 0.04
 ANTI_SPOOFING_MODEL     = "liveness/antispoofing.onnx"
 ANTI_SPOOFING_THRESHOLD = 0.85 
 
-MATCH_THRESHOLD         = 0.82
+MATCH_THRESHOLD         = 0.88
 MOBILEFACENET_PATH      = "recognition/mobilefacenet.onnx"
 
 # ── Door Lock & UI ───────────────────────────────────────────────────────────

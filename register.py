@@ -33,20 +33,6 @@ class Helpers:
         return cv2.cvtColor(img_yuv, cv2.COLOR_YUV2BGR)
 
     @staticmethod
-    def map_illumination(img, target_mean, target_std):
-        img_yuv = cv2.cvtColor(img, cv2.COLOR_BGR2YUV)
-        y, u, v = cv2.split(img_yuv)
-        curr_mean = np.mean(y)
-        curr_std = np.std(y) + 1e-6
-        y_norm = (y - curr_mean) / curr_std
-        y_target = (y_norm * target_std) + target_mean
-        y_target = np.clip(y_target, 0, 255).astype(np.uint8)
-        u_mean, v_mean = np.mean(u), np.mean(v)
-        u = cv2.addWeighted(u, 1.0, u, 0.0, int(128 - u_mean))
-        v = cv2.addWeighted(v, 1.0, v, 0.0, int(128 - v_mean))
-        return cv2.cvtColor(cv2.merge([y_target, u, v]), cv2.COLOR_YUV2BGR)
-
-    @staticmethod
     def capture_blink(face):
         if not getattr(face, 'landmarks', None) or len(face.landmarks) < 400: return None
         p = np.array([[face.landmarks[i].x, face.landmarks[i].y] for i in [33,160,158,133,153,144,362,385,387,263,373,380]])
@@ -73,6 +59,19 @@ class Helpers:
         if (L_bg_effective - L) > 12 and L_bg_effective > 90: return "Backlight"
         elif L_bg < 80 or L < 80: return "Low Light"
         else: return "Normal"
+
+    @staticmethod
+    def is_image_quality_good(frame, bbox):
+        x, y, w, h = bbox
+        fh, fw = frame.shape[:2]
+        x1, y1 = max(0, x), max(0, y)
+        x2, y2 = min(fw, x + w), min(fh, y + h)
+        face_roi = frame[y1:y2, x1:x2]
+        if face_roi.size == 0: return False, 0.0, 0.0
+        gray = cv2.cvtColor(face_roi, cv2.COLOR_BGR2GRAY)
+        brightness = np.mean(gray)
+        blur_score = cv2.Laplacian(gray, cv2.CV_64F).var()
+        return (50 < brightness < 200) and (blur_score > 80), brightness, blur_score
 
     @staticmethod
     def draw_hud(f, stg, instr, prog, score_txt, status, bbox, col):
@@ -131,7 +130,9 @@ class FaceRegistrationApp:
         self.name, self.stage, self.in_ext, self.hold_frames, self.missed_frames = name, RegistrationStage.FACEMESH, False, 0, 0
         self.fake_frames = 0
         self.is_running, self.display_frame, self.frame_lock = True, None, threading.Lock()
-        self.cap_data = {"facemesh_vector": None, "yaw_snapshots": [], "pitch_snapshots": [], "roll_snapshots": [], "blink_closed": None, "blink_open": None, "headpose_vector": None}
+        
+        # 🚨 TEMPAT PENYIMPANAN FOTO MULTI-SUDUT
+        self.cap_data = {"facemesh_vector": None, "yaw_snapshots": [], "pitch_snapshots": [], "roll_snapshots": [], "blink_closed": None, "blink_open": None, "headpose_vector": None, "face_crops": []}
         self._pose_buf, self._blink_buf, self._prev_step = {"yaw": {}, "pitch": {}, "roll": {}}, {"closed": None, "open": None, "logged_closed": False, "logged_open": False}, "FACEMESH"
         
         self.db = FaceDatabase()
@@ -152,7 +153,7 @@ class FaceRegistrationApp:
             if raw:
                 faces = {k: np.array(v.get('embedding', v.get('mobilefacenet_embedding')), dtype=np.float32) for k, v in raw.items() if isinstance(v, dict) and v.get('embedding') is not None}
                 self.matcher.load_faces(faces) if hasattr(self.matcher, 'load_faces') else setattr(self.matcher, 'known_faces', faces)
-        except Exception as e: _log(f"Warning: {e}", "SYSTEM")
+        except Exception as e: pass
         
         self.liveness.start_register()
         self.action_start_time = None
@@ -160,20 +161,28 @@ class FaceRegistrationApp:
         self.prev_instruction = None
         self.prev_tag = None
         self.individual_latencies = {}  
-        _log(f"✅ Sistem Inisialisasi Selesai untuk {self.name}.", "SYSTEM")
+        _log(f"✅ Memulai Registrasi untuk {self.name}...", "SYSTEM")
 
-    def _record_data_buffers(self, face, pose):
+    def _record_data_buffers(self, face, pose, enhanced):
         if not self.action_start_time: return
+        
+        # 1. PENGAMBILAN DATA POSISI LURUS (FRONTAL)
         if self.stage == RegistrationStage.FACEMESH and self.cap_data["facemesh_vector"] is None and face.landmarks:
             self.hold_frames += 1
             if self.hold_frames >= 5: 
-                current_action_latency = round((time.time() - self.action_start_time) * 1000, 2)
+                lat_ms = round((time.time() - self.action_start_time) * 1000, 2)
                 self.cap_data["facemesh_vector"] = np.array([[l.x, l.y, l.z] for l in face.landmarks], dtype=np.float32).flatten()
+                
+                # CROP WAJAH FRONTAL UNTUK FUSION
+                crop = self.model.crop_face(enhanced, face.bbox)
+                if crop is not None and crop.size > 0: self.cap_data["face_crops"].append(("Frontal", crop))
+
                 self.hold_frames = 0
-                self.individual_latencies["FaceMesh (3D)"] = current_action_latency
-                _log(f"   -> [Menganalisa 3D Berhasil]   | Latensi: {current_action_latency:>8.2f} ms", "SUCCESS")
+                self.individual_latencies["FaceMesh (3D)"] = lat_ms
+                _log(f"   -> [Wajah 3D Terekam]      | Latensi: {lat_ms:>8.2f} ms", "SUCCESS")
                 self.action_start_time = time.time() 
 
+        # 2. PENGAMBILAN DATA SAAT LIVENESS (MENCURI SUDUT WAJAH)
         if self.stage in self.POSE_CFG:
             _, t_neg, t_pos, axis, thr = self.POSE_CFG[self.stage]
             val = pose.get(axis, 0.0)
@@ -186,52 +195,51 @@ class FaceRegistrationApp:
                 self.hold_frames += 1
                 if self.hold_frames >= 6:
                     if tag not in buf:
-                        current_action_latency = round((time.time() - self.action_start_time) * 1000, 2)
+                        lat_ms = round((time.time() - self.action_start_time) * 1000, 2)
                         buf[tag] = {k: float(pose.get(k, 0.0)) for k in ("yaw", "pitch", "roll")}
-                        buf[tag]["tag"] = tag
-                        buf[tag]["latency_ms"] = current_action_latency 
+                        buf[tag]["tag"], buf[tag]["latency_ms"] = tag, lat_ms 
                         friendly_name = {"yaw_left": "Toleh Kiri", "yaw_right": "Toleh Kanan", "pitch_up": "Angguk Atas", "pitch_down": "Tunduk Bawah", "roll_left": "Miring Kiri", "roll_right": "Miring Kanan"}.get(tag, tag)
-                        self.individual_latencies[friendly_name] = current_action_latency
+                        self.individual_latencies[friendly_name] = lat_ms
                         
-                        _log(f"   -> [Berhasil {friendly_name:<12}] | Latensi: {current_action_latency:>8.2f} ms", "SUCCESS")
+                        # CROP WAJAH SUDUT SAMPING/ATAS/BAWAH UNTUK FUSION
+                        if tag in ["yaw_left", "yaw_right", "pitch_up", "pitch_down"]:
+                            crop = self.model.crop_face(enhanced, face.bbox)
+                            if crop is not None and crop.size > 0: 
+                                self.cap_data["face_crops"].append((friendly_name, crop))
+
+                        _log(f"   -> [Berhasil {friendly_name:<12}] | Latensi: {lat_ms:>8.2f} ms", "SUCCESS")
                         self.action_start_time = time.time() 
                         self.hold_frames = 0
             else: 
                 self.hold_frames = 0
                 self.prev_tag = None
 
+        # 3. KEDIP
         if self.stage == RegistrationStage.BLINK:
             bv = Helpers.capture_blink(face)
             if bv:
-                min_open   = getattr(config, 'MIN_BLINK_OPEN_EAR', 0.22)
-                max_closed = getattr(config, 'MAX_BLINK_CLOSED_EAR', 0.20)
+                min_open, max_closed = getattr(config, 'MIN_BLINK_OPEN_EAR', 0.22), getattr(config, 'MAX_BLINK_CLOSED_EAR', 0.20)
                 if bv["avg_ear"] <= max_closed and not self._blink_buf.get("logged_closed"):
-                    current_action_latency = round((time.time() - self.action_start_time) * 1000, 2)
-                    bv["latency_ms"] = current_action_latency
-                    self._blink_buf["closed"] = bv
-                    self._blink_buf["logged_closed"] = True
-                    self.individual_latencies["Mata Menutup"] = current_action_latency
-                    
-                    _log(f"   -> [Berhasil Kedip Tutup]    | Latensi: {current_action_latency:>8.2f} ms", "SUCCESS")
+                    lat_ms = round((time.time() - self.action_start_time) * 1000, 2)
+                    bv["latency_ms"] = lat_ms
+                    self._blink_buf["closed"], self._blink_buf["logged_closed"] = bv, True
+                    self.individual_latencies["Mata Menutup"] = lat_ms
+                    _log(f"   -> [Berhasil Kedip Tutup]  | Latensi: {lat_ms:>8.2f} ms", "SUCCESS")
                     self.action_start_time = time.time() 
                 elif bv["avg_ear"] >= min_open and self._blink_buf.get("logged_closed") and not self._blink_buf.get("logged_open"):
-                    current_action_latency = round((time.time() - self.action_start_time) * 1000, 2)
-                    bv["latency_ms"] = current_action_latency
-                    self._blink_buf["open"] = bv
-                    self._blink_buf["logged_open"] = True
-                    self.individual_latencies["Mata Membuka"] = current_action_latency
-                    
-                    _log(f"   -> [Berhasil Kedip Buka]     | Latensi: {current_action_latency:>8.2f} ms", "SUCCESS")
+                    lat_ms = round((time.time() - self.action_start_time) * 1000, 2)
+                    bv["latency_ms"] = lat_ms
+                    self._blink_buf["open"], self._blink_buf["logged_open"] = bv, True
+                    self.individual_latencies["Mata Membuka"] = lat_ms
+                    _log(f"   -> [Berhasil Kedip Buka]   | Latensi: {lat_ms:>8.2f} ms", "SUCCESS")
                     self.action_start_time = time.time() 
-                if self._blink_buf.get("closed") and bv["avg_ear"] < self._blink_buf["closed"]["avg_ear"]: 
-                    self._blink_buf["closed"].update(bv)
-                if self._blink_buf.get("open") and bv["avg_ear"] > self._blink_buf["open"]["avg_ear"]: 
-                    self._blink_buf["open"].update(bv)
+                if self._blink_buf.get("closed") and bv["avg_ear"] < self._blink_buf["closed"]["avg_ear"]: self._blink_buf["closed"].update(bv)
+                if self._blink_buf.get("open") and bv["avg_ear"] > self._blink_buf["open"]["avg_ear"]: self._blink_buf["open"].update(bv)
 
     def _generate_metric_text(self, pose, ear_val, sp_score, light_cond):
         stg = self.stage
         hud_txt = {
-            RegistrationStage.FACEMESH: f"Menganalisa Wajah 3D | Cahaya: {light_cond}",
+            RegistrationStage.FACEMESH: f"Menganalisa 3D | Cahaya: {light_cond}",
             RegistrationStage.YAW: f"Aksi: Toleh Kanan/Kiri | Cahaya: {light_cond}",
             RegistrationStage.PITCH: f"Aksi: Angguk Atas/Bawah | Cahaya: {light_cond}",
             RegistrationStage.ROLL: f"Aksi: Miring Kanan/Kiri | Cahaya: {light_cond}",
@@ -250,7 +258,6 @@ class FaceRegistrationApp:
             bc, bo = self._blink_buf["closed"], self._blink_buf["open"]
             min_open, max_closed, min_delta = getattr(config, 'MIN_BLINK_OPEN_EAR', 0.22), getattr(config, 'MAX_BLINK_CLOSED_EAR', 0.20), getattr(config, 'MIN_BLINK_DELTA', 0.04)
             if not bc or not bo or (bo["avg_ear"] < min_open) or (bc["avg_ear"] > max_closed) or (bo["avg_ear"] - bc["avg_ear"] < min_delta): 
-                _log(f"⚠️ Kualitas Blink Ditolak! Ulangi.", "WARNING")
                 self.liveness._register_step, self.liveness._blink_state, self.liveness._hold_frames, self.liveness._blink_count, self._blink_buf = 7, 0, 0, 0, {"closed": None, "open": None, "logged_closed": False, "logged_open": False}; return
             self.cap_data.update({"blink_closed": bc, "blink_open": bo})
         
@@ -263,64 +270,75 @@ class FaceRegistrationApp:
         missing = [k for k, v in [("FaceMesh", self.cap_data["facemesh_vector"] is not None), ("Yaw", len(self.cap_data["yaw_snapshots"])>1), ("Pitch", len(self.cap_data["pitch_snapshots"])>1), ("Roll", len(self.cap_data["roll_snapshots"])>1), ("Blink", self.cap_data["blink_closed"] is not None)] if not v]
         if missing: Helpers.show_msg(display, "❌ GAGAL!", f"Kurang: {','.join(missing)}", config.COLOR_RED); time.sleep(4); self.stage = RegistrationStage.COMPLETE; return
 
+        quality_ok, brightness, blur_score = Helpers.is_image_quality_good(raw_frame, face.bbox)
+        if not quality_ok:
+            reason = "Cahaya Buruk" if not (50 < brightness < 200) else "Kamera Blur"
+            Helpers.show_msg(display, "⚠️ KUALITAS GAMBAR BURUK", f"{reason} | Harap diam", config.COLOR_YELLOW)
+            with self.frame_lock: self.display_frame = display.copy()
+            time.sleep(1.5); return
+
         light_cond = Helpers.get_light_condition(raw_frame, face.bbox)
-        cropped_src = self.model.crop_face(frame, face.bbox)
-        if cropped_src is None or cropped_src.size == 0:
-            Helpers.show_msg(display, "❌ GAGAL!", "Gagal Crop Wajah", config.COLOR_RED)
-            time.sleep(1.5); self.stage = RegistrationStage.COMPLETE; return
-
-        cropped_normal = Helpers.map_illumination(cropped_src, target_mean=128.0, target_std=64.0)
-        cropped_lowlight = Helpers.map_illumination(cropped_src, target_mean=45.0, target_std=15.0)
-        cropped_backlight = Helpers.map_illumination(cropped_src, target_mean=95.0, target_std=30.0)
-
         t_mfn_start = time.time()
-        emb_normal = self.model.get_embedding(cropped_normal)
-        emb_lowlight = self.model.get_embedding(cropped_lowlight)
-        emb_backlight = self.model.get_embedding(cropped_backlight)
-        mfn_latency = round((time.time() - t_mfn_start) * 1000, 2)
         
+        # 🚨 PROSES EMBEDDING FUSION (AVERAGING)
+        embs = []
+        sudut_valid = []
+        
+        # Backup frame terakhir jika proses liveness gagal mengambil gambar
+        if not self.cap_data.get("face_crops"):
+            crop_cadangan = self.model.crop_face(frame, face.bbox)
+            if crop_cadangan is not None: self.cap_data["face_crops"].append(("Frontal Akhir", crop_cadangan))
+            
+        # Mengekstraksi setiap sudut yang tertangkap
+        for nama_sudut, crop in self.cap_data["face_crops"]:
+            emb = self.model.get_embedding(crop)
+            if emb is not None:
+                embs.append(np.array(emb))
+                sudut_valid.append(nama_sudut)
+                
+        if len(embs) == 0:
+            Helpers.show_msg(display, "❌ GAGAL!", "Ekstraksi AI Gagal", config.COLOR_RED)
+            time.sleep(1.5); self.stage = RegistrationStage.COMPLETE; return
+            
+        # Rumus Penggabungan (Rata-rata dari semua sudut wajah)
+        avg_emb = np.mean(embs, axis=0)
+        master_emb = avg_emb.flatten() / (np.linalg.norm(avg_emb) + 1e-6)
+
+        mfn_latency = round((time.time() - t_mfn_start) * 1000, 2)
         self.individual_latencies["MobileFaceNet (Fitur)"] = mfn_latency
         
-        # --- PERBAIKAN: Log langsung dicetak di terminal secara real-time di bawah log kedip mata
-        _log(f"   -> [Ekstraksi Fitur AI]      | Latensi: {mfn_latency:>8.2f} ms", "SUCCESS")
-
         nim_user, nama_user = self.name.split(" - ", 1) if " - " in self.name else ("0000", self.name)
         
-        if emb_normal is not None and emb_lowlight is not None and emb_backlight is not None:
-            avg_emb = (np.array(emb_normal) + np.array(emb_lowlight) + np.array(emb_backlight)) / 3.0
-            master_emb = avg_emb.flatten() / (np.linalg.norm(avg_emb) + 1e-6)
-
-            match = self.matcher.match(master_emb)
-            anti_dup_thr = getattr(config, 'ANTI_DUPLICATE_THRESHOLD', 0.48)
-            
-            if match.get("name") and match.get("score", 0.0) >= anti_dup_thr and os.getenv("ALLOW_DUPLICATE", "false").lower() != "true": 
-                Helpers.show_msg(display, "❌ WAJAH SUDAH TERDAFTAR!", f"User: {match['name']}", config.COLOR_RED)
-            else:
-                total_summed_latency_ms = round(sum(self.individual_latencies.values()), 2)
-                self.cap_data["reg_latency_ms"] = total_summed_latency_ms
-                self.cap_data["individual_latencies"] = self.individual_latencies
-                self.cap_data.update({"headpose_vector": [float(pose["yaw"]), float(pose["pitch"]), float(pose["roll"])], "registration_accuracy": 100.0, "light_condition": light_cond})
-                
-                success_master = self.db.save_face(nama_user, nim_user, master_emb.tolist(), self.cap_data)
-                
-                if success_master: 
-                    # --- PERBAIKAN: Mengambil latensi kedip mata untuk dimunculkan di Summary Panel
-                    bc_lat = self.individual_latencies.get("Mata Menutup", 0.0)
-                    bo_lat = self.individual_latencies.get("Mata Membuka", 0.0)
-                    total_blink_lat = bc_lat + bo_lat
-                    
-                    Helpers.show_msg(display, "✅ REGISTRASI BERHASIL!", f"User: {nama_user} | Master Profil Tersimpan", config.COLOR_GREEN)
-                    print("\n" + "="*55)
-                    print(" 🎉 REGISTRASI MASTER EMBEDDING BERHASIL 🎉".center(55))
-                    print("="*55)
-                    print(f" 👤 Nama       : {nama_user}")
-                    print(f" 💡 Cahaya Asli: {light_cond}")
-                    print(f" 🧠 Strategi   : Fusion 3 Kondisi -> 1 Master Vektor")
-                    print(f" 🏁 LATENSI BERSIH SISTEM      : {total_summed_latency_ms:.2f} ms")
-                    print("="*55 + "\n")
+        match = self.matcher.match(master_emb)
+        anti_dup_thr = getattr(config, 'ANTI_DUPLICATE_THRESHOLD', 0.48)
+        
+        if match.get("name") and match.get("score", 0.0) >= anti_dup_thr and os.getenv("ALLOW_DUPLICATE", "false").lower() != "true": 
+            Helpers.show_msg(display, "❌ WAJAH SUDAH TERDAFTAR!", f"User: {match['name']}", config.COLOR_RED)
         else:
-            Helpers.show_msg(display, "❌ GAGAL!", "Gagal ekstraksi Embedding AI", config.COLOR_RED)
+            total_summed_latency_ms = round(sum(self.individual_latencies.values()), 2)
+            self.cap_data["reg_latency_ms"] = total_summed_latency_ms
+            self.cap_data["individual_latencies"] = self.individual_latencies
+            self.cap_data.update({"headpose_vector": [float(pose["yaw"]), float(pose["pitch"]), float(pose["roll"])], "registration_accuracy": 100.0, "light_condition": light_cond})
             
+            # Hapus data gambar agar database (faces.json) tidak berat
+            if "face_crops" in self.cap_data: del self.cap_data["face_crops"]
+            
+            success_master = self.db.save_face(nama_user, nim_user, master_emb.tolist(), self.cap_data)
+            
+            if success_master: 
+                Helpers.show_msg(display, "✅ REGISTRASI BERHASIL!", f"User: {nama_user} | Master Tersimpan", config.COLOR_GREEN)
+                print("\n" + "="*50)
+                print(" 🎉 REGISTRASI MASTER EMBEDDING BERHASIL 🎉")
+                print("="*50)
+                print(f" 👤 Nama       : {nama_user}")
+                print(f" 💡 Cahaya Asli: {light_cond}")
+                print(f" 🧠 Strategi   : Fusion {len(embs)} Sudut Wajah")
+                print(f"    - Sudut    : {', '.join(sudut_valid)}")
+                print(f" 🏁 TOTAL WAKTU: {total_summed_latency_ms:.2f} ms")
+                print("="*50 + "\n")
+            else:
+                Helpers.show_msg(display, "❌ GAGAL!", "Database Error", config.COLOR_RED)
+                
         with self.frame_lock: self.display_frame = display.copy()
         time.sleep(1.5); self.stage = RegistrationStage.COMPLETE 
 
@@ -355,9 +373,6 @@ class FaceRegistrationApp:
                 if not self._timer_started:
                     self.action_start_time = time.time()
                     self._timer_started = True
-                    print("-" * 65)
-                    _log("⏱️ Stopwatch aksi pendaftaran dimulai murni dari 0 ms!", "SYSTEM")
-                    print("-" * 65)
 
                 display = self.detector.draw(display, face)
                 display = cv2.flip(display, 1)
@@ -370,7 +385,7 @@ class FaceRegistrationApp:
                 pose = self.liveness.pose_estimator.estimate(face, self.detector)
                 ear_val = (Helpers.capture_blink(face) or {}).get("avg_ear", 0.0)
                 sp = self.anti_spoof.is_real(raw, face.bbox)
-                sp_score, sp_real, sp_label = float(sp.get("score_real", sp.get("score", 1.0))), sp.get("real", True), sp.get("label_name", "FOTO/VIDEO").upper()
+                sp_score, sp_real, sp_label = float(sp.get("score_real", sp.get("score", 1.0))), sp.get("real", True), sp.get("label_name", "FOTO").upper()
                 
                 light_cond = Helpers.get_light_condition(raw, face.bbox)
                 hud_txt, term_txt = self._generate_metric_text(pose, ear_val, sp_score, light_cond)
@@ -383,7 +398,7 @@ class FaceRegistrationApp:
                 else: self.fake_frames = 0
 
                 if self.stage != RegistrationStage.EXTRACTION and not self.in_ext:
-                    self._record_data_buffers(face, pose) 
+                    self._record_data_buffers(face, pose, enhanced) 
                     res = self.liveness.update_register(face, self.detector)
                     if res["step"] != "WAIT" and res["step"] != self._prev_step:
                         if self.stage in self.POSE_CFG:

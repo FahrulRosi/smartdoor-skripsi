@@ -48,7 +48,7 @@ class UIHelper:
         face_roi = gray[y1:y2, x1:x2]
         L = np.mean(face_roi) if face_roi.size > 0 else 100.0
         top_bg = gray[0:max(0, y1-10), max(0, x1-30):min(fw, x2+30)]
-        L_bg = np.mean(gray) # Default bg fallback
+        L_bg = np.mean(gray) 
         mask = np.ones((fh, fw), dtype=bool); mask[y1:y2, x1:x2] = False
         if np.any(mask): L_bg = np.mean(gray[mask])
         L_bg_effective = max(L_bg, np.mean(top_bg) if top_bg.size > 0 else L)
@@ -58,6 +58,14 @@ class UIHelper:
     @staticmethod
     def draw_ui(d, ui, locked):
         fw, fh = d.shape[1], d.shape[0]
+        
+        # 🚨 SPLASH SCREEN: Tampilan transisi saat memuat sistem agar tidak gelap kosong
+        if ui.get("status") == "STARTING":
+            cv2.rectangle(d, (0, 0), (fw, fh), (20, 20, 20), -1)
+            cv2.putText(d, "SISTEM SEDANG BERSIAP...", (fw//2 - 120, fh//2 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, config.COLOR_YELLOW, 2, cv2.LINE_AA)
+            cv2.putText(d, "Kalibrasi Kamera & Memuat Model AI", (fw//2 - 140, fh//2 + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (180, 180, 180), 1, cv2.LINE_AA)
+            return
+
         if ui.get("wait"): 
             cv2.putText(d, "Mencari Wajah...", (15, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.45, config.COLOR_YELLOW, 1, cv2.LINE_AA)
         elif ui.get("bbox"):
@@ -82,7 +90,9 @@ class SmartDoorApp:
     def __init__(self):
         print("\n" + "="*50 + "\n[SYSTEM] SISTEM DOOR LOCK ADAPTIF MURNI\n" + "="*50 + "\n")
         self.lock, self.running, self.shared_frame = threading.Lock(), True, None
-        self.ui = {"wait": True, "bbox": None, "status": "", "color": config.COLOR_WHITE, "instr": ""}
+        
+        # Inisialisasi awal dengan status STARTING untuk memicu splash screen
+        self.ui = {"wait": True, "bbox": None, "status": "STARTING", "color": config.COLOR_WHITE, "instr": ""}
         self.missed_frames, self.fake_frames, self.last_spoof_log_time = 0, 0, 0.0
         if GPIO_AVAILABLE: GPIO.setwarnings(False)
         self._reset_state()
@@ -113,7 +123,15 @@ class SmartDoorApp:
                 faces = {k: np.array(v.get('embedding', v.get('mobilefacenet_embedding')), dtype=np.float32) for k, v in raw.items() if isinstance(v, dict) and v.get('embedding') is not None}
                 self.matcher.load_faces(faces) if hasattr(self.matcher, 'load_faces') else setattr(self.matcher, 'known_faces', faces)
         except Exception: pass
+        
         self.cam = CameraStream(config.CAMERA_INDEX, config.FRAME_WIDTH, config.FRAME_HEIGHT).start()
+        
+        # 🚨 WARM-UP CAMERA: Memberikan jeda 2 detik agar auto-exposure sensor kamera stabil sebelum dianalisis
+        print("[System] Melakukan Kalibrasi Sensor Kamera (Warm-up)...")
+        time.sleep(2.0)
+        
+        # Clear status STARTING, sistem siap menerima wajah
+        self.ui.update({"wait": True, "bbox": None, "status": "", "color": config.COLOR_WHITE, "instr": ""})
         threading.Thread(target=self._ai_worker, daemon=True).start()
 
     def _button_polling_worker(self, pin):
@@ -180,6 +198,7 @@ class SmartDoorApp:
 
     def _process_face(self, raw, enhanced, face):
         if self.ui.get("status") == "DIBUKA MANUAL" and not getattr(self.door, 'locked', True): return
+        if self.ui.get("status") == "STARTING": return
 
         x, y, w, h = face.bbox; cx, cy = x + w//2, y + h//2
         if self.state.value > 1 and self.prev_center and np.hypot(cx-self.prev_center[0], cy-self.prev_center[1]) > max(w, h)*0.40: 
@@ -204,17 +223,18 @@ class SmartDoorApp:
                 sc_p = sp_score if spoof_type == "FOTO CETAK" else float(sp.get("score_photo", 0.0))
                 sc_v = sp_score if spoof_type == "LAYAR VIDEO" else float(sp.get("score_video", 0.0))
                 if hasattr(self.db, 'log_spoofing_async'): self.db.log_spoofing_async(sp_score, sc_p, sc_v, spoof_type, sp_latency)
-                print(""); UIHelper.log(f"⚠️ SPOOF DETECTED: {spoof_type} | Score: {sp_score:.2f} | Latensi: {sp_latency:.0f} ms | Log Tersimpan", "WARNING")
+                print(""); UIHelper.log(f"⚠️ SPOOF DETECTED: {spoof_type} | Score: {sp_score:.2f} | Latensi: {sp_latency:.0f} ms", "WARNING")
             return 
             
         self.fake_frames, l_str = 0, UIHelper.get_light_condition(raw, face.bbox)
 
+        # FASE 1: IDENTIFIKASI WAJAH (LOGIKA UTAMA AWAL)
         if self.state in (ValidationState.IDLE, ValidationState.RECOGNIZING):
             if self.state == ValidationState.IDLE: 
                 self.state, self.auth_start = ValidationState.RECOGNIZING, time.time()
                 return
 
-            t_val_start = time.time() # Penanda Awal Validasi Wajah
+            t_val_start = time.time()
             fh, fw = enhanced.shape[:2]
             cropped_live = self.model.crop_face(enhanced, [max(0, x), max(0, y), min(fw, x+w)-max(0, x), min(fh, y+h)-max(0, y)])
             if cropped_live is None or cropped_live.size == 0 or (raw_emb := self.model.get_embedding(cropped_live)) is None: return
@@ -225,7 +245,7 @@ class SmartDoorApp:
             if best_name:
                 if best_name not in self.score_history: self.score_history[best_name] = []
                 self.score_history[best_name].append(best_score)
-                if len(self.score_history[best_name]) > 3: self.score_history[best_name].pop(0)
+                if len(self.score_history[best_name]) > 7: self.score_history[best_name].pop(0)
                 smoothed_score = np.mean(self.score_history[best_name])
             else: smoothed_score = 0.0
 
@@ -242,20 +262,22 @@ class SmartDoorApp:
             if self.print_counter % 2 == 0: 
                 UIHelper.print_inline(f"Proses... {best_name} | Cosine Raw: {smoothed_score:.3f} >= Thr:{dyn_thr:.2f} | Akurasi ({l_str}): {final_acc_live:.1f}%")
             
+            # --- TRANISI KE TANTANGAN JIKA LULUS THRESHOLD ---
             if best_name and (smoothed_score >= dyn_thr):
-                self.face_val_latency = (time.time() - t_val_start) * 1000 # Menghitung Latensi Validasi
+                self.face_val_latency = (time.time() - t_val_start) * 1000 
+                
                 print("") 
                 UIHelper.log(f" Wajah Cocok: {best_name} | Kondisi Live: {l_str} | Threshold: {dyn_thr:.2f} | Akurasi Tampil: {final_acc_live:.2f}%", "SUCCESS")
-                
-                # Menampilkan Latensi Validasi Wajah Sebelum Challenge
                 UIHelper.log(f"⏱️ Latensi Wajah: {self.face_val_latency:.0f} ms", "INFO")
                 
-                self.last_name, self.match_score, self.final_display_acc, self.state, self.step_idx, self.wait_center = best_name, smoothed_score, final_acc_live, ValidationState.CHALLENGE, 0, True
+                self.last_name, self.match_score, self.final_display_acc = best_name, smoothed_score, final_acc_live
+                self.state, self.step_idx, self.wait_center = ValidationState.CHALLENGE, 0, True
                 self.seq = [random.choice([k for k in self.CHALLENGES if k != "BLINK"]), "BLINK"]
                 self.challenge_start_time = time.time() 
             else: 
                 self.ui.update({"status": "TIDAK DIKENAL", "color": config.COLOR_RED, "instr": f"Live: {l_str}"})
 
+        # FASE 2: TANTANGAN LIVENESS (LOGIKA AWAL - MENAMPILKAN KONDISI CAHAYA)
         elif self.state == ValidationState.CHALLENGE:
             curr = self.pose_estimator.estimate(face, self.detector)
             if self.wait_center:
@@ -263,7 +285,13 @@ class SmartDoorApp:
                 self.challenge_start_time = time.time(); return
                 
             act, inst = self.seq[self.step_idx], self.CHALLENGES[self.seq[self.step_idx]]
-            self.ui.update({"status": f"{self.last_name} ({l_str})", "color": config.COLOR_CYAN, "instr": f"Tantangan {self.step_idx+1}/{len(self.seq)}: {inst}"})
+            
+            # 🚨 LOGIKA AWAL UI: Menampilkan Nama User dan Kondisi Cahaya saat Tantangan Berlangsung
+            self.ui.update({
+                "status": f"{self.last_name} ({l_str})", 
+                "color": config.COLOR_CYAN, 
+                "instr": f"Tantangan {self.step_idx+1}/{len(self.seq)}: {inst}"
+            })
             
             passed, val, tgt, status_salah = self._check_action(act, face)
             if status_salah: return self._fail("GERAKAN SALAH", config.COLOR_RED, "Akses Ditolak", wait=True)
@@ -283,10 +311,11 @@ class SmartDoorApp:
                     self._finalize_unlock(l_str)
 
     def _finalize_unlock(self, l_str):
+        # 🚨 LOGIKA AWAL UI: Menampilkan Nama User dan Akurasi Tinggi yang Dibekukan saat Pintu Sukses Terbuka
         self.ui.update({"status": f"{self.last_name} ({self.final_display_acc:.1f}%)", "color": config.COLOR_GREEN, "instr": f"Akses Diterima ({l_str})"})
         total_auth_time = (time.time() - self.auth_start) * 1000
         
-        # PENGHITUNGAN & DISPLAY AKHIR TERPADU UNTUK DATA SKRIPSI
+        # 🚨 LOGIKA AWAL TERMINAL OUTPUT: Bersih dan Ringkas untuk Skripsi
         print("\n" + "="*60)
         UIHelper.log("🔓 AKSES DIBUKA (VALIDASI MURNI ADAPTIF)", "SUCCESS")
         print(f" 👤 Nama User      : {self.last_name}")
@@ -299,7 +328,6 @@ class SmartDoorApp:
         nim_val = parts[0] if len(parts) > 1 else "-"
         nama_val = parts[1] if len(parts) > 1 else self.last_name
         if hasattr(self.db, 'push_access_log_async'): 
-            # Latensi validasi wajah tetap dikirim ke Supabase
             self.db.push_access_log_async(nama_val, nim_val, "UNLOCKED", self.final_display_acc, l_str, self.access_details, total_auth_time, self.face_val_latency)
 
     def run(self):

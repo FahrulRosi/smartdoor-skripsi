@@ -131,7 +131,6 @@ class FaceRegistrationApp:
         self.fake_frames = 0
         self.is_running, self.display_frame, self.frame_lock = True, None, threading.Lock()
         
-        # 🚨 TEMPAT PENYIMPANAN FOTO MULTI-SUDUT
         self.cap_data = {"facemesh_vector": None, "yaw_snapshots": [], "pitch_snapshots": [], "roll_snapshots": [], "blink_closed": None, "blink_open": None, "headpose_vector": None, "face_crops": []}
         self._pose_buf, self._blink_buf, self._prev_step = {"yaw": {}, "pitch": {}, "roll": {}}, {"closed": None, "open": None, "logged_closed": False, "logged_open": False}, "FACEMESH"
         
@@ -166,14 +165,13 @@ class FaceRegistrationApp:
     def _record_data_buffers(self, face, pose, enhanced):
         if not self.action_start_time: return
         
-        # 1. PENGAMBILAN DATA POSISI LURUS (FRONTAL)
+        # PENGAMBILAN DATA FRONTAL
         if self.stage == RegistrationStage.FACEMESH and self.cap_data["facemesh_vector"] is None and face.landmarks:
             self.hold_frames += 1
             if self.hold_frames >= 5: 
                 lat_ms = round((time.time() - self.action_start_time) * 1000, 2)
                 self.cap_data["facemesh_vector"] = np.array([[l.x, l.y, l.z] for l in face.landmarks], dtype=np.float32).flatten()
                 
-                # CROP WAJAH FRONTAL UNTUK FUSION
                 crop = self.model.crop_face(enhanced, face.bbox)
                 if crop is not None and crop.size > 0: self.cap_data["face_crops"].append(("Frontal", crop))
 
@@ -182,7 +180,7 @@ class FaceRegistrationApp:
                 _log(f"   -> [Wajah 3D Terekam]      | Latensi: {lat_ms:>8.2f} ms", "SUCCESS")
                 self.action_start_time = time.time() 
 
-        # 2. PENGAMBILAN DATA SAAT LIVENESS (MENCURI SUDUT WAJAH)
+        # PENGAMBILAN DATA SAAT LIVENESS
         if self.stage in self.POSE_CFG:
             _, t_neg, t_pos, axis, thr = self.POSE_CFG[self.stage]
             val = pose.get(axis, 0.0)
@@ -201,7 +199,6 @@ class FaceRegistrationApp:
                         friendly_name = {"yaw_left": "Toleh Kiri", "yaw_right": "Toleh Kanan", "pitch_up": "Angguk Atas", "pitch_down": "Tunduk Bawah", "roll_left": "Miring Kiri", "roll_right": "Miring Kanan"}.get(tag, tag)
                         self.individual_latencies[friendly_name] = lat_ms
                         
-                        # CROP WAJAH SUDUT SAMPING/ATAS/BAWAH UNTUK FUSION
                         if tag in ["yaw_left", "yaw_right", "pitch_up", "pitch_down"]:
                             crop = self.model.crop_face(enhanced, face.bbox)
                             if crop is not None and crop.size > 0: 
@@ -214,7 +211,7 @@ class FaceRegistrationApp:
                 self.hold_frames = 0
                 self.prev_tag = None
 
-        # 3. KEDIP
+        # PENGAMBILAN DATA KEDIP
         if self.stage == RegistrationStage.BLINK:
             bv = Helpers.capture_blink(face)
             if bv:
@@ -278,18 +275,18 @@ class FaceRegistrationApp:
             time.sleep(1.5); return
 
         light_cond = Helpers.get_light_condition(raw_frame, face.bbox)
-        t_mfn_start = time.time()
         
-        # 🚨 PROSES EMBEDDING FUSION (AVERAGING)
+        # --- PERHITUNGAN LATENSI RESPON SUBJEK (SEBELUM PROSES AI) ---
+        latensi_respon_subjek = round(sum(self.individual_latencies.values()), 2)
+        
+        t_mfn_start = time.time()
         embs = []
         sudut_valid = []
         
-        # Backup frame terakhir jika proses liveness gagal mengambil gambar
         if not self.cap_data.get("face_crops"):
             crop_cadangan = self.model.crop_face(frame, face.bbox)
             if crop_cadangan is not None: self.cap_data["face_crops"].append(("Frontal Akhir", crop_cadangan))
             
-        # Mengekstraksi setiap sudut yang tertangkap
         for nama_sudut, crop in self.cap_data["face_crops"]:
             emb = self.model.get_embedding(crop)
             if emb is not None:
@@ -300,42 +297,43 @@ class FaceRegistrationApp:
             Helpers.show_msg(display, "❌ GAGAL!", "Ekstraksi AI Gagal", config.COLOR_RED)
             time.sleep(1.5); self.stage = RegistrationStage.COMPLETE; return
             
-        # Rumus Penggabungan (Rata-rata dari semua sudut wajah)
         avg_emb = np.mean(embs, axis=0)
         master_emb = avg_emb.flatten() / (np.linalg.norm(avg_emb) + 1e-6)
 
+        # --- PERHITUNGAN LATENSI KOMPUTASI AI ---
         mfn_latency = round((time.time() - t_mfn_start) * 1000, 2)
-        self.individual_latencies["MobileFaceNet (Fitur)"] = mfn_latency
+        total_waktu_sistem = latensi_respon_subjek + mfn_latency
         
         nim_user, nama_user = self.name.split(" - ", 1) if " - " in self.name else ("0000", self.name)
-        
         match = self.matcher.match(master_emb)
         anti_dup_thr = getattr(config, 'ANTI_DUPLICATE_THRESHOLD', 0.48)
         
         if match.get("name") and match.get("score", 0.0) >= anti_dup_thr and os.getenv("ALLOW_DUPLICATE", "false").lower() != "true": 
             Helpers.show_msg(display, "❌ WAJAH SUDAH TERDAFTAR!", f"User: {match['name']}", config.COLOR_RED)
         else:
-            total_summed_latency_ms = round(sum(self.individual_latencies.values()), 2)
-            self.cap_data["reg_latency_ms"] = total_summed_latency_ms
+            self.cap_data["reg_latency_ms"] = total_waktu_sistem
             self.cap_data["individual_latencies"] = self.individual_latencies
             self.cap_data.update({"headpose_vector": [float(pose["yaw"]), float(pose["pitch"]), float(pose["roll"])], "registration_accuracy": 100.0, "light_condition": light_cond})
             
-            # Hapus data gambar agar database (faces.json) tidak berat
             if "face_crops" in self.cap_data: del self.cap_data["face_crops"]
             
             success_master = self.db.save_face(nama_user, nim_user, master_emb.tolist(), self.cap_data)
             
             if success_master: 
                 Helpers.show_msg(display, "✅ REGISTRASI BERHASIL!", f"User: {nama_user} | Master Tersimpan", config.COLOR_GREEN)
-                print("\n" + "="*50)
-                print(" 🎉 REGISTRASI MASTER EMBEDDING BERHASIL 🎉")
-                print("="*50)
-                print(f" 👤 Nama       : {nama_user}")
-                print(f" 💡 Cahaya Asli: {light_cond}")
-                print(f" 🧠 Strategi   : Fusion {len(embs)} Sudut Wajah")
-                print(f"    - Sudut    : {', '.join(sudut_valid)}")
-                print(f" 🏁 TOTAL WAKTU: {total_summed_latency_ms:.2f} ms")
-                print("="*50 + "\n")
+                
+                # --- FORMAT TERMINAL OUTPUT UNTUK SKRIPSI ---
+                print("\n" + "="*65)
+                print(" 🎉 REGISTRASI MASTER EMBEDDING BERHASIL 🎉".center(65))
+                print("="*65)
+                print(f" 👤 Nama User             : {nama_user}")
+                print(f" 💡 Kondisi Live          : {light_cond}")
+                print(f" 🧠 Strategi              : Averaged Multi-Angle Fusion ({len(embs)} Sudut)")
+                print("-" * 65)
+                print(f" ⏱️ Latensi Respon Subjek : {latensi_respon_subjek:.2f} ms (User Reaction Time)")
+                print(f" ⏱️ Ekstraksi Fitur AI    : {mfn_latency:.2f} ms")
+                print(f" ⏱️ Total Waktu Sistem    : {total_waktu_sistem:.2f} ms")
+                print("="*65 + "\n")
             else:
                 Helpers.show_msg(display, "❌ GAGAL!", "Database Error", config.COLOR_RED)
                 

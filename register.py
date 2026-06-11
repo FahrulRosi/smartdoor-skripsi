@@ -24,13 +24,41 @@ def _log(msg, level="INFO"):
 
 class Helpers:
     @staticmethod
-    def enhance_frame(frame):
+    def enhance_adaptive(frame, bbox=None, l_str="Normal"):
         if not getattr(config, 'ENABLE_CLAHE_ENHANCEMENT', True): return frame
-        # DIKEMBALIKAN KE KODE AWAL
-        denoised = cv2.bilateralFilter(frame, d=3, sigmaColor=30, sigmaSpace=30)
+        if not bbox: return frame
+        
+        w = bbox[2]
+        if w > 180:    dist_cat = "DEKAT"
+        elif w >= 100: dist_cat = "SEDANG"
+        else:          dist_cat = "JAUH"
+        
+        matrix_clip = {
+            "DEKAT":  {"Normal": 1.0, "Low Light": 1.3, "Backlight": 1.2},
+            "SEDANG": {"Normal": 1.5, "Low Light": 2.0, "Backlight": 1.8},
+            "JAUH":   {"Normal": 2.2, "Low Light": 2.5, "Backlight": 2.4}
+        }
+        clip_limit = matrix_clip[dist_cat].get(l_str, 1.5)
+        
+        d_val = 5 if dist_cat == "DEKAT" else 3
+        denoised = cv2.bilateralFilter(frame, d=d_val, sigmaColor=30, sigmaSpace=30)
         img_yuv = cv2.cvtColor(denoised, cv2.COLOR_BGR2YUV)
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8))
         img_yuv[:,:,0] = clahe.apply(img_yuv[:,:,0])
+        return cv2.cvtColor(img_yuv, cv2.COLOR_YUV2BGR)
+
+    @staticmethod
+    def clone_low_light(img):
+        """Membuat kloning gambar redup secara digital"""
+        low_light = cv2.convertScaleAbs(img, alpha=0.6, beta=-40)
+        return cv2.GaussianBlur(low_light, (3, 3), 0)
+
+    @staticmethod
+    def clone_backlight(img):
+        """Membuat kloning gambar backlight (silau dari belakang)"""
+        backlight = cv2.convertScaleAbs(img, alpha=0.4, beta=-10)
+        img_yuv = cv2.cvtColor(backlight, cv2.COLOR_BGR2YUV)
+        img_yuv[:,:,0] = cv2.equalizeHist(img_yuv[:,:,0])
         return cv2.cvtColor(img_yuv, cv2.COLOR_YUV2BGR)
 
     @staticmethod
@@ -48,18 +76,14 @@ class Helpers:
         fh, fw = raw_frame.shape[:2]
         x1, y1, x2, y2 = max(0, bx), max(0, by), min(fw, bx + bw), min(fh, by + bh)
         gray = cv2.cvtColor(raw_frame, cv2.COLOR_BGR2GRAY)
-        face_roi = gray[y1:y2, x1:x2]
-        L = np.mean(face_roi) if face_roi.size > 0 else 100.0
-        top_bg = gray[0:max(0, y1-10), max(0, x1-30):min(fw, x2+30)]
-        L_bg = np.mean(gray) 
-        mask = np.ones((fh, fw), dtype=bool); mask[y1:y2, x1:x2] = False
-        if np.any(mask): L_bg = np.mean(gray[mask])
-        L_bg_effective = max(L_bg, np.mean(top_bg) if top_bg.size > 0 else L)
         
-        # SMART THRESHOLD: Disamakan dengan main.py
-        if (L_bg_effective - L) > 50 and L_bg_effective > 160 and L < 110: 
+        L = np.mean(gray[y1:y2, x1:x2]) if gray[y1:y2, x1:x2].size > 0 else 100.0
+        top_bg = gray[0:max(0, y1-10), max(0, x1-30):min(fw, x2+30)]
+        L_bg_atas = np.mean(top_bg) if top_bg.size > 0 else L
+        
+        if (L_bg_atas - L) > 50 and L_bg_atas > 160 and L < 110: 
             return "Backlight"
-        return "Low Light" if (L_bg < 70 or L < 70) else "Normal"
+        return "Low Light" if (L_bg_atas < 95 or L < 95) else "Normal"
 
     @staticmethod
     def is_image_quality_good(frame, bbox):
@@ -166,19 +190,29 @@ class FaceRegistrationApp:
     def _record_data_buffers(self, face, pose, enhanced):
         if not self.action_start_time: return
         
-        if self.stage == RegistrationStage.FACEMESH and self.cap_data["facemesh_vector"] is None and face.landmarks:
-            self.hold_frames += 1
-            if self.hold_frames >= 5: 
-                lat_ms = round((time.time() - self.action_start_time) * 1000, 2)
-                self.cap_data["facemesh_vector"] = np.array([[l.x, l.y, l.z] for l in face.landmarks], dtype=np.float32).flatten()
+        if self.stage == RegistrationStage.FACEMESH and face.landmarks:
+            if self.cap_data["facemesh_vector"] is None:
+                self.hold_frames += 1
                 
-                crop = self.model.crop_face(enhanced, face.bbox)
-                if crop is not None and crop.size > 0: self.cap_data["face_crops"].append(("Frontal", crop))
+                if self.hold_frames % 3 == 0 and len(self.cap_data["face_crops"]) < 3:
+                    crop = self.model.crop_face(enhanced, face.bbox)
+                    if crop is not None and crop.size > 0:
+                        idx = len(self.cap_data["face_crops"]) + 1
+                        self.cap_data["face_crops"].append((f"Frontal_{idx}", crop))
+                
+                if self.hold_frames >= 9: 
+                    lat_ms = round((time.time() - self.action_start_time) * 1000, 2)
+                    self.cap_data["facemesh_vector"] = np.array([[l.x, l.y, l.z] for l in face.landmarks], dtype=np.float32).flatten()
+                    
+                    if not self.cap_data["face_crops"]:
+                        crop = self.model.crop_face(enhanced, face.bbox)
+                        if crop is not None and crop.size > 0: 
+                            self.cap_data["face_crops"].append(("Frontal_Fallback", crop))
 
-                self.hold_frames = 0
-                self.individual_latencies["FaceMesh (3D)"] = lat_ms
-                _log(f"   -> [Wajah 3D Terekam]      | Latensi: {lat_ms:>8.2f} ms", "SUCCESS")
-                self.action_start_time = time.time() 
+                    self.hold_frames = 0
+                    self.individual_latencies["FaceMesh (3D)"] = lat_ms
+                    _log(f"   -> [Wajah 3D Terekam]      | Latensi: {lat_ms:>8.2f} ms", "SUCCESS")
+                    self.action_start_time = time.time() 
 
         if self.stage in self.POSE_CFG:
             _, t_neg, t_pos, axis, thr = self.POSE_CFG[self.stage]
@@ -198,11 +232,6 @@ class FaceRegistrationApp:
                         friendly_name = {"yaw_left": "Toleh Kiri", "yaw_right": "Toleh Kanan", "pitch_up": "Angguk Atas", "pitch_down": "Tunduk Bawah", "roll_left": "Miring Kiri", "roll_right": "Miring Kanan"}.get(tag, tag)
                         self.individual_latencies[friendly_name] = lat_ms
                         
-                        if tag in ["yaw_left", "yaw_right", "pitch_up", "pitch_down"]:
-                            crop = self.model.crop_face(enhanced, face.bbox)
-                            if crop is not None and crop.size > 0: 
-                                self.cap_data["face_crops"].append((friendly_name, crop))
-
                         _log(f"   -> [Berhasil {friendly_name:<12}] | Latensi: {lat_ms:>8.2f} ms", "SUCCESS")
                         self.action_start_time = time.time() 
                         self.hold_frames = 0
@@ -257,6 +286,7 @@ class FaceRegistrationApp:
             self.cap_data.update({"blink_closed": bc, "blink_open": bo})
         
         self._prev_step, self.stage = cur_step, STEP_TO_STAGE.get(cur_step, self.stage)
+        
         if self.stage != RegistrationStage.COMPLETE:
             self.action_start_time = time.time()
             self.hold_frames = 0
@@ -273,35 +303,48 @@ class FaceRegistrationApp:
             time.sleep(1.5); return
 
         light_cond = Helpers.get_light_condition(raw_frame, face.bbox)
-        
         latensi_respon_subjek = round(sum(self.individual_latencies.values()), 2)
-        
         t_mfn_start = time.time()
-        embs = []
-        sudut_valid = []
         
         if not self.cap_data.get("face_crops"):
             crop_cadangan = self.model.crop_face(frame, face.bbox)
             if crop_cadangan is not None: self.cap_data["face_crops"].append(("Frontal Akhir", crop_cadangan))
             
-        for nama_sudut, crop in self.cap_data["face_crops"]:
-            emb = self.model.get_embedding(crop)
-            if emb is not None:
-                embs.append(np.array(emb))
-                sudut_valid.append(nama_sudut)
-                
-        if len(embs) == 0:
+        # -------------------------------------------------------------
+        # MODIFIKASI SOLUSI A: KLONING DIGITAL MATRIKS 2D (3 VEKTOR)
+        # -------------------------------------------------------------
+        
+        # 1. Ambil HANYA 1 gambar frontal asli terbaik (elemen pertama)
+        _, crop_normal = self.cap_data["face_crops"][0]
+        
+        # 2. Buat Kloning Sintetis (Low Light & Backlight)
+        crop_low_light = Helpers.clone_low_light(crop_normal)
+        crop_backlight = Helpers.clone_backlight(crop_normal)
+        
+        # 3. Ekstraksi AI untuk ketiga kondisi
+        emb_normal = self.model.get_embedding(crop_normal)
+        emb_low_light = self.model.get_embedding(crop_low_light)
+        emb_backlight = self.model.get_embedding(crop_backlight)
+        
+        if emb_normal is None or emb_low_light is None or emb_backlight is None:
             Helpers.show_msg(display, "❌ GAGAL!", "Ekstraksi AI Gagal", config.COLOR_RED)
             time.sleep(1.5); self.stage = RegistrationStage.COMPLETE; return
             
-        avg_emb = np.mean(embs, axis=0)
-        master_emb = avg_emb.flatten() / (np.linalg.norm(avg_emb) + 1e-6)
+        # 4. Normalisasi Vektor Murni
+        def norm_emb(e):
+            e_arr = np.array(e).flatten()
+            return (e_arr / (np.linalg.norm(e_arr) + 1e-6)).tolist()
+            
+        # 5. Gabungkan menjadi 1 Matriks (Array 2D berisi 3 Vektor)
+        multi_master_embs = [norm_emb(emb_normal), norm_emb(emb_low_light), norm_emb(emb_backlight)]
 
         mfn_latency = round((time.time() - t_mfn_start) * 1000, 2)
         total_waktu_sistem = latensi_respon_subjek + mfn_latency
         
         nim_user, nama_user = self.name.split(" - ", 1) if " - " in self.name else ("0000", self.name)
-        match = self.matcher.match(master_emb)
+        
+        # Gunakan vektor normal untuk cek duplikat
+        match = self.matcher.match(np.array(multi_master_embs[0], dtype=np.float32))
         anti_dup_thr = getattr(config, 'ANTI_DUPLICATE_THRESHOLD', 0.48)
         
         if match.get("name") and match.get("score", 0.0) >= anti_dup_thr and os.getenv("ALLOW_DUPLICATE", "false").lower() != "true": 
@@ -310,24 +353,23 @@ class FaceRegistrationApp:
             self.cap_data["reg_latency_ms"] = total_waktu_sistem
             self.cap_data["individual_latencies"] = self.individual_latencies
             self.cap_data.update({"headpose_vector": [float(pose["yaw"]), float(pose["pitch"]), float(pose["roll"])], "registration_accuracy": 100.0, "light_condition": light_cond})
-            
             if "face_crops" in self.cap_data: del self.cap_data["face_crops"]
             
-            success_master = self.db.save_face(nama_user, nim_user, master_emb.tolist(), self.cap_data)
+            # Simpan 3 Vektor Kloning ke Database
+            success_master = self.db.save_face(nama_user, nim_user, multi_master_embs, self.cap_data)
             
             if success_master: 
-                Helpers.show_msg(display, "✅ REGISTRASI BERHASIL!", f"User: {nama_user} | Master Tersimpan", config.COLOR_GREEN)
+                Helpers.show_msg(display, "✅ REGISTRASI BERHASIL!", f"User: {nama_user} | Multi-Vector", config.COLOR_GREEN)
                 
                 print("\n" + "="*65)
-                print(" 🎉 REGISTRASI MASTER EMBEDDING BERHASIL 🎉".center(65))
+                print(" 🎉 REGISTRASI MULTI-VECTOR BERHASIL 🎉".center(65))
                 print("="*65)
                 print(f" 👤 Nama User             : {nama_user}")
                 print(f" 💡 Kondisi Live          : {light_cond}")
-                print(f" 🧠 Strategi              : Averaged Multi-Angle Fusion ({len(embs)} Sudut)")
+                print(f" 🧠 Strategi              : Kloning Matriks 2D (Norm, Low, Back)")
                 print("-" * 65)
-                print(f" ⏱️ Latensi Respon Subjek : {latensi_respon_subjek:.2f} ms (User Reaction Time)")
-                print(f" ⏱️ Ekstraksi Fitur AI    : {mfn_latency:.2f} ms")
-                print(f" ⏱️ Total Waktu Sistem    : {total_waktu_sistem:.2f} ms")
+                print(f" ⏱️ Latensi Respon Subjek : {latensi_respon_subjek:.2f} ms")
+                print(f" ⏱️ Ekstraksi AI (3x)     : {mfn_latency:.2f} ms")
                 print("="*65 + "\n")
             else:
                 Helpers.show_msg(display, "❌ GAGAL!", "Database Error", config.COLOR_RED)
@@ -342,9 +384,9 @@ class FaceRegistrationApp:
                 ret, frame = self.cam.read()
                 if not ret: time.sleep(0.01); continue
                 raw = frame.copy()
-                enhanced = Helpers.enhance_frame(raw)
                 display = raw.copy()
-                faces = self.detector.detect(enhanced)
+                
+                faces = self.detector.detect(raw)
                 
                 if not faces: 
                     self.missed_frames += 1
@@ -363,6 +405,9 @@ class FaceRegistrationApp:
                 face = faces[0]
                 bbox_memory = face.bbox
                 
+                light_cond = Helpers.get_light_condition(raw, face.bbox)
+                enhanced = Helpers.enhance_adaptive(raw, face.bbox, light_cond)
+                
                 if not self._timer_started:
                     self.action_start_time = time.time()
                     self._timer_started = True
@@ -380,12 +425,10 @@ class FaceRegistrationApp:
                 sp = self.anti_spoof.is_real(raw, face.bbox)
                 sp_score, sp_real, sp_label = float(sp.get("score_real", sp.get("score", 1.0))), sp.get("real", True), sp.get("label_name", "FOTO").upper()
                 
-                light_cond = Helpers.get_light_condition(raw, face.bbox)
                 hud_txt, term_txt = self._generate_metric_text(pose, ear_val, sp_score, light_cond)
                 
                 if not sp_real:
                     self.fake_frames += 1
-                    # BUFFER: HANYA BLOKIR JIKA 4 FRAME BERTURUT-TURUT TERDETEKSI PALSU (Toleransi blur)
                     if self.fake_frames >= 4:
                         Helpers.draw_hud(display, self.stage, "❌ DETEKSI SPOOFING!", f"Palsu: {sp_score:.2f}", hud_txt, f"{sp_label}", face.bbox, config.COLOR_RED)
                         with self.frame_lock: self.display_frame = display
@@ -431,7 +474,7 @@ class FaceRegistrationApp:
 
 if __name__ == "__main__":
     print("\n" + "="*40)
-    print("   SISTEM REGISTRASI WAJAH")
+    print("   SISTEM REGISTRASI WAJAH MULTI-VECTOR")
     print("="*40)
     nama_input = input("Masukan Nama : ").strip()
     if nama_input:

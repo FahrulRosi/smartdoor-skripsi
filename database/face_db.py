@@ -16,7 +16,16 @@ class DataTransformer:
         ear_c = float(blink_c.get("avg_ear", 0.0))
         ear_o = float(blink_o.get("avg_ear", 0.0))
         
-        emb_list = [float(x) for x in embedding]
+        # ----------------------------------------------------------------------
+        # PROTEKSI MATRIKS 2D: Cek apakah ini Multi-Vector (List di dalam List)
+        # ----------------------------------------------------------------------
+        if len(embedding) > 0 and isinstance(embedding[0], list):
+            # Jika ini adalah array 2D dari fitur kloning (Solusi A)
+            emb_list = [[float(val) for val in vec] for vec in embedding]
+        else:
+            # Jika ini adalah array 1D (Format register lama)
+            emb_list = [float(x) for x in embedding]
+        # ----------------------------------------------------------------------
         
         fm_vector = liveness_data.get("facemesh_vector", [])
         if isinstance(fm_vector, np.ndarray): fm_list = fm_vector.tolist()
@@ -292,7 +301,7 @@ class FaceDatabase:
     def push_access_log_async(self, user_name, nim, status, accuracy, light_cond="N/A", access_details=None, auth_latency_ms=0.0, face_val_latency_ms=0.0):
         created_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         def _task():
-            headpose_str, blink_str = "-", "-"
+            headpose_str, blink_str = "-" , "-"
             if access_details:
                 headpose_str, blink_str = "", ""
                 for d in access_details:

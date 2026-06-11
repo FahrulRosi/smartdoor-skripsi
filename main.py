@@ -4,7 +4,6 @@ import config
 from camera.camera_stream import CameraStream
 from facemesh.facemesh_detector import FaceMeshDetector
 from recognition.mobilefacenet import MobileFaceNet
-from recognition.face_matcher import FaceMatcher
 from door.door_lock import DoorLock
 from liveness.head_pose import HeadPoseEstimator
 from liveness.anti_spoofing import SilentAntiSpoofing  
@@ -23,11 +22,27 @@ class UIHelper:
     def print_inline(msg): sys.stdout.write(f"\r ⏳ {msg}".ljust(120)); sys.stdout.flush()
 
     @staticmethod
-    def enhance_frame(frame):
+    def enhance_adaptive(frame, bbox, l_str="Normal"):
         if not getattr(config, 'ENABLE_CLAHE_ENHANCEMENT', True): return frame
-        denoised = cv2.bilateralFilter(frame, d=3, sigmaColor=30, sigmaSpace=30)
+        if not bbox: return frame
+        
+        w = bbox[2]
+        if w > 180:     dist_cat = "DEKAT"
+        elif w >= 100: dist_cat = "SEDANG"
+        else:          dist_cat = "JAUH"
+        
+        matrix_clip = {
+            "DEKAT":  {"Normal": 1.0, "Low Light": 1.3, "Backlight": 1.2},
+            "SEDANG": {"Normal": 1.5, "Low Light": 2.0, "Backlight": 1.8},
+            "JAUH":   {"Normal": 2.2, "Low Light": 2.5, "Backlight": 2.4}
+        }
+        clip_limit = matrix_clip[dist_cat].get(l_str, 1.5)
+        
+        d_val = 5 if dist_cat == "DEKAT" else 3
+        denoised = cv2.bilateralFilter(frame, d=d_val, sigmaColor=30, sigmaSpace=30)
+        
         img_yuv = cv2.cvtColor(denoised, cv2.COLOR_BGR2YUV)
-        img_yuv[:,:,0] = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(img_yuv[:,:,0])
+        img_yuv[:,:,0] = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8)).apply(img_yuv[:,:,0])
         return cv2.cvtColor(img_yuv, cv2.COLOR_YUV2BGR)
 
     @staticmethod
@@ -50,16 +65,19 @@ class UIHelper:
     @staticmethod
     def get_light_condition(raw, bbox):
         if not bbox: return "Normal"
-        x1, y1, x2, y2 = max(0, bbox[0]), max(0, bbox[1]), min(raw.shape[1], bbox[0]+bbox[2]), min(raw.shape[0], bbox[1]+bbox[3])
+        bx, by, bw, bh = bbox
+        fh, fw = raw.shape[:2]
+        x1, y1, x2, y2 = max(0, bx), max(0, by), min(fw, bx + bw), min(fh, by + bh)
         gray = cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY)
-        L = np.mean(gray[y1:y2, x1:x2]) if gray[y1:y2, x1:x2].size > 0 else 100.0
-        mask = np.ones(gray.shape, dtype=bool); mask[y1:y2, x1:x2] = False
-        L_bg = np.mean(gray[mask]) if np.any(mask) else np.mean(gray)
-        top_bg = gray[0:max(0, y1-10), max(0, x1-30):min(raw.shape[1], x2+30)]
-        L_bg_eff = max(L_bg, np.mean(top_bg) if top_bg.size > 0 else L)
         
-        if (L_bg_eff - L) > 50 and L_bg_eff > 160 and L < 110: return "Backlight"
-        return "Low Light" if (L_bg < 70 or L < 70) else "Normal"
+        L = np.mean(gray[y1:y2, x1:x2]) if gray[y1:y2, x1:x2].size > 0 else 100.0
+        top_bg = gray[0:max(0, y1-10), max(0, x1-30):min(fw, x2+30)]
+        L_bg_atas = np.mean(top_bg) if top_bg.size > 0 else L
+        
+        if (L_bg_atas - L) > 50 and L_bg_atas > 160 and L < 110: 
+            return "Backlight"
+            
+        return "Low Light" if (L_bg_atas < 95 or L < 95) else "Normal"
 
     @staticmethod
     def draw_ui(d, ui, locked):
@@ -90,7 +108,7 @@ class SmartDoorApp:
     CHALLENGES = {"BLINK": "Kedipkan Mata", "KANAN": "Toleh KANAN", "KIRI": "Toleh KIRI", "ATAS": "Dongak ATAS", "BAWAH": "Tunduk BAWAH"}
 
     def __init__(self):
-        print("\n" + "="*50 + "\n[SYSTEM] SISTEM DOOR LOCK ADAPTIF MURNI\n" + "="*50 + "\n")
+        print("\n" + "="*50 + "\n[SYSTEM] SISTEM DOOR LOCK MULTI-VECTOR MATRIKS 2D\n" + "="*50 + "\n")
         self.lock, self.running, self.shared_frame = threading.Lock(), True, None
         self.ui = {"wait": True, "bbox": None, "status": "STARTING", "color": config.COLOR_WHITE, "instr": ""}
         self.missed_frames, self.fake_frames, self.last_spoof_log_time = 0, 0, 0.0
@@ -102,7 +120,9 @@ class SmartDoorApp:
         self.anti_spoof = SilentAntiSpoofing(getattr(config, 'ANTI_SPOOFING_MODEL', "liveness/antispoofing.onnx"), getattr(config, 'ANTI_SPOOFING_THRESHOLD', 0.70))
         self.detector = FaceMeshDetector(min_detection_confidence=0.5, min_tracking_confidence=0.5)
         self.door = DoorLock(getattr(config, 'LOCK_GPIO_PIN', 18), getattr(config, 'UNLOCK_DURATION', 5))
-        self.matcher = FaceMatcher(0.35) 
+        
+        # Inisialisasi Penampung Matriks 2D
+        self.known_faces_2d = {} 
         
         if GPIO_AVAILABLE:
             btn = getattr(config, 'BUTTON_PIN', 26)
@@ -111,11 +131,19 @@ class SmartDoorApp:
             try: GPIO.remove_event_detect(btn); GPIO.add_event_detect(btn, GPIO.FALLING, callback=self._manual_unlock, bouncetime=1000)
             except Exception: threading.Thread(target=self._button_polling_worker, args=(btn,), daemon=True).start()
 
+        # Load Matriks 2D (Mendukung data register lama 1D maupun yang baru 2D)
         try:
             if (raw := self.db.load_all_faces()):
-                faces = {k: np.array(v.get('embedding', v.get('mobilefacenet_embedding')), dtype=np.float32) for k, v in raw.items() if isinstance(v, dict) and v.get('embedding') is not None}
-                self.matcher.load_faces(faces) if hasattr(self.matcher, 'load_faces') else setattr(self.matcher, 'known_faces', faces)
-        except Exception: pass
+                for k, v in raw.items():
+                    if isinstance(v, dict) and v.get('embedding') is not None:
+                        emb_data = v.get('embedding')
+                        # Jika list bersarang (Array 2D dari fitur kloning)
+                        if isinstance(emb_data[0], list): 
+                            self.known_faces_2d[k] = [np.array(e, dtype=np.float32) for e in emb_data]
+                        # Jika data register format lama (Array 1D biasa)
+                        else: 
+                            self.known_faces_2d[k] = [np.array(emb_data, dtype=np.float32)]
+        except Exception as e: print(f"Error Loading DB: {e}")
         
         self.cam = CameraStream(config.CAMERA_INDEX, config.FRAME_WIDTH, config.FRAME_HEIGHT).start()
         time.sleep(2.0)
@@ -163,29 +191,57 @@ class SmartDoorApp:
         self.pose_hold = self.pose_hold + 1 if passed else 0
         return self.pose_hold >= 5, max(0.0, float(raw_val)), tgt, status_salah
 
+    def _match_multi_vector(self, query_emb):
+        """Mencocokkan wajah dari kamera dengan ke-3 Vektor (Matriks) di DB"""
+        best_name, best_score = "", 0.0
+        query_emb = query_emb / (np.linalg.norm(query_emb) + 1e-6)
+        
+        for name, emb_list in self.known_faces_2d.items():
+            for known_emb in emb_list:
+                score = np.dot(query_emb, known_emb)
+                if score > best_score:
+                    best_score, best_name = score, name
+        return best_name, float(best_score)
+
     def _check_identity(self, raw, enhanced, face, l_str):
         fh, fw = enhanced.shape[:2]; x, y, w, h = face.bbox
         cropped = self.model.crop_face(enhanced, [max(0, x), max(0, y), min(fw, x+w)-max(0, x), min(fh, y+h)-max(0, y)])
         if cropped is None or cropped.size == 0: return "", 0.0, 0.75, 0.0, False
         
-        if l_str == "Low Light": cropped = UIHelper.map_illumination(cropped, 100.0, 50.0)
-        elif l_str == "Backlight": cropped = UIHelper.map_illumination(cropped, 128.0, 64.0)
+        # Pencerahan digital tambahan untuk ekstraksi lebih tajam
+        if l_str == "Low Light": cropped = UIHelper.map_illumination(cropped, 125.0, 50.0)
+        elif l_str == "Backlight": cropped = UIHelper.map_illumination(cropped, 130.0, 64.0)
 
         raw_emb = self.model.get_embedding(cropped)
         if raw_emb is None: return "", 0.0, 0.75, 0.0, False
         
-        emb = np.array(raw_emb, dtype=np.float32).flatten()
-        match = self.matcher.match(emb / (np.linalg.norm(emb) + 1e-6))
-        b_name, b_score = match.get("name", ""), match.get("score", 0.0)
+        query_emb = np.array(raw_emb, dtype=np.float32).flatten()
+        
+        # Pemanggilan Multi-Vector Matrix Check (Solusi A)
+        b_name, b_score = self._match_multi_vector(query_emb)
         
         self.score_history.setdefault(b_name, []).append(b_score) if b_name else None
         if b_name and len(self.score_history[b_name]) > 7: self.score_history[b_name].pop(0)
         
         sm_score = np.mean(self.score_history[b_name]) if b_name else 0.0
-        b_thr = min(0.80, getattr(config, 'MATCH_THRESHOLD', 0.75))
-        d_thr, b_acc = {"Normal": (b_thr, 88.0), "Low Light": (b_thr - 0.06, 78.0)}.get(l_str, (b_thr - 0.10, 70.0))
         
-        final_acc = min(99.9, max(b_acc, b_acc + ((sm_score - d_thr) / max(0.001, 1.0 - d_thr)) * (99.9 - b_acc))) if sm_score >= d_thr else 0.0
+        # MATRIKS THRESHOLD DINAMIS (Nilai Ideal Rumus Murni)
+        if w > 180:    dist_cat = "DEKAT"
+        elif w >= 100: dist_cat = "SEDANG"
+        else:          dist_cat = "JAUH"
+
+        b_thr = getattr(config, 'MATCH_THRESHOLD', 0.70)
+        matrix_thr = {
+            "DEKAT":  {"Normal": (0.00, 88.0), "Low Light": (-0.05, 80.0), "Backlight": (-0.03, 84.0)},
+            "SEDANG": {"Normal": (0.00, 88.0), "Low Light": (-0.07, 78.0), "Backlight": (-0.05, 82.0)},
+            "JAUH":   {"Normal": (-0.02, 86.0), "Low Light": (-0.09, 74.0), "Backlight": (-0.07, 78.0)}
+        }
+        
+        offset, _ = matrix_thr[dist_cat].get(l_str, (0.0, 80.0))
+        d_thr = b_thr + offset
+        
+        # RUMUS MURNI (COSINE * 100)
+        final_acc = float(sm_score * 100.0) if sm_score >= d_thr else 0.0
         return b_name, sm_score, d_thr, final_acc, (sm_score >= d_thr)
 
     def _handle_spoofing(self, raw, face, is_recog, disp_name, sp_latency):
@@ -212,14 +268,20 @@ class SmartDoorApp:
         while self.running:
             with self.lock: frame = self.shared_frame.copy() if self.shared_frame is not None else None
             if frame is None: time.sleep(0.01); continue
-            faces = self.detector.detect(UIHelper.enhance_frame(frame.copy()))
+            
+            faces = self.detector.detect(frame)
+            
             if not faces:
                 self.missed_frames += 1 
                 if self.missed_frames >= 5: self._fail("", wait=True)
             else: 
                 self.missed_frames, tgt_face = 0, max(faces, key=lambda f: f.bbox[2] * f.bbox[3]) 
                 self.ui.update({"wait": False, "bbox": tgt_face.bbox}) 
-                self._process_face(frame.copy(), UIHelper.enhance_frame(frame.copy()), tgt_face)
+                
+                l_str = UIHelper.get_light_condition(frame, tgt_face.bbox)
+                enhanced_adaptive = UIHelper.enhance_adaptive(frame.copy(), tgt_face.bbox, l_str)
+                
+                self._process_face(frame.copy(), enhanced_adaptive, tgt_face)
             time.sleep(0.01)
 
     def _process_face(self, raw, enhanced, face):
@@ -246,10 +308,10 @@ class SmartDoorApp:
 
         if self.state == ValidationState.RECOGNIZING:
             self.print_counter += 1
-            if self.print_counter % 2 == 0: UIHelper.print_inline(f"Proses... {disp_name} | Cosine: {sm_score:.3f} >= Thr:{dyn_thr:.2f} | Akurasi: {f_acc:.1f}%")
+            if self.print_counter % 2 == 0: UIHelper.print_inline(f"Proses... {disp_name} | Max Cosine Murni: {sm_score:.3f} >= Thr:{dyn_thr:.2f} | Acc Murni: {f_acc:.1f}%")
             if is_recog:
                 self.face_val_latency = (time.time() - t_val_start) * 1000 
-                print(""); UIHelper.log(f" Cocok: {best_name} | {l_str} | Akurasi: {f_acc:.2f}% | Lat: {self.face_val_latency:.0f} ms", "SUCCESS")
+                print(""); UIHelper.log(f" Cocok (Multi-Vector): {best_name} | {l_str} | Akurasi Murni: {f_acc:.2f}% | Lat: {self.face_val_latency:.0f} ms", "SUCCESS")
                 self.last_name, self.match_score, self.final_display_acc = best_name, sm_score, f_acc
                 self.state, self.step_idx, self.wait_center = ValidationState.CHALLENGE, 0, True
                 self.seq, self.challenge_start_time = [random.choice([k for k in self.CHALLENGES if k != "BLINK"]), "BLINK"], time.time()
@@ -277,7 +339,7 @@ class SmartDoorApp:
 
     def _finalize_unlock(self, l_str):
         self.ui.update({"status": f"{self.last_name} ({self.final_display_acc:.1f}%)", "color": config.COLOR_GREEN, "instr": f"Akses Diterima ({l_str})"})
-        print("\n" + "="*60 + f"\n🔓 AKSES DIBUKA | User: {self.last_name} | Acc: {self.final_display_acc:.2f}%\n" + "="*60 + "\n")
+        print("\n" + "="*60 + f"\n🔓 AKSES DIBUKA | User: {self.last_name} | Acc Murni: {self.final_display_acc:.2f}%\n" + "="*60 + "\n")
         pts = self.last_name.split(" - ", 1)
         if hasattr(self.db, 'push_access_log_async'): self.db.push_access_log_async(pts[1] if len(pts)>1 else self.last_name, pts[0] if len(pts)>1 else "-", "UNLOCKED", self.final_display_acc, l_str, self.access_details, (time.time() - self.auth_start) * 1000, self.face_val_latency)
 

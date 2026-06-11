@@ -26,6 +26,7 @@ class Helpers:
     @staticmethod
     def enhance_frame(frame):
         if not getattr(config, 'ENABLE_CLAHE_ENHANCEMENT', True): return frame
+        # DIKEMBALIKAN KE KODE AWAL
         denoised = cv2.bilateralFilter(frame, d=3, sigmaColor=30, sigmaSpace=30)
         img_yuv = cv2.cvtColor(denoised, cv2.COLOR_BGR2YUV)
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
@@ -45,20 +46,20 @@ class Helpers:
         if not bbox: return "Normal"
         bx, by, bw, bh = bbox
         fh, fw = raw_frame.shape[:2]
-        x1, y1 = max(0, bx), max(0, by)
-        x2, y2 = min(fw, bx + bw), min(fh, by + bh)
+        x1, y1, x2, y2 = max(0, bx), max(0, by), min(fw, bx + bw), min(fh, by + bh)
         gray = cv2.cvtColor(raw_frame, cv2.COLOR_BGR2GRAY)
         face_roi = gray[y1:y2, x1:x2]
         L = np.mean(face_roi) if face_roi.size > 0 else 100.0
         top_bg = gray[0:max(0, y1-10), max(0, x1-30):min(fw, x2+30)]
-        L_top_bg = np.mean(top_bg) if top_bg.size > 0 else L
-        mask = np.ones((fh, fw), dtype=bool)
-        mask[y1:y2, x1:x2] = False
-        L_bg = np.mean(gray[mask]) if np.any(mask) else L
-        L_bg_effective = max(L_bg, L_top_bg)
-        if (L_bg_effective - L) > 12 and L_bg_effective > 90: return "Backlight"
-        elif L_bg < 80 or L < 80: return "Low Light"
-        else: return "Normal"
+        L_bg = np.mean(gray) 
+        mask = np.ones((fh, fw), dtype=bool); mask[y1:y2, x1:x2] = False
+        if np.any(mask): L_bg = np.mean(gray[mask])
+        L_bg_effective = max(L_bg, np.mean(top_bg) if top_bg.size > 0 else L)
+        
+        # SMART THRESHOLD: Disamakan dengan main.py
+        if (L_bg_effective - L) > 50 and L_bg_effective > 160 and L < 110: 
+            return "Backlight"
+        return "Low Light" if (L_bg < 70 or L < 70) else "Normal"
 
     @staticmethod
     def is_image_quality_good(frame, bbox):
@@ -165,7 +166,6 @@ class FaceRegistrationApp:
     def _record_data_buffers(self, face, pose, enhanced):
         if not self.action_start_time: return
         
-        # PENGAMBILAN DATA FRONTAL
         if self.stage == RegistrationStage.FACEMESH and self.cap_data["facemesh_vector"] is None and face.landmarks:
             self.hold_frames += 1
             if self.hold_frames >= 5: 
@@ -180,7 +180,6 @@ class FaceRegistrationApp:
                 _log(f"   -> [Wajah 3D Terekam]      | Latensi: {lat_ms:>8.2f} ms", "SUCCESS")
                 self.action_start_time = time.time() 
 
-        # PENGAMBILAN DATA SAAT LIVENESS
         if self.stage in self.POSE_CFG:
             _, t_neg, t_pos, axis, thr = self.POSE_CFG[self.stage]
             val = pose.get(axis, 0.0)
@@ -211,7 +210,6 @@ class FaceRegistrationApp:
                 self.hold_frames = 0
                 self.prev_tag = None
 
-        # PENGAMBILAN DATA KEDIP
         if self.stage == RegistrationStage.BLINK:
             bv = Helpers.capture_blink(face)
             if bv:
@@ -276,7 +274,6 @@ class FaceRegistrationApp:
 
         light_cond = Helpers.get_light_condition(raw_frame, face.bbox)
         
-        # --- PERHITUNGAN LATENSI RESPON SUBJEK (SEBELUM PROSES AI) ---
         latensi_respon_subjek = round(sum(self.individual_latencies.values()), 2)
         
         t_mfn_start = time.time()
@@ -300,7 +297,6 @@ class FaceRegistrationApp:
         avg_emb = np.mean(embs, axis=0)
         master_emb = avg_emb.flatten() / (np.linalg.norm(avg_emb) + 1e-6)
 
-        # --- PERHITUNGAN LATENSI KOMPUTASI AI ---
         mfn_latency = round((time.time() - t_mfn_start) * 1000, 2)
         total_waktu_sistem = latensi_respon_subjek + mfn_latency
         
@@ -322,7 +318,6 @@ class FaceRegistrationApp:
             if success_master: 
                 Helpers.show_msg(display, "✅ REGISTRASI BERHASIL!", f"User: {nama_user} | Master Tersimpan", config.COLOR_GREEN)
                 
-                # --- FORMAT TERMINAL OUTPUT UNTUK SKRIPSI ---
                 print("\n" + "="*65)
                 print(" 🎉 REGISTRASI MASTER EMBEDDING BERHASIL 🎉".center(65))
                 print("="*65)
@@ -390,10 +385,13 @@ class FaceRegistrationApp:
                 
                 if not sp_real:
                     self.fake_frames += 1
-                    Helpers.draw_hud(display, self.stage, "❌ DETEKSI SPOOFING!", f"Palsu: {sp_score:.2f}", hud_txt, f"{sp_label}", face.bbox, config.COLOR_RED)
-                    with self.frame_lock: self.display_frame = display
-                    continue 
-                else: self.fake_frames = 0
+                    # BUFFER: HANYA BLOKIR JIKA 4 FRAME BERTURUT-TURUT TERDETEKSI PALSU (Toleransi blur)
+                    if self.fake_frames >= 4:
+                        Helpers.draw_hud(display, self.stage, "❌ DETEKSI SPOOFING!", f"Palsu: {sp_score:.2f}", hud_txt, f"{sp_label}", face.bbox, config.COLOR_RED)
+                        with self.frame_lock: self.display_frame = display
+                        continue 
+                else: 
+                    self.fake_frames = 0
 
                 if self.stage != RegistrationStage.EXTRACTION and not self.in_ext:
                     self._record_data_buffers(face, pose, enhanced) 

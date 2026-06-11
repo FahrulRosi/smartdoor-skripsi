@@ -1,4 +1,4 @@
-import os, json, time, threading, traceback, sqlite3, numpy as np
+import os, json, time, threading, traceback, sqlite3, numpy as np, uuid
 from datetime import datetime
 from contextlib import closing 
 import requests
@@ -10,13 +10,12 @@ import config
 # ==============================================================================
 class DataTransformer:
     @staticmethod
-    def prepare_payload(name, nim, embedding, liveness_data):
+    def prepare_payload(name, user_id, embedding, liveness_data):
         blink_c = liveness_data.get("blink_closed") or {}
         blink_o = liveness_data.get("blink_open") or {}
         ear_c = float(blink_c.get("avg_ear", 0.0))
         ear_o = float(blink_o.get("avg_ear", 0.0))
         
-        # PROTEKSI MATRIKS 2D: Cek apakah ini Multi-Vector (List di dalam List)
         if len(embedding) > 0 and isinstance(embedding[0], list):
             emb_list = [[float(val) for val in vec] for vec in embedding]
         else:
@@ -47,27 +46,22 @@ class DataTransformer:
             if snap.get("tag") == "roll_left": rl, rl_lat = float(snap.get("roll", 0.0)), lat
             elif snap.get("tag") == "roll_right": rr, rr_lat = float(snap.get("roll", 0.0)), lat
 
-        yaw_c, yaw_l = [], []
-        if yl_lat > 0: yaw_c.append("Berhasil Yaw Kiri"); yaw_l.append(f"Berhasil Yaw Kiri ({yl_lat:.1f}ms)")
-        if yr_lat > 0: yaw_c.append("Berhasil Yaw Kanan"); yaw_l.append(f"Berhasil Yaw Kanan ({yr_lat:.1f}ms)")
+        yaw_l, pitch_l, roll_l, blink_l = [], [], [], []
+        if yl_lat > 0: yaw_l.append(f"Berhasil Yaw Kiri ({yl_lat:.1f}ms)")
+        if yr_lat > 0: yaw_l.append(f"Berhasil Yaw Kanan ({yr_lat:.1f}ms)")
+        if pu_lat > 0: pitch_l.append(f"Berhasil Pitch Atas ({pu_lat:.1f}ms)")
+        if pd_lat > 0: pitch_l.append(f"Berhasil Pitch Bawah ({pd_lat:.1f}ms)")
+        if rl_lat > 0: roll_l.append(f"Berhasil Roll Kiri ({rl_lat:.1f}ms)")
+        if rr_lat > 0: roll_l.append(f"Berhasil Roll Kanan ({rr_lat:.1f}ms)")
         
-        pitch_c, pitch_l = [], []
-        if pu_lat > 0: pitch_c.append("Berhasil Pitch Atas"); pitch_l.append(f"Berhasil Pitch Atas ({pu_lat:.1f}ms)")
-        if pd_lat > 0: pitch_c.append("Berhasil Pitch Bawah"); pitch_l.append(f"Berhasil Pitch Bawah ({pd_lat:.1f}ms)")
-        
-        roll_c, roll_l = [], []
-        if rl_lat > 0: roll_c.append("Berhasil Roll Kiri"); roll_l.append(f"Berhasil Roll Kiri ({rl_lat:.1f}ms)")
-        if rr_lat > 0: roll_c.append("Berhasil Roll Kanan"); roll_l.append(f"Berhasil Roll Kanan ({rr_lat:.1f}ms)")
-        
-        blink_c_list, blink_l = [], []
         bo_lat = float(blink_o.get("latensi_ms") or blink_o.get("latency_ms", 0.0))
         bc_lat = float(blink_c.get("latensi_ms") or blink_c.get("latency_ms", 0.0))
-        if bo_lat > 0: blink_c_list.append("Berhasil Mata Membuka"); blink_l.append(f"Berhasil Mata Membuka ({bo_lat:.1f}ms)")
-        if bc_lat > 0: blink_c_list.append("Berhasil Mata Menutup"); blink_l.append(f"Berhasil Mata Menutup ({bc_lat:.1f}ms)")
+        if bo_lat > 0: blink_l.append(f"Berhasil Mata Membuka ({bo_lat:.1f}ms)")
+        if bc_lat > 0: blink_l.append(f"Berhasil Mata Menutup ({bc_lat:.1f}ms)")
 
         return {
             "name": str(name), 
-            "nim": str(nim),
+            "id": str(user_id),
             "embedding": emb_list,
             "liveness_config": {
                 "facemesh_vector": fm_list, 
@@ -81,14 +75,10 @@ class DataTransformer:
                     "roll_left": float(rl), "roll_right": float(rr)
                 }
             },
-            "yaw_score_clean": ", ".join(yaw_c) if yaw_c else "-",
-            "pitch_score_clean": ", ".join(pitch_c) if pitch_c else "-",
-            "roll_score_clean": ", ".join(roll_c) if roll_c else "-",
-            "blink_score_clean": ", ".join(blink_c_list) if blink_c_list else "-",
-            "yaw_score_log": ", ".join(yaw_l) if yaw_l else "-",
-            "pitch_score_log": ", ".join(pitch_l) if pitch_l else "-",
-            "roll_score_log": ", ".join(roll_l) if roll_l else "-",
-            "blink_score_log": ", ".join(blink_l) if blink_l else "-",
+            "yaw_data": ", ".join(yaw_l) if yaw_l else "-",
+            "pitch_data": ", ".join(pitch_l) if pitch_l else "-",
+            "roll_data": ", ".join(roll_l) if roll_l else "-",
+            "blink_data": ", ".join(blink_l) if blink_l else "-",
             "registered_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         }
 
@@ -131,31 +121,32 @@ class FaceDatabase:
         with self.db_lock, closing(self._get_connection()) as conn:
             c = conn.cursor()
             
+            # Score dihapus dari registered_faces
             c.execute('''CREATE TABLE IF NOT EXISTS registered_faces (
-                nim TEXT PRIMARY KEY, name TEXT NOT NULL, embedding TEXT NOT NULL, liveness_config TEXT,
-                yaw_score TEXT, pitch_score TEXT, roll_score TEXT, blink_score TEXT,
+                id TEXT PRIMARY KEY, name TEXT NOT NULL, embedding TEXT NOT NULL, liveness_config TEXT,
                 reg_latency_ms REAL, created_at TEXT, is_synced INTEGER DEFAULT 0)''')
             
+            # _score diubah menjadi _data
             c.execute('''CREATE TABLE IF NOT EXISTS register_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, 
-                nim TEXT REFERENCES registered_faces(nim) ON DELETE CASCADE, 
-                status TEXT NOT NULL, yaw_score TEXT, pitch_score TEXT, roll_score TEXT, blink_score TEXT,
+                id TEXT PRIMARY KEY, name TEXT, 
+                user_id TEXT REFERENCES registered_faces(id) ON DELETE CASCADE, 
+                status TEXT NOT NULL, yaw_data TEXT, pitch_data TEXT, roll_data TEXT, blink_data TEXT,
                 light_condition TEXT, reg_latency_ms REAL, created_at TEXT, is_synced INTEGER DEFAULT 0)''')
             
             c.execute('''CREATE TABLE IF NOT EXISTS access_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, 
-                nim TEXT REFERENCES registered_faces(nim) ON DELETE SET NULL, 
-                status TEXT NOT NULL, face_val_latency_ms REAL, headpose_score TEXT, blink_score TEXT, accuracy REAL, light_condition TEXT,
+                id TEXT PRIMARY KEY, name TEXT, 
+                user_id TEXT REFERENCES registered_faces(id) ON DELETE SET NULL, 
+                status TEXT NOT NULL, face_val_latency_ms REAL, headpose_data TEXT, blink_data TEXT, accuracy REAL, light_condition TEXT,
                 auth_latency_ms REAL, created_at TEXT, is_synced INTEGER DEFAULT 0)''')
             
             c.execute('''CREATE TABLE IF NOT EXISTS spoofing_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, spoof_score REAL NOT NULL, spoof_type TEXT NOT NULL,
+                id TEXT PRIMARY KEY, spoof_score REAL NOT NULL, spoof_type TEXT NOT NULL,
                 spoof_latency_ms REAL, created_at TEXT, is_synced INTEGER DEFAULT 0)''')
 
             c.execute('''CREATE TABLE IF NOT EXISTS sync_deletes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, table_name TEXT, record_id TEXT)''')
 
-            triggers = [("registered_faces", "nim"), ("register_logs", "created_at"), ("access_logs", "created_at"), ("spoofing_logs", "created_at")]
+            triggers = [("registered_faces", "id"), ("register_logs", "id"), ("access_logs", "id"), ("spoofing_logs", "id")]
             for tbl, col in triggers:
                 c.execute(f'''CREATE TRIGGER IF NOT EXISTS trg_del_{tbl} AFTER DELETE ON {tbl} FOR EACH ROW BEGIN INSERT INTO sync_deletes (table_name, record_id) VALUES ('{tbl}', OLD.{col}); END;''')
             conn.commit()
@@ -167,39 +158,40 @@ class FaceDatabase:
         except requests.ConnectionError:
             return False
 
-    def check_user_exists(self, nim):
+    def check_user_exists(self, user_id):
         with self.db_lock, closing(self._get_connection()) as conn:
             c = conn.cursor()
-            c.execute("SELECT 1 FROM registered_faces WHERE nim = ?", (nim,))
+            c.execute("SELECT 1 FROM registered_faces WHERE id = ?", (user_id,))
             return c.fetchone() is not None
 
-    def save_face(self, name, nim, embedding, cap_data):
+    def save_face(self, name, user_id, embedding, cap_data):
         try:
             pure_name = name.rsplit('_', 1)[0] if "_" in name else name
-            p = DataTransformer.prepare_payload(pure_name, nim, embedding, cap_data)
+            p = DataTransformer.prepare_payload(pure_name, user_id, embedding, cap_data)
             lc = cap_data.get("light_condition", "Normal")
             created_at = p.get("registered_at", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
             reg_lat = float(cap_data.get("reg_latency_ms", 0.0))
+            
+            log_id = str(uuid.uuid4())
 
             with self.db_lock, closing(self._get_connection()) as conn:
                 c = conn.cursor()
                 
                 c.execute("""INSERT INTO registered_faces 
-                    (nim, name, embedding, liveness_config, yaw_score, pitch_score, roll_score, blink_score, reg_latency_ms, created_at, is_synced)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
-                    ON CONFLICT(nim) DO UPDATE SET 
+                    (id, name, embedding, liveness_config, reg_latency_ms, created_at, is_synced)
+                    VALUES (?, ?, ?, ?, ?, ?, 0)
+                    ON CONFLICT(id) DO UPDATE SET 
                     name=excluded.name, embedding=excluded.embedding, liveness_config=excluded.liveness_config,
-                    yaw_score=excluded.yaw_score, pitch_score=excluded.pitch_score, roll_score=excluded.roll_score,
-                    blink_score=excluded.blink_score, reg_latency_ms=excluded.reg_latency_ms, created_at=excluded.created_at, is_synced=0""",
-                    (nim, pure_name, json.dumps(p["embedding"]), json.dumps(p.get("liveness_config", {})), 
-                     p["yaw_score_clean"] or "-", p["pitch_score_clean"] or "-", p["roll_score_clean"] or "-", p["blink_score_clean"] or "-", reg_lat, created_at))
+                    reg_latency_ms=excluded.reg_latency_ms, created_at=excluded.created_at, is_synced=0""",
+                    (user_id, pure_name, json.dumps(p["embedding"]), json.dumps(p.get("liveness_config", {})), 
+                     reg_lat, created_at))
                 
-                c.execute("""INSERT INTO register_logs (name, nim, status, yaw_score, pitch_score, roll_score, blink_score, light_condition, reg_latency_ms, created_at, is_synced)
-                             VALUES (?, ?, 'SUCCESS', ?, ?, ?, ?, ?, ?, ?, 0)""",
-                             (pure_name, nim, p["yaw_score_log"] or "-", p["pitch_score_log"] or "-", p["roll_score_log"] or "-", p["blink_score_log"] or "-", lc, reg_lat, created_at))
+                c.execute("""INSERT INTO register_logs (id, name, user_id, status, yaw_data, pitch_data, roll_data, blink_data, light_condition, reg_latency_ms, created_at, is_synced)
+                             VALUES (?, ?, ?, 'SUCCESS', ?, ?, ?, ?, ?, ?, ?, 0)""",
+                             (log_id, pure_name, user_id, p["yaw_data"], p["pitch_data"], p["roll_data"], p["blink_data"], lc, reg_lat, created_at))
                 conn.commit()
             
-            print(f"\n[Database] ✅ Master Wajah '{pure_name} ({nim})' berhasil disimpan. Memulai sinkronisasi Cloud...")
+            print(f"\n[Database] ✅ Master Wajah '{pure_name} ({user_id})' berhasil disimpan. Memulai sinkronisasi Cloud...")
             self.sync_trigger.set() 
             return True
         except Exception as e: 
@@ -210,13 +202,12 @@ class FaceDatabase:
         faces = {}
         with self.db_lock, closing(self._get_connection()) as conn:
             c = conn.cursor()
-            c.execute("SELECT nim, name, embedding, liveness_config, yaw_score, pitch_score, roll_score, blink_score, reg_latency_ms, created_at FROM registered_faces")
+            c.execute("SELECT id, name, embedding, liveness_config, reg_latency_ms, created_at FROM registered_faces")
             for row in c.fetchall():
                 label_id = f"{row[0]} - {row[1]}"
                 faces[label_id] = {
-                    "nim": row[0], "name": row[1], "embedding": json.loads(row[2]), "liveness_config": json.loads(row[3]),
-                    "yaw_score": row[4], "pitch_score": row[5], "roll_score": row[6], "blink_score": row[7],
-                    "reg_latency_ms": row[8], "registered_at": row[9]
+                    "id": row[0], "name": row[1], "embedding": json.loads(row[2]), "liveness_config": json.loads(row[3]),
+                    "reg_latency_ms": row[4], "registered_at": row[5]
                 }
         self.sync_trigger.set() 
         return faces
@@ -224,40 +215,41 @@ class FaceDatabase:
     def _pull_logs_from_supabase(self, cursor, table_name, columns):
         res = self.client.table(table_name).select("*").execute()
         if res.data is not None: 
-            remote_times = [str(r["created_at"]).replace("+00:00", "Z") for r in res.data]
+            remote_ids = [str(r["id"]) for r in res.data if "id" in r]
             
-            cursor.execute(f"SELECT id, created_at FROM {table_name} WHERE is_synced = 1")
+            cursor.execute(f"SELECT id FROM {table_name} WHERE is_synced = 1")
             for row in cursor.fetchall():
-                local_id, local_time = row[0], str(row[1])
-                if local_time not in remote_times:
+                local_id = str(row[0])
+                if local_id not in remote_ids:
                     cursor.execute(f"DELETE FROM {table_name} WHERE id = ?", (local_id,))
-                    cursor.execute("DELETE FROM sync_deletes WHERE table_name = ? AND record_id = ?", (table_name, local_time))
+                    cursor.execute("DELETE FROM sync_deletes WHERE table_name = ? AND record_id = ?", (table_name, local_id))
 
             for r in res.data:
-                remote_created_at = str(r["created_at"]).replace("+00:00", "Z")
-                cursor.execute(f"SELECT 1 FROM {table_name} WHERE created_at = ?", (remote_created_at,))
+                remote_id = str(r["id"])
+                cursor.execute(f"SELECT 1 FROM {table_name} WHERE id = ?", (remote_id,))
                 if not cursor.fetchone():
-                    if "nim" in r and r["nim"] is not None:
-                        cursor.execute("SELECT 1 FROM registered_faces WHERE nim = ?", (r["nim"],))
+                    if "user_id" in r and r["user_id"] is not None:
+                        cursor.execute("SELECT 1 FROM registered_faces WHERE id = ?", (r["user_id"],))
                         if not cursor.fetchone(): continue
 
                     vals = []
                     for c in columns:
-                        if c == "created_at": vals.append(remote_created_at)
-                        else:
-                            v = r.get(c)
-                            if v is None:
-                                num_fields = ["accuracy", "spoof_score", "reg_latency_ms", "auth_latency_ms", "spoof_latency_ms", "face_val_latency_ms"]
-                                v = 0.0 if c in num_fields else "-"
-                            vals.append(v)
+                        v = r.get(c)
+                        if v is None:
+                            num_fields = ["accuracy", "spoof_score", "reg_latency_ms", "auth_latency_ms", "spoof_latency_ms", "face_val_latency_ms"]
+                            v = 0.0 if c in num_fields else "-"
+                        if c == "created_at" and v != "-":
+                            v = str(v).replace("+00:00", "Z")
+                        vals.append(v)
                     vals.append(1) 
 
                     placeholders = ", ".join(["?"] * len(vals))
                     cols_str = ", ".join(columns) + ", is_synced"
                     cursor.execute(f"INSERT INTO {table_name} ({cols_str}) VALUES ({placeholders})", vals)
 
-    def log_register_async(self, name, nim, status, message=None, light_cond="N/A", cap_data=None):
+    def log_register_async(self, name, user_id, status, message=None, light_cond="N/A", cap_data=None):
         created_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        log_id = str(uuid.uuid4())
         def _task():
             pure_name = name.rsplit('_', 1)[0] if "_" in name else name
             y = p = r = b = "-"
@@ -267,24 +259,25 @@ class FaceDatabase:
                 try: 
                     local_light_cond = cap_data.get("light_condition", light_cond)
                     reg_lat = float(cap_data.get("reg_latency_ms", 0.0))
-                    p_dummy = DataTransformer.prepare_payload(pure_name, nim, [[0.0]*128], cap_data)
-                    y, p, r, b = p_dummy.get("yaw_score_log", "-"), p_dummy.get("pitch_score_log", "-"), p_dummy.get("roll_score_log", "-"), p_dummy.get("blink_score_log", "-")
+                    p_dummy = DataTransformer.prepare_payload(pure_name, user_id, [[0.0]*128], cap_data)
+                    y, p, r, b = p_dummy.get("yaw_data", "-"), p_dummy.get("pitch_data", "-"), p_dummy.get("roll_data", "-"), p_dummy.get("blink_data", "-")
                 except Exception: pass
             try:
                 with self.db_lock, closing(self._get_connection()) as conn:
                     if status == "SUCCESS":
-                        conn.cursor().execute("SELECT 1 FROM registered_faces WHERE nim = ?", (nim,))
+                        conn.cursor().execute("SELECT 1 FROM registered_faces WHERE id = ?", (user_id,))
                         if not conn.cursor().fetchone(): return
                     
-                    conn.execute("""INSERT INTO register_logs (name, nim, status, yaw_score, pitch_score, roll_score, blink_score, light_condition, reg_latency_ms, created_at, is_synced)
-                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""", (pure_name, nim, status, y, p, r, b, local_light_cond, reg_lat, created_at))
+                    conn.execute("""INSERT INTO register_logs (id, name, user_id, status, yaw_data, pitch_data, roll_data, blink_data, light_condition, reg_latency_ms, created_at, is_synced)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""", (log_id, pure_name, user_id, status, y, p, r, b, local_light_cond, reg_lat, created_at))
                     conn.commit()
                 self.sync_trigger.set() 
             except Exception: pass
         threading.Thread(target=_task, daemon=True).start()
 
-    def push_access_log_async(self, user_name, nim, status, accuracy, light_cond="N/A", access_details=None, auth_latency_ms=0.0, face_val_latency_ms=0.0):
+    def push_access_log_async(self, user_name, user_id, status, accuracy, light_cond="N/A", access_details=None, auth_latency_ms=0.0, face_val_latency_ms=0.0):
         created_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        log_id = str(uuid.uuid4())
         def _task():
             headpose_str, blink_str = "-" , "-"
             if access_details:
@@ -298,14 +291,14 @@ class FaceDatabase:
             try:
                 with self.db_lock, closing(self._get_connection()) as conn:
                     clean_name = user_name.rsplit('_', 1)[0] if "_" in user_name else user_name
-                    target_nim = nim
-                    if target_nim:
+                    target_user_id = user_id
+                    if target_user_id:
                         c_check = conn.cursor()
-                        c_check.execute("SELECT 1 FROM registered_faces WHERE nim = ?", (target_nim,))
-                        if not c_check.fetchone(): target_nim = None
+                        c_check.execute("SELECT 1 FROM registered_faces WHERE id = ?", (target_user_id,))
+                        if not c_check.fetchone(): target_user_id = None
                     
-                    conn.execute("""INSERT INTO access_logs (name, nim, status, face_val_latency_ms, headpose_score, blink_score, accuracy, light_condition, auth_latency_ms, created_at, is_synced)
-                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""", (clean_name, target_nim, status, float(face_val_latency_ms), headpose_str.strip(" | ") or "-", blink_str.strip(" | ") or "-", float(accuracy), light_cond, float(auth_latency_ms), created_at))
+                    conn.execute("""INSERT INTO access_logs (id, name, user_id, status, face_val_latency_ms, headpose_data, blink_data, accuracy, light_condition, auth_latency_ms, created_at, is_synced)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""", (log_id, clean_name, target_user_id, status, float(face_val_latency_ms), headpose_str.strip(" | ") or "-", blink_str.strip(" | ") or "-", float(accuracy), light_cond, float(auth_latency_ms), created_at))
                     conn.commit()
                 self.sync_trigger.set() 
             except Exception: pass
@@ -313,10 +306,11 @@ class FaceDatabase:
 
     def log_spoofing_async(self, score_real, score_photo, score_video, spoof_label, spoof_latency_ms=0.0):
         created_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        log_id = str(uuid.uuid4())
         def _task():
             try:
                 with self.db_lock, closing(self._get_connection()) as conn:
-                    conn.execute("INSERT INTO spoofing_logs (spoof_score, spoof_type, spoof_latency_ms, created_at, is_synced) VALUES (?, ?, ?, ?, 0)", (float(score_real), str(spoof_label), float(spoof_latency_ms), created_at))
+                    conn.execute("INSERT INTO spoofing_logs (id, spoof_score, spoof_type, spoof_latency_ms, created_at, is_synced) VALUES (?, ?, ?, ?, ?, 0)", (log_id, float(score_real), str(spoof_label), float(spoof_latency_ms), created_at))
                     conn.commit()
                 self.sync_trigger.set()
             except Exception: pass
@@ -334,47 +328,44 @@ class FaceDatabase:
                 with self.db_lock, closing(self._get_connection()) as conn:
                     c = conn.cursor()
                     
-                    # 1. Hapus sinkronisasi
                     try:
                         c.execute("SELECT id, table_name, record_id FROM sync_deletes")
                         for row in c.fetchall():
                             del_id, tbl, rec_id = row
                             try:
-                                if tbl == 'registered_faces': self.client.table(tbl).delete().eq('nim', rec_id).execute()
-                                else: self.client.table(tbl).delete().eq('created_at', rec_id).execute()
+                                self.client.table(tbl).delete().eq('id', rec_id).execute()
                                 c.execute("DELETE FROM sync_deletes WHERE id = ?", (del_id,))
                             except Exception: pass
                     except Exception: pass
                     
                     synced_count = 0
 
-                    # 2. Sync Registered Faces
+                    # 1. Sync Registered Faces
                     try:
-                        c.execute("SELECT nim, name, embedding, liveness_config, yaw_score, pitch_score, roll_score, blink_score, reg_latency_ms, created_at FROM registered_faces WHERE is_synced = 0")
+                        c.execute("SELECT id, name, embedding, liveness_config, reg_latency_ms, created_at FROM registered_faces WHERE is_synced = 0")
                         for r in c.fetchall():
-                            payload = {"nim": r[0], "name": r[1], "embedding": json.loads(r[2]), "liveness_config": json.loads(r[3]), "yaw_score": r[4] or "-", "pitch_score": r[5] or "-", "roll_score": r[6] or "-", "blink_score": r[7] or "-", "reg_latency_ms": float(r[8] or 0.0), "created_at": r[9]}
+                            payload = {"id": r[0], "name": r[1], "embedding": json.loads(r[2]), "liveness_config": json.loads(r[3]), "reg_latency_ms": float(r[4] or 0.0), "created_at": r[5]}
                             try:
-                                self.client.table("registered_faces").upsert(payload, on_conflict="nim").execute()
-                                c.execute("UPDATE registered_faces SET is_synced = 1 WHERE nim = ?", (r[0],))
+                                self.client.table("registered_faces").upsert(payload, on_conflict="id").execute()
+                                c.execute("UPDATE registered_faces SET is_synced = 1 WHERE id = ?", (r[0],))
                                 synced_count += 1
                             except Exception as e:
                                 err = str(e).lower()
                                 print(f"❌ [Sync Error] PUSH registered_faces ({r[0]}): {e}")
-                                # AUTO-HEAL: Buang kolom yang tidak ada di Supabase
                                 if "could not find" in err or "column" in err:
                                     payload.pop("reg_latency_ms", None)
                                     try: 
-                                        self.client.table("registered_faces").upsert(payload, on_conflict="nim").execute()
-                                        c.execute("UPDATE registered_faces SET is_synced = 1 WHERE nim = ?", (r[0],))
+                                        self.client.table("registered_faces").upsert(payload, on_conflict="id").execute()
+                                        c.execute("UPDATE registered_faces SET is_synced = 1 WHERE id = ?", (r[0],))
                                         synced_count += 1
                                     except Exception: pass
                     except Exception as err_db: print(f"❌ Query Error (registered_faces): {err_db}")
                     
-                    # 3. Sync Register Logs (TERPERBAIKI: Evaluasi try per baris data)
+                    # 2. Sync Register Logs
                     try:
-                        c.execute("SELECT id, name, nim, status, yaw_score, pitch_score, roll_score, blink_score, light_condition, reg_latency_ms, created_at FROM register_logs WHERE is_synced = 0")
+                        c.execute("SELECT id, name, user_id, status, yaw_data, pitch_data, roll_data, blink_data, light_condition, reg_latency_ms, created_at FROM register_logs WHERE is_synced = 0")
                         for r in c.fetchall():
-                            payload = {"name": r[1], "nim": r[2], "status": r[3], "yaw_score": r[4] or "-", "pitch_score": r[5] or "-", "roll_score": r[6] or "-", "blink_score": r[7] or "-", "light_condition": r[8] or "-", "reg_latency_ms": float(r[9] or 0.0), "created_at": r[10]}
+                            payload = {"id": r[0], "name": r[1], "user_id": r[2], "status": r[3], "yaw_data": r[4] or "-", "pitch_data": r[5] or "-", "roll_data": r[6] or "-", "blink_data": r[7] or "-", "light_condition": r[8] or "-", "reg_latency_ms": float(r[9] or 0.0), "created_at": r[10]}
                             try:
                                 self.client.table("register_logs").insert(payload).execute()
                                 c.execute("UPDATE register_logs SET is_synced = 1 WHERE id = ?", (r[0],))
@@ -382,7 +373,6 @@ class FaceDatabase:
                             except Exception as e:
                                 err = str(e).lower()
                                 print(f"❌ [Sync Error] PUSH register_logs (ID {r[0]}): {e}")
-                                # AUTO-HEAL: Buang kolom yang belum ada di Supabase
                                 if "could not find" in err or "column" in err:
                                     payload.pop("light_condition", None)
                                     payload.pop("reg_latency_ms", None)
@@ -391,17 +381,16 @@ class FaceDatabase:
                                         c.execute("UPDATE register_logs SET is_synced = 1 WHERE id = ?", (r[0],))
                                         synced_count += 1
                                     except Exception: 
-                                        c.execute("UPDATE register_logs SET is_synced = 1 WHERE id = ?", (r[0],)) # Bypass permanently
+                                        c.execute("UPDATE register_logs SET is_synced = 1 WHERE id = ?", (r[0],))
                                 elif "foreign key" in err or "23503" in err:
-                                    # Bypass FK mismatch agar tidak block antrian selamanya
                                     c.execute("UPDATE register_logs SET is_synced = 1 WHERE id = ?", (r[0],)) 
                     except Exception as err_db: print(f"❌ Query Error (register_logs): {err_db}")
                         
-                    # 4. Sync Access Logs
+                    # 3. Sync Access Logs
                     try:
-                        c.execute("SELECT id, name, nim, status, face_val_latency_ms, headpose_score, blink_score, accuracy, light_condition, auth_latency_ms, created_at FROM access_logs WHERE is_synced = 0")
+                        c.execute("SELECT id, name, user_id, status, face_val_latency_ms, headpose_data, blink_data, accuracy, light_condition, auth_latency_ms, created_at FROM access_logs WHERE is_synced = 0")
                         for r in c.fetchall():
-                            payload = {"name": r[1], "nim": r[2], "status": r[3], "face_val_latency_ms": float(r[4] or 0.0), "headpose_score": r[5] or "-", "blink_score": r[6] or "-", "accuracy": float(r[7] or 0.0), "light_condition": r[8] or "-", "auth_latency_ms": float(r[9] or 0.0), "created_at": r[10]}
+                            payload = {"id": r[0], "name": r[1], "user_id": r[2], "status": r[3], "face_val_latency_ms": float(r[4] or 0.0), "headpose_data": r[5] or "-", "blink_data": r[6] or "-", "accuracy": float(r[7] or 0.0), "light_condition": r[8] or "-", "auth_latency_ms": float(r[9] or 0.0), "created_at": r[10]}
                             try:
                                 self.client.table("access_logs").insert(payload).execute()
                                 c.execute("UPDATE access_logs SET is_synced = 1 WHERE id = ?", (r[0],))
@@ -423,11 +412,11 @@ class FaceDatabase:
                                     c.execute("UPDATE access_logs SET is_synced = 1 WHERE id = ?", (r[0],))
                     except Exception as err_db: print(f"❌ Query Error (access_logs): {err_db}")
                         
-                    # 5. Sync Spoofing Logs
+                    # 4. Sync Spoofing Logs
                     try:
                         c.execute("SELECT id, spoof_score, spoof_type, spoof_latency_ms, created_at FROM spoofing_logs WHERE is_synced = 0")
                         for r in c.fetchall():
-                            payload = {"spoof_score": float(r[1] or 0.0), "spoof_type": str(r[2] or "-"), "spoof_latency_ms": float(r[3] or 0.0), "created_at": r[4]}
+                            payload = {"id": r[0], "spoof_score": float(r[1] or 0.0), "spoof_type": str(r[2] or "-"), "spoof_latency_ms": float(r[3] or 0.0), "created_at": r[4]}
                             try:
                                 self.client.table("spoofing_logs").insert(payload).execute()
                                 c.execute("UPDATE spoofing_logs SET is_synced = 1 WHERE id = ?", (r[0],))
@@ -451,33 +440,32 @@ class FaceDatabase:
                     try:
                         res = self.client.table("registered_faces").select("*").execute()
                         if res.data is not None:
-                            remote_nims = [str(r["nim"]) for r in res.data]
-                            c.execute("SELECT nim FROM registered_faces WHERE is_synced = 1")
+                            remote_ids = [str(r["id"]) for r in res.data]
+                            c.execute("SELECT id FROM registered_faces WHERE is_synced = 1")
                             for row in c.fetchall():
-                                if row[0] not in remote_nims:
-                                    c.execute("DELETE FROM registered_faces WHERE nim = ?", (row[0],))
+                                if row[0] not in remote_ids:
+                                    c.execute("DELETE FROM registered_faces WHERE id = ?", (row[0],))
                                     c.execute("DELETE FROM sync_deletes WHERE table_name = 'registered_faces' AND record_id = ?", (row[0],))
                             
                             for r in res.data:
                                 remote_cr = str(r.get("created_at", "")).replace("+00:00", "Z")
                                 c.execute("""INSERT INTO registered_faces 
-                                    (nim, name, embedding, liveness_config, yaw_score, pitch_score, roll_score, blink_score, reg_latency_ms, created_at, is_synced)
-                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-                                    ON CONFLICT(nim) DO UPDATE SET 
+                                    (id, name, embedding, liveness_config, reg_latency_ms, created_at, is_synced)
+                                    VALUES (?, ?, ?, ?, ?, ?, 1)
+                                    ON CONFLICT(id) DO UPDATE SET 
                                     name=excluded.name, embedding=excluded.embedding, liveness_config=excluded.liveness_config,
-                                    yaw_score=excluded.yaw_score, pitch_score=excluded.pitch_score, roll_score=excluded.roll_score,
-                                    blink_score=excluded.blink_score, reg_latency_ms=excluded.reg_latency_ms, is_synced=1""",
-                                    (r.get("nim", "-"), r.get("name", "-"), json.dumps(r["embedding"]), json.dumps(r.get("liveness_config", {})), 
-                                     r.get("yaw_score", "-"), r.get("pitch_score", "-"), r.get("roll_score", "-"), r.get("blink_score", "-"), float(r.get("reg_latency_ms", 0.0)), remote_cr))
+                                    reg_latency_ms=excluded.reg_latency_ms, is_synced=1""",
+                                    (r.get("id", "-"), r.get("name", "-"), json.dumps(r.get("embedding", [])), json.dumps(r.get("liveness_config", {})), 
+                                     float(r.get("reg_latency_ms", 0.0)), remote_cr))
                     except Exception: pass
 
-                    try: self._pull_logs_from_supabase(c, "register_logs", ["name", "nim", "status", "yaw_score", "pitch_score", "roll_score", "blink_score", "light_condition", "reg_latency_ms", "created_at"])
+                    try: self._pull_logs_from_supabase(c, "register_logs", ["id", "name", "user_id", "status", "yaw_data", "pitch_data", "roll_data", "blink_data", "light_condition", "reg_latency_ms", "created_at"])
                     except Exception: pass
                     
-                    try: self._pull_logs_from_supabase(c, "access_logs", ["name", "nim", "status", "face_val_latency_ms", "headpose_score", "blink_score", "accuracy", "light_condition", "auth_latency_ms", "created_at"])
+                    try: self._pull_logs_from_supabase(c, "access_logs", ["id", "name", "user_id", "status", "face_val_latency_ms", "headpose_data", "blink_data", "accuracy", "light_condition", "auth_latency_ms", "created_at"])
                     except Exception: pass
                     
-                    try: self._pull_logs_from_supabase(c, "spoofing_logs", ["spoof_score", "spoof_type", "spoof_latency_ms", "created_at"])
+                    try: self._pull_logs_from_supabase(c, "spoofing_logs", ["id", "spoof_score", "spoof_type", "spoof_latency_ms", "created_at"])
                     except Exception: pass
                         
                     conn.commit()

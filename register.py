@@ -1,4 +1,4 @@
-import cv2, os, time, threading, numpy as np
+import cv2, os, time, threading, numpy as np, uuid
 from enum import Enum
 from datetime import datetime
 import config
@@ -49,13 +49,11 @@ class Helpers:
 
     @staticmethod
     def clone_low_light(img):
-        """Membuat kloning gambar redup secara digital"""
         low_light = cv2.convertScaleAbs(img, alpha=0.6, beta=-40)
         return cv2.GaussianBlur(low_light, (3, 3), 0)
 
     @staticmethod
     def clone_backlight(img):
-        """Membuat kloning gambar backlight (silau dari belakang)"""
         backlight = cv2.convertScaleAbs(img, alpha=0.4, beta=-10)
         img_yuv = cv2.cvtColor(backlight, cv2.COLOR_BGR2YUV)
         img_yuv[:,:,0] = cv2.equalizeHist(img_yuv[:,:,0])
@@ -148,11 +146,15 @@ class Helpers:
             cv2.putText(f, line, (25, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (240, 240, 240), 1, cv2.LINE_AA)
             y_offset += 22
 
+
 class FaceRegistrationApp:
     POSE_CFG = {RegistrationStage.YAW: ("yaw_snapshots", "yaw_left", "yaw_right", "yaw", getattr(config, 'YAW_THRESHOLD', 25.0)), RegistrationStage.PITCH: ("pitch_snapshots", "pitch_up", "pitch_down", "pitch", getattr(config, 'PITCH_THRESHOLD', 20.0)), RegistrationStage.ROLL: ("roll_snapshots", "roll_left", "roll_right", "roll", getattr(config, 'ROLL_THRESHOLD', 25.0))}
     
     def __init__(self, name):
-        self.name, self.stage, self.in_ext, self.hold_frames, self.missed_frames = name, RegistrationStage.FACEMESH, False, 0, 0
+        self.name = name
+        self.user_id = str(uuid.uuid4())
+        self.stage = RegistrationStage.FACEMESH
+        self.in_ext, self.hold_frames, self.missed_frames = False, 0, 0
         self.fake_frames = 0
         self.is_running, self.display_frame, self.frame_lock = True, None, threading.Lock()
         
@@ -160,12 +162,6 @@ class FaceRegistrationApp:
         self._pose_buf, self._blink_buf, self._prev_step = {"yaw": {}, "pitch": {}, "roll": {}}, {"closed": None, "open": None, "logged_closed": False, "logged_open": False}, "FACEMESH"
         
         self.db = FaceDatabase()
-        check_nim = self.name.split(" - ")[0] if " - " in self.name else self.name
-        if self.db.check_user_exists(check_nim): 
-            _log(f"❌ User '{self.name}' sudah terdaftar!", "ERROR")
-            self.stage = RegistrationStage.COMPLETE
-            return
-
         self.cam = CameraStream(config.CAMERA_INDEX, config.FRAME_WIDTH, config.FRAME_HEIGHT).start()
         self.detector = FaceMeshDetector(min_detection_confidence=0.5, min_tracking_confidence=0.5)
         self.liveness, self.model = LivenessManager(), MobileFaceNet()
@@ -310,18 +306,11 @@ class FaceRegistrationApp:
             crop_cadangan = self.model.crop_face(frame, face.bbox)
             if crop_cadangan is not None: self.cap_data["face_crops"].append(("Frontal Akhir", crop_cadangan))
             
-        # -------------------------------------------------------------
-        # MODIFIKASI SOLUSI A: KLONING DIGITAL MATRIKS 2D (3 VEKTOR)
-        # -------------------------------------------------------------
-        
-        # 1. Ambil HANYA 1 gambar frontal asli terbaik (elemen pertama)
         _, crop_normal = self.cap_data["face_crops"][0]
         
-        # 2. Buat Kloning Sintetis (Low Light & Backlight)
         crop_low_light = Helpers.clone_low_light(crop_normal)
         crop_backlight = Helpers.clone_backlight(crop_normal)
         
-        # 3. Ekstraksi AI untuk ketiga kondisi
         emb_normal = self.model.get_embedding(crop_normal)
         emb_low_light = self.model.get_embedding(crop_low_light)
         emb_backlight = self.model.get_embedding(crop_backlight)
@@ -330,20 +319,15 @@ class FaceRegistrationApp:
             Helpers.show_msg(display, "❌ GAGAL!", "Ekstraksi AI Gagal", config.COLOR_RED)
             time.sleep(1.5); self.stage = RegistrationStage.COMPLETE; return
             
-        # 4. Normalisasi Vektor Murni
         def norm_emb(e):
             e_arr = np.array(e).flatten()
             return (e_arr / (np.linalg.norm(e_arr) + 1e-6)).tolist()
             
-        # 5. Gabungkan menjadi 1 Matriks (Array 2D berisi 3 Vektor)
         multi_master_embs = [norm_emb(emb_normal), norm_emb(emb_low_light), norm_emb(emb_backlight)]
 
         mfn_latency = round((time.time() - t_mfn_start) * 1000, 2)
         total_waktu_sistem = latensi_respon_subjek + mfn_latency
         
-        nim_user, nama_user = self.name.split(" - ", 1) if " - " in self.name else ("0000", self.name)
-        
-        # Gunakan vektor normal untuk cek duplikat
         match = self.matcher.match(np.array(multi_master_embs[0], dtype=np.float32))
         anti_dup_thr = getattr(config, 'ANTI_DUPLICATE_THRESHOLD', 0.48)
         
@@ -355,16 +339,16 @@ class FaceRegistrationApp:
             self.cap_data.update({"headpose_vector": [float(pose["yaw"]), float(pose["pitch"]), float(pose["roll"])], "registration_accuracy": 100.0, "light_condition": light_cond})
             if "face_crops" in self.cap_data: del self.cap_data["face_crops"]
             
-            # Simpan 3 Vektor Kloning ke Database
-            success_master = self.db.save_face(nama_user, nim_user, multi_master_embs, self.cap_data)
+            success_master = self.db.save_face(self.name, self.user_id, multi_master_embs, self.cap_data)
             
             if success_master: 
-                Helpers.show_msg(display, "✅ REGISTRASI BERHASIL!", f"User: {nama_user} | Multi-Vector", config.COLOR_GREEN)
+                Helpers.show_msg(display, "✅ REGISTRASI BERHASIL!", f"User: {self.name} | Multi-Vector", config.COLOR_GREEN)
                 
                 print("\n" + "="*65)
                 print(" 🎉 REGISTRASI MULTI-VECTOR BERHASIL 🎉".center(65))
                 print("="*65)
-                print(f" 👤 Nama User             : {nama_user}")
+                print(f" 👤 Nama User             : {self.name}")
+                print(f" 🔑 User ID (UUID)        : {self.user_id}")
                 print(f" 💡 Kondisi Live          : {light_cond}")
                 print(f" 🧠 Strategi              : Kloning Matriks 2D (Norm, Low, Back)")
                 print("-" * 65)
@@ -472,11 +456,13 @@ class FaceRegistrationApp:
         finally:
             self.is_running = False; time.sleep(0.5); self.cam.stop(); self.detector.close(); cv2.destroyAllWindows()
 
+
 if __name__ == "__main__":
-    print("\n" + "="*40)
-    print("   SISTEM REGISTRASI WAJAH MULTI-VECTOR")
-    print("="*40)
-    nama_input = input("Masukan Nama : ").strip()
+    print("\n" + "="*45)
+    print("   SISTEM REGISTRASI WAJAH (MULTI-VECTOR)")
+    print("="*45)
+    nama_input = input("Masukan Nama Lengkap : ").strip()
+    
     if nama_input:
-        nim_input = input("Masukan NIM  : ").strip()
-        if nim_input: FaceRegistrationApp(f"{nim_input} - {nama_input}").run()
+        app = FaceRegistrationApp(nama_input)
+        app.run()

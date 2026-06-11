@@ -121,7 +121,6 @@ class SmartDoorApp:
         self.detector = FaceMeshDetector(min_detection_confidence=0.5, min_tracking_confidence=0.5)
         self.door = DoorLock(getattr(config, 'LOCK_GPIO_PIN', 18), getattr(config, 'UNLOCK_DURATION', 5))
         
-        # Inisialisasi Penampung Matriks 2D
         self.known_faces_2d = {} 
         
         if GPIO_AVAILABLE:
@@ -131,16 +130,13 @@ class SmartDoorApp:
             try: GPIO.remove_event_detect(btn); GPIO.add_event_detect(btn, GPIO.FALLING, callback=self._manual_unlock, bouncetime=1000)
             except Exception: threading.Thread(target=self._button_polling_worker, args=(btn,), daemon=True).start()
 
-        # Load Matriks 2D (Mendukung data register lama 1D maupun yang baru 2D)
         try:
             if (raw := self.db.load_all_faces()):
                 for k, v in raw.items():
                     if isinstance(v, dict) and v.get('embedding') is not None:
                         emb_data = v.get('embedding')
-                        # Jika list bersarang (Array 2D dari fitur kloning)
                         if isinstance(emb_data[0], list): 
                             self.known_faces_2d[k] = [np.array(e, dtype=np.float32) for e in emb_data]
-                        # Jika data register format lama (Array 1D biasa)
                         else: 
                             self.known_faces_2d[k] = [np.array(emb_data, dtype=np.float32)]
         except Exception as e: print(f"Error Loading DB: {e}")
@@ -192,7 +188,6 @@ class SmartDoorApp:
         return self.pose_hold >= 5, max(0.0, float(raw_val)), tgt, status_salah
 
     def _match_multi_vector(self, query_emb):
-        """Mencocokkan wajah dari kamera dengan ke-3 Vektor (Matriks) di DB"""
         best_name, best_score = "", 0.0
         query_emb = query_emb / (np.linalg.norm(query_emb) + 1e-6)
         
@@ -208,7 +203,6 @@ class SmartDoorApp:
         cropped = self.model.crop_face(enhanced, [max(0, x), max(0, y), min(fw, x+w)-max(0, x), min(fh, y+h)-max(0, y)])
         if cropped is None or cropped.size == 0: return "", 0.0, 0.75, 0.0, False
         
-        # Pencerahan digital tambahan untuk ekstraksi lebih tajam
         if l_str == "Low Light": cropped = UIHelper.map_illumination(cropped, 125.0, 50.0)
         elif l_str == "Backlight": cropped = UIHelper.map_illumination(cropped, 130.0, 64.0)
 
@@ -217,7 +211,6 @@ class SmartDoorApp:
         
         query_emb = np.array(raw_emb, dtype=np.float32).flatten()
         
-        # Pemanggilan Multi-Vector Matrix Check (Solusi A)
         b_name, b_score = self._match_multi_vector(query_emb)
         
         self.score_history.setdefault(b_name, []).append(b_score) if b_name else None
@@ -225,7 +218,6 @@ class SmartDoorApp:
         
         sm_score = np.mean(self.score_history[b_name]) if b_name else 0.0
         
-        # MATRIKS THRESHOLD DINAMIS (Nilai Ideal Rumus Murni)
         if w > 180:    dist_cat = "DEKAT"
         elif w >= 100: dist_cat = "SEDANG"
         else:          dist_cat = "JAUH"
@@ -240,7 +232,6 @@ class SmartDoorApp:
         offset, _ = matrix_thr[dist_cat].get(l_str, (0.0, 80.0))
         d_thr = b_thr + offset
         
-        # RUMUS MURNI (COSINE * 100)
         final_acc = float(sm_score * 100.0) if sm_score >= d_thr else 0.0
         return b_name, sm_score, d_thr, final_acc, (sm_score >= d_thr)
 
@@ -299,7 +290,8 @@ class SmartDoorApp:
 
         t_val_start = time.time()
         best_name, sm_score, dyn_thr, f_acc, is_recog = self._check_identity(raw, enhanced, face, l_str) if self.state in (ValidationState.IDLE, ValidationState.RECOGNIZING) else ("", 0,0,0,False)
-        disp_name = best_name if is_recog else "TIDAK DIKENAL"
+        
+        disp_name = best_name.split(" - ", 1)[-1] if is_recog else "TIDAK DIKENAL"
 
         t_sp_start = time.time()
         if not self.anti_spoof.is_real(raw, face.bbox).get("real", True):
@@ -311,8 +303,8 @@ class SmartDoorApp:
             if self.print_counter % 2 == 0: UIHelper.print_inline(f"Proses... {disp_name} | Max Cosine Murni: {sm_score:.3f} >= Thr:{dyn_thr:.2f} | Acc Murni: {f_acc:.1f}%")
             if is_recog:
                 self.face_val_latency = (time.time() - t_val_start) * 1000 
-                print(""); UIHelper.log(f" Cocok (Multi-Vector): {best_name} | {l_str} | Akurasi Murni: {f_acc:.2f}% | Lat: {self.face_val_latency:.0f} ms", "SUCCESS")
-                self.last_name, self.match_score, self.final_display_acc = best_name, sm_score, f_acc
+                print(""); UIHelper.log(f" Cocok (Multi-Vector): {disp_name} | {l_str} | Akurasi Murni: {f_acc:.2f}% | Lat: {self.face_val_latency:.0f} ms", "SUCCESS")
+                self.last_name, self.match_score, self.final_display_acc = best_name, sm_score, f_acc 
                 self.state, self.step_idx, self.wait_center = ValidationState.CHALLENGE, 0, True
                 self.seq, self.challenge_start_time = [random.choice([k for k in self.CHALLENGES if k != "BLINK"]), "BLINK"], time.time()
             else: self.ui.update({"status": "TIDAK DIKENAL", "color": config.COLOR_RED, "instr": f"Live: {l_str}"})
@@ -322,7 +314,8 @@ class SmartDoorApp:
             if self.wait_center: self.wait_center, self.reg_pose, self.challenge_start_time = False, [curr.get(k, 0) for k in ("yaw", "pitch", "roll")], time.time(); return
                 
             act = self.seq[self.step_idx]
-            self.ui.update({"status": f"{self.last_name} ({l_str})", "color": config.COLOR_CYAN, "instr": f"Tantangan {self.step_idx+1}/{len(self.seq)}: {self.CHALLENGES[act]}"})
+            clean_name = self.last_name.split(" - ", 1)[-1]
+            self.ui.update({"status": f"{clean_name} ({l_str})", "color": config.COLOR_CYAN, "instr": f"Tantangan {self.step_idx+1}/{len(self.seq)}: {self.CHALLENGES[act]}"})
             
             passed, val, tgt, salah = self._check_action(act, face)
             if salah: return self._fail("GERAKAN SALAH", config.COLOR_RED, "Akses Ditolak", wait=True)
@@ -338,10 +331,15 @@ class SmartDoorApp:
                     self._finalize_unlock(l_str)
 
     def _finalize_unlock(self, l_str):
-        self.ui.update({"status": f"{self.last_name} ({self.final_display_acc:.1f}%)", "color": config.COLOR_GREEN, "instr": f"Akses Diterima ({l_str})"})
-        print("\n" + "="*60 + f"\n🔓 AKSES DIBUKA | User: {self.last_name} | Acc Murni: {self.final_display_acc:.2f}%\n" + "="*60 + "\n")
         pts = self.last_name.split(" - ", 1)
-        if hasattr(self.db, 'push_access_log_async'): self.db.push_access_log_async(pts[1] if len(pts)>1 else self.last_name, pts[0] if len(pts)>1 else "-", "UNLOCKED", self.final_display_acc, l_str, self.access_details, (time.time() - self.auth_start) * 1000, self.face_val_latency)
+        user_id = pts[0] if len(pts) > 1 else None
+        user_name = pts[1] if len(pts) > 1 else self.last_name
+
+        self.ui.update({"status": f"{user_name} ({self.final_display_acc:.1f}%)", "color": config.COLOR_GREEN, "instr": f"Akses Diterima ({l_str})"})
+        print("\n" + "="*60 + f"\n🔓 AKSES DIBUKA | User: {user_name} | Acc Murni: {self.final_display_acc:.2f}%\n" + "="*60 + "\n")
+        
+        if hasattr(self.db, 'push_access_log_async'): 
+            self.db.push_access_log_async(user_name, user_id, "UNLOCKED", self.final_display_acc, l_str, self.access_details, (time.time() - self.auth_start) * 1000, self.face_val_latency)
 
     def run(self):
         try:

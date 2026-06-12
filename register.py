@@ -135,7 +135,6 @@ class Helpers:
             cv2.putText(f, line, (25, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (240, 240, 240), 1, cv2.LINE_AA)
             y_offset += 22
 
-
 class FaceRegistrationApp:
     POSE_CFG = {RegistrationStage.YAW: ("yaw_snapshots", "yaw_left", "yaw_right", "yaw", getattr(config, 'YAW_THRESHOLD', 25.0)), RegistrationStage.PITCH: ("pitch_snapshots", "pitch_up", "pitch_down", "pitch", getattr(config, 'PITCH_THRESHOLD', 20.0)), RegistrationStage.ROLL: ("roll_snapshots", "roll_left", "roll_right", "roll", getattr(config, 'ROLL_THRESHOLD', 25.0))}
     
@@ -146,6 +145,7 @@ class FaceRegistrationApp:
         self.in_ext, self.hold_frames, self.missed_frames = False, 0, 0
         self.fake_frames = 0
         self.is_running, self.display_frame, self.frame_lock = True, None, threading.Lock()
+        self.locked_light_cond = None  # Variabel Pengunci Cahaya
         
         self.cap_data = {"facemesh_vector": None, "yaw_snapshots": [], "pitch_snapshots": [], "roll_snapshots": [], "blink_closed": None, "blink_open": None, "headpose_vector": None, "face_crops": []}
         self._pose_buf, self._blink_buf, self._prev_step = {"yaw": {}, "pitch": {}, "roll": {}}, {"closed": None, "open": None, "logged_closed": False, "logged_open": False}, "FACEMESH"
@@ -173,7 +173,6 @@ class FaceRegistrationApp:
         _log(f"✅ Memulai Registrasi untuk {self.name}...", "SYSTEM")
 
     def _reset_registration(self, display, t_title, t_sub):
-        """Fungsi baru untuk mereset seluruh proses registrasi dari awal jika gagal"""
         Helpers.show_msg(display, t_title, f"{t_sub} | Mengulang dari awal...", config.COLOR_RED)
         with self.frame_lock: self.display_frame = display.copy()
         _log(f"🔄 Registrasi diulang karena: {t_sub}", "WARNING")
@@ -192,6 +191,7 @@ class FaceRegistrationApp:
         self.action_start_time = time.time()
         self.prev_instruction = None
         self.prev_tag = None
+        self.locked_light_cond = None
         
         self.liveness.start_register()
 
@@ -312,7 +312,7 @@ class FaceRegistrationApp:
             with self.frame_lock: self.display_frame = display.copy()
             time.sleep(1.5); return
 
-        light_cond = Helpers.get_light_condition(raw_frame, face.bbox)
+        light_cond = getattr(self, 'locked_light_cond', "Normal")
         latensi_respon_subjek = round(sum(self.individual_latencies.values()), 2)
         t_mfn_start = time.time()
         
@@ -363,11 +363,48 @@ class FaceRegistrationApp:
         mfn_latency = round((time.time() - t_mfn_start) * 1000, 2)
         total_waktu_sistem = latensi_respon_subjek + mfn_latency
         
-        match = self.matcher.match(np.array(multi_master_embs[0], dtype=np.float32))
+        # --- PERBAIKAN UTAMA: SISTEM ANTI-DUPLIKAT MULTI-VECTOR CROSS MATCH MENYELURUH ---
+        is_duplicate = False
+        duplicate_name = ""
         anti_dup_thr = getattr(config, 'ANTI_DUPLICATE_THRESHOLD', 0.48)
+        best_sim_score = 0.0
         
-        if match.get("name") and match.get("score", 0.0) >= anti_dup_thr and os.getenv("ALLOW_DUPLICATE", "false").lower() != "true": 
-            self._reset_registration(display, "❌ WAJAH SUDAH TERDAFTAR!", f"User: {match['name']}")
+        all_faces_raw = self.db.load_all_faces()
+        if all_faces_raw:
+            for name, data in all_faces_raw.items():
+                if isinstance(data, dict) and 'embedding' in data:
+                    emb_list = data['embedding']
+                    if isinstance(emb_list, list) and len(emb_list) > 0:
+                        if not isinstance(emb_list[0], (list, np.ndarray)):
+                            emb_list = [emb_list]
+                        
+                        # Mengecek SEMUA vektor hasil ekstraksi vs SEMUA vektor di database
+                        for q_emb in multi_master_embs:
+                            q_vec = np.array(q_emb, dtype=np.float32)
+                            q_vec = q_vec / (np.linalg.norm(q_vec) + 1e-6)
+                            
+                            for db_emb in emb_list:
+                                db_vec = np.array(db_emb, dtype=np.float32)
+                                db_vec = db_vec / (np.linalg.norm(db_vec) + 1e-6)
+                                sim = np.dot(q_vec, db_vec)
+                                
+                                if sim > best_sim_score:
+                                    best_sim_score = sim
+                                    duplicate_name = name.split(" - ", 1)[-1]
+                                    
+                                if sim >= anti_dup_thr:
+                                    is_duplicate = True
+                                    break
+                            if is_duplicate: break
+                if is_duplicate: break
+
+        if is_duplicate and os.getenv("ALLOW_DUPLICATE", "false").lower() != "true": 
+            sim_percent = best_sim_score * 100
+            Helpers.show_msg(display, "❌ WAJAH SUDAH TERDAFTAR!", f"Mirip {sim_percent:.1f}% dgn {duplicate_name}", config.COLOR_RED)
+            with self.frame_lock: self.display_frame = display.copy()
+            _log(f"Registrasi DIBATALKAN! Wajah mirip {sim_percent:.1f}% dengan user: {duplicate_name}", "WARNING")
+            time.sleep(4.0)
+            self.stage = RegistrationStage.COMPLETE
             return
         else:
             self.cap_data["reg_latency_ms"] = total_waktu_sistem
@@ -402,85 +439,82 @@ class FaceRegistrationApp:
             bbox_memory = None
             while self.is_running and self.stage != RegistrationStage.COMPLETE:
                 ret, frame = self.cam.read()
-                if not ret: time.sleep(0.01); continue
+                if not ret: 
+                    time.sleep(0.01)
+                    continue
+                    
                 raw = frame.copy()
                 display = raw.copy()
-                
                 faces = self.detector.detect(raw)
                 
                 if not faces: 
                     self.missed_frames += 1
                     if self.missed_frames >= 5: 
                         bbox_memory = None
-                        display = cv2.flip(display, 1) 
+                        display = cv2.flip(display, 1)
                         Helpers.draw_hud(display, self.stage, "Hadapkan wajah", "", "", "NO FACE", None, config.COLOR_RED)
-                        if self._timer_started: self._timer_started = False
+                        self._timer_started = False
                     elif bbox_memory: 
-                        display = cv2.flip(display, 1) 
+                        display = cv2.flip(display, 1)
                         Helpers.draw_hud(display, self.stage, "Menganalisa...", "", "", "TRACKING", bbox_memory, config.COLOR_YELLOW)
-                    with self.frame_lock: self.display_frame = display
+                    with self.frame_lock: 
+                        self.display_frame = display
                     continue
-                
-                self.missed_frames = 0
-                face = faces[0]
+                    
+                self.missed_frames, face = 0, faces[0]
                 bbox_memory = face.bbox
                 
-                light_cond = Helpers.get_light_condition(raw, face.bbox)
+                # --- PERBAIKAN: LIGHT LOCKING REGISTRASI ---
+                current_light = Helpers.get_light_condition(raw, face.bbox)
+                if self.stage == RegistrationStage.FACEMESH or getattr(self, 'locked_light_cond', None) is None:
+                    self.locked_light_cond = current_light
+                light_cond = self.locked_light_cond
+                
                 enhanced = Helpers.enhance_adaptive(raw, face.bbox, light_cond)
                 
-                if not self._timer_started:
-                    self.action_start_time = time.time()
-                    self._timer_started = True
-
-                display = self.detector.draw(display, face)
-                display = cv2.flip(display, 1)
+                if not self._timer_started: 
+                    self.action_start_time, self._timer_started = time.time(), True
+                    
+                display = cv2.flip(self.detector.draw(display, face), 1)
                 
                 if face.bbox[3] > int(config.FRAME_HEIGHT * 0.50): 
                     Helpers.draw_hud(display, self.stage, "Wajah Terlalu Dekat!", "Mundur", "", "TOO CLOSE", face.bbox, config.COLOR_YELLOW)
-                    with self.frame_lock: self.display_frame = display
+                    with self.frame_lock: 
+                        self.display_frame = display
                     continue
-                
-                pose = self.liveness.pose_estimator.estimate(face, self.detector)
-                ear_val = (Helpers.capture_blink(face) or {}).get("avg_ear", 0.0)
+                    
+                pose, ear_val = self.liveness.pose_estimator.estimate(face, self.detector), (Helpers.capture_blink(face) or {}).get("avg_ear", 0.0)
                 sp = self.anti_spoof.is_real(raw, face.bbox)
                 sp_score, sp_real, sp_label = float(sp.get("score_real", sp.get("score", 1.0))), sp.get("real", True), sp.get("label_name", "FOTO").upper()
-                
                 hud_txt, term_txt = self._generate_metric_text(pose, ear_val, sp_score, light_cond)
                 
                 if not sp_real:
                     self.fake_frames += 1
-                    if self.fake_frames >= 4:
-                        # --- HANYA MENAMPILKAN PERINGATAN (TANPA MEMATIKAN PROGRAM) ---
+                    if self.fake_frames >= 4: 
                         Helpers.draw_hud(display, self.stage, "❌ DETEKSI SPOOFING!", f"Palsu: {sp_score:.2f}", hud_txt, f"{sp_label}", face.bbox, config.COLOR_RED)
-                        with self.frame_lock: self.display_frame = display
+                        with self.frame_lock: 
+                            self.display_frame = display
                         continue 
                 else: 
                     self.fake_frames = 0
-
+                    
                 if self.stage != RegistrationStage.EXTRACTION and not self.in_ext:
                     self._record_data_buffers(face, pose, enhanced) 
                     res = self.liveness.update_register(face, self.detector)
-                    if res["step"] != "WAIT" and res["step"] != self._prev_step:
-                        if self.stage in self.POSE_CFG:
-                            axis = self.POSE_CFG[self.stage][3]
-                            if len(self._pose_buf[axis]) < 2: res["step"] = self._prev_step 
-                                
+                    if res["step"] != "WAIT" and res["step"] != self._prev_step and self.stage in self.POSE_CFG and len(self._pose_buf[self.POSE_CFG[self.stage][3]]) < 2: 
+                        res["step"] = self._prev_step 
                     self._commit_stage_data(res["step"])
-                    instr = res.get("instruction", "")
-                    if self.prev_instruction is None or instr != self.prev_instruction:
-                        self.prev_instruction = instr
-                        self.action_start_time = time.time()
-                        self.hold_frames = 0
-                    
-                    hud_col = config.COLOR_GREEN if res["step"] == "DONE" else config.COLOR_CYAN
-                    Helpers.draw_hud(display, self.stage, instr, res.get("progress",""), hud_txt, f"Real: {sp_score:.2f}", face.bbox, hud_col)
+                    if self.prev_instruction is None or res.get("instruction", "") != self.prev_instruction: 
+                        self.prev_instruction, self.action_start_time, self.hold_frames = res.get("instruction", ""), time.time(), 0
+                    Helpers.draw_hud(display, self.stage, res.get("instruction", ""), res.get("progress",""), hud_txt, f"Real: {sp_score:.2f}", face.bbox, config.COLOR_GREEN if res["step"] == "DONE" else config.COLOR_CYAN)
                 elif not self.in_ext: 
                     self._process_extraction(raw, enhanced, face, display, pose, hud_txt, sp_score, sp_label)
-
-                with self.frame_lock: self.display_frame = display
+                    
+                with self.frame_lock: 
+                    self.display_frame = display
         finally: 
             self.is_running = False
-
+            
     def run(self):
         if self.stage == RegistrationStage.COMPLETE: return
         threading.Thread(target=self._process_thread, daemon=True).start()
@@ -490,16 +524,8 @@ class FaceRegistrationApp:
                 with self.frame_lock: frame = self.display_frame.copy() if self.display_frame is not None else None
                 if frame is not None: cv2.imshow("Register", frame)
                 if cv2.waitKey(1) & 0xFF == ord("q"): self.is_running = False; break
-        finally:
-            self.is_running = False; time.sleep(0.5); self.cam.stop(); self.detector.close(); cv2.destroyAllWindows()
-
+        finally: self.is_running = False; time.sleep(0.5); self.cam.stop(); self.detector.close(); cv2.destroyAllWindows()
 
 if __name__ == "__main__":
-    print("\n" + "="*45)
-    print("   SISTEM REGISTRASI WAJAH (MULTI-VECTOR)")
-    print("="*45)
-    nama_input = input("Masukan Nama Lengkap : ").strip()
-    
-    if nama_input:
-        app = FaceRegistrationApp(nama_input)
-        app.run()
+    print(f"\n{'='*45}\n   SISTEM REGISTRASI WAJAH (MULTI-VECTOR)\n{'='*45}")
+    if nama_input := input("Masukan Nama Lengkap : ").strip(): FaceRegistrationApp(nama_input).run()

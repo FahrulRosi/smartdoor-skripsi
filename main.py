@@ -49,7 +49,8 @@ class UIHelper:
         if not lm or len(lm) < 400: return 0.0
         p = np.array([[lm[i].x, lm[i].y] for i in [33,160,158,133,153,144,362,385,387,263,373,380]])
         n = np.linalg.norm 
-        return ((n(p[1]-p[5])+n(p[2]-p[4]))/(2.0*n(p[0]-p[3])+1e-6) + (n(p[7]-p[11])+n(p[8]-p[10]))/(2.0*n(p[6]-n(p[9])+1e-6))) / 2.0
+        # --- FIX TYPO: Perbaikan Rumus Matematika Bawaan Array p[9] ---
+        return ((n(p[1]-p[5])+n(p[2]-p[4]))/(2.0*n(p[0]-p[3])+1e-6) + (n(p[7]-p[11])+n(p[8]-p[10]))/(2.0*n(p[6]-p[9])+1e-6)) / 2.0
 
     @staticmethod
     def get_light_condition(raw, bbox):
@@ -63,6 +64,7 @@ class UIHelper:
         top_bg = gray[0:max(0, y1-10), max(0, x1-30):min(fw, x2+30)]
         L_bg_atas = np.mean(top_bg) if top_bg.size > 0 else L
         
+        # LOGIKA CAHAYA INI SUDAH 100% SINKRON DENGAN REGISTER.PY
         if (L_bg_atas - L) > 50 and L_bg_atas > 160 and L < 110: 
             return "Backlight"
             
@@ -156,6 +158,7 @@ class SmartDoorApp:
         self.seq, self.step_idx, self.reg_pose, self.pose_hold, self.prev_center = [], 0, [0.0, 0.0, 0.0], 0, None
         self.challenge_start_time, self.face_val_latency, self.final_display_acc = 0.0, 0.0, 0.0
         self.wait_center, self.blink_passed, self.blink_hold, self.ear_hist, self.print_counter, self.access_details, self.score_history = False, False, 0, [], 0, [], {}
+        self.locked_light_cond = None  # Variabel Pengunci Cahaya
 
     def _fail(self, status, color=config.COLOR_RED, instr="", wait=False):
         self._reset_state(); self.fake_frames = 0
@@ -249,7 +252,12 @@ class SmartDoorApp:
                 self.missed_frames, tgt_face = 0, max(faces, key=lambda f: f.bbox[2] * f.bbox[3]) 
                 self.ui.update({"wait": False, "bbox": tgt_face.bbox}) 
                 
-                l_str = UIHelper.get_light_condition(frame, tgt_face.bbox)
+                # --- PERBAIKAN: LIGHT LOCKING SINKRONISASI MAIN ---
+                current_light = UIHelper.get_light_condition(frame, tgt_face.bbox)
+                if self.state == ValidationState.IDLE or getattr(self, 'locked_light_cond', None) is None:
+                    self.locked_light_cond = current_light
+                l_str = self.locked_light_cond
+                
                 enhanced_adaptive = UIHelper.enhance_adaptive(frame.copy(), tgt_face.bbox, l_str)
                 
                 self._process_face(frame.copy(), enhanced_adaptive, tgt_face)
@@ -262,7 +270,8 @@ class SmartDoorApp:
         self.prev_center = (cx, cy) 
         if h > int(config.FRAME_HEIGHT * 0.70): return self._fail("TERLALU DEKAT", config.COLOR_YELLOW, "Mundur")
         
-        l_str = UIHelper.get_light_condition(raw, face.bbox)
+        # --- PERBAIKAN: Menggunakan Cahaya Terkunci Agar Stabil Saat Gerakan ---
+        l_str = getattr(self, 'locked_light_cond', "Normal")
 
         if self.state == ValidationState.IDLE: 
             self.state, self.auth_start = ValidationState.RECOGNIZING, time.time()

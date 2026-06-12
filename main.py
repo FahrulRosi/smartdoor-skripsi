@@ -24,22 +24,11 @@ class UIHelper:
     @staticmethod
     def enhance_adaptive(frame, bbox, l_str="Normal"):
         if not getattr(config, 'ENABLE_CLAHE_ENHANCEMENT', True): return frame
-        if not bbox: return frame
         
-        w = bbox[2]
-        if w > 180:     dist_cat = "DEKAT"
-        elif w >= 100: dist_cat = "SEDANG"
-        else:          dist_cat = "JAUH"
+        matrix_clip = {"Normal": 1.5, "Low Light": 2.0, "Backlight": 1.8}
+        clip_limit = matrix_clip.get(l_str, 1.5)
         
-        matrix_clip = {
-            "DEKAT":  {"Normal": 1.0, "Low Light": 1.3, "Backlight": 1.2},
-            "SEDANG": {"Normal": 1.5, "Low Light": 2.0, "Backlight": 1.8},
-            "JAUH":   {"Normal": 2.2, "Low Light": 2.5, "Backlight": 2.4}
-        }
-        clip_limit = matrix_clip[dist_cat].get(l_str, 1.5)
-        
-        d_val = 5 if dist_cat == "DEKAT" else 3
-        denoised = cv2.bilateralFilter(frame, d=d_val, sigmaColor=30, sigmaSpace=30)
+        denoised = cv2.bilateralFilter(frame, d=3, sigmaColor=30, sigmaSpace=30)
         
         img_yuv = cv2.cvtColor(denoised, cv2.COLOR_BGR2YUV)
         img_yuv[:,:,0] = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8)).apply(img_yuv[:,:,0])
@@ -60,7 +49,7 @@ class UIHelper:
         if not lm or len(lm) < 400: return 0.0
         p = np.array([[lm[i].x, lm[i].y] for i in [33,160,158,133,153,144,362,385,387,263,373,380]])
         n = np.linalg.norm 
-        return ((n(p[1]-p[5])+n(p[2]-p[4]))/(2.0*n(p[0]-p[3])+1e-6) + (n(p[7]-p[11])+n(p[8]-p[10]))/(2.0*n(p[6]-p[9])+1e-6)) / 2.0
+        return ((n(p[1]-p[5])+n(p[2]-p[4]))/(2.0*n(p[0]-p[3])+1e-6) + (n(p[7]-p[11])+n(p[8]-p[10]))/(2.0*n(p[6]-n(p[9])+1e-6))) / 2.0
 
     @staticmethod
     def get_light_condition(raw, bbox):
@@ -218,18 +207,9 @@ class SmartDoorApp:
         
         sm_score = np.mean(self.score_history[b_name]) if b_name else 0.0
         
-        if w > 180:    dist_cat = "DEKAT"
-        elif w >= 100: dist_cat = "SEDANG"
-        else:          dist_cat = "JAUH"
-
         b_thr = getattr(config, 'MATCH_THRESHOLD', 0.70)
-        matrix_thr = {
-            "DEKAT":  {"Normal": (0.00, 88.0), "Low Light": (-0.05, 80.0), "Backlight": (-0.03, 84.0)},
-            "SEDANG": {"Normal": (0.00, 88.0), "Low Light": (-0.07, 78.0), "Backlight": (-0.05, 82.0)},
-            "JAUH":   {"Normal": (-0.02, 86.0), "Low Light": (-0.09, 74.0), "Backlight": (-0.07, 78.0)}
-        }
-        
-        offset, _ = matrix_thr[dist_cat].get(l_str, (0.0, 80.0))
+        matrix_thr = {"Normal": 0.00, "Low Light": -0.05, "Backlight": -0.03}
+        offset = matrix_thr.get(l_str, 0.0)
         d_thr = b_thr + offset
         
         final_acc = float(sm_score * 100.0) if sm_score >= d_thr else 0.0

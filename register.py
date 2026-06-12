@@ -26,22 +26,11 @@ class Helpers:
     @staticmethod
     def enhance_adaptive(frame, bbox=None, l_str="Normal"):
         if not getattr(config, 'ENABLE_CLAHE_ENHANCEMENT', True): return frame
-        if not bbox: return frame
         
-        w = bbox[2]
-        if w > 180:    dist_cat = "DEKAT"
-        elif w >= 100: dist_cat = "SEDANG"
-        else:          dist_cat = "JAUH"
+        matrix_clip = {"Normal": 1.5, "Low Light": 2.0, "Backlight": 1.8}
+        clip_limit = matrix_clip.get(l_str, 1.5)
         
-        matrix_clip = {
-            "DEKAT":  {"Normal": 1.0, "Low Light": 1.3, "Backlight": 1.2},
-            "SEDANG": {"Normal": 1.5, "Low Light": 2.0, "Backlight": 1.8},
-            "JAUH":   {"Normal": 2.2, "Low Light": 2.5, "Backlight": 2.4}
-        }
-        clip_limit = matrix_clip[dist_cat].get(l_str, 1.5)
-        
-        d_val = 5 if dist_cat == "DEKAT" else 3
-        denoised = cv2.bilateralFilter(frame, d=d_val, sigmaColor=30, sigmaSpace=30)
+        denoised = cv2.bilateralFilter(frame, d=3, sigmaColor=30, sigmaSpace=30)
         img_yuv = cv2.cvtColor(denoised, cv2.COLOR_BGR2YUV)
         clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8))
         img_yuv[:,:,0] = clahe.apply(img_yuv[:,:,0])
@@ -183,6 +172,29 @@ class FaceRegistrationApp:
         self.individual_latencies = {}  
         _log(f"✅ Memulai Registrasi untuk {self.name}...", "SYSTEM")
 
+    def _reset_registration(self, display, t_title, t_sub):
+        """Fungsi baru untuk mereset seluruh proses registrasi dari awal jika gagal"""
+        Helpers.show_msg(display, t_title, f"{t_sub} | Mengulang dari awal...", config.COLOR_RED)
+        with self.frame_lock: self.display_frame = display.copy()
+        _log(f"🔄 Registrasi diulang karena: {t_sub}", "WARNING")
+        time.sleep(3.0)
+        
+        self.stage = RegistrationStage.FACEMESH
+        self.cap_data = {"facemesh_vector": None, "yaw_snapshots": [], "pitch_snapshots": [], "roll_snapshots": [], "blink_closed": None, "blink_open": None, "headpose_vector": None, "face_crops": []}
+        self._pose_buf = {"yaw": {}, "pitch": {}, "roll": {}}
+        self._blink_buf = {"closed": None, "open": None, "logged_closed": False, "logged_open": False}
+        self._prev_step = "FACEMESH"
+        
+        self.hold_frames = 0
+        self.missed_frames = 0
+        self.fake_frames = 0
+        self.individual_latencies = {}
+        self.action_start_time = time.time()
+        self.prev_instruction = None
+        self.prev_tag = None
+        
+        self.liveness.start_register()
+
     def _record_data_buffers(self, face, pose, enhanced):
         if not self.action_start_time: return
         
@@ -190,13 +202,13 @@ class FaceRegistrationApp:
             if self.cap_data["facemesh_vector"] is None:
                 self.hold_frames += 1
                 
-                if self.hold_frames % 3 == 0 and len(self.cap_data["face_crops"]) < 3:
+                if self.hold_frames % 2 == 0 and len(self.cap_data["face_crops"]) < 5:
                     crop = self.model.crop_face(enhanced, face.bbox)
                     if crop is not None and crop.size > 0:
                         idx = len(self.cap_data["face_crops"]) + 1
                         self.cap_data["face_crops"].append((f"Frontal_{idx}", crop))
                 
-                if self.hold_frames >= 9: 
+                if self.hold_frames >= 10: 
                     lat_ms = round((time.time() - self.action_start_time) * 1000, 2)
                     self.cap_data["facemesh_vector"] = np.array([[l.x, l.y, l.z] for l in face.landmarks], dtype=np.float32).flatten()
                     
@@ -207,7 +219,7 @@ class FaceRegistrationApp:
 
                     self.hold_frames = 0
                     self.individual_latencies["FaceMesh (3D)"] = lat_ms
-                    _log(f"   -> [Wajah 3D Terekam]      | Latensi: {lat_ms:>8.2f} ms", "SUCCESS")
+                    _log(f"   -> [Wajah 3D Terekam (5 Sampel)] | Latensi: {lat_ms:>8.2f} ms", "SUCCESS")
                     self.action_start_time = time.time() 
 
         if self.stage in self.POSE_CFG:
@@ -289,7 +301,9 @@ class FaceRegistrationApp:
 
     def _process_extraction(self, raw_frame, frame, face, display, pose, score_txt, sp_score, sp_label):
         missing = [k for k, v in [("FaceMesh", self.cap_data["facemesh_vector"] is not None), ("Yaw", len(self.cap_data["yaw_snapshots"])>1), ("Pitch", len(self.cap_data["pitch_snapshots"])>1), ("Roll", len(self.cap_data["roll_snapshots"])>1), ("Blink", self.cap_data["blink_closed"] is not None)] if not v]
-        if missing: Helpers.show_msg(display, "❌ GAGAL!", f"Kurang: {','.join(missing)}", config.COLOR_RED); time.sleep(4); self.stage = RegistrationStage.COMPLETE; return
+        if missing: 
+            self._reset_registration(display, "❌ GAGAL EKTRAKSI!", f"Data Kurang: {','.join(missing)}")
+            return
 
         quality_ok, brightness, blur_score = Helpers.is_image_quality_good(raw_frame, face.bbox)
         if not quality_ok:
@@ -306,18 +320,39 @@ class FaceRegistrationApp:
             crop_cadangan = self.model.crop_face(frame, face.bbox)
             if crop_cadangan is not None: self.cap_data["face_crops"].append(("Frontal Akhir", crop_cadangan))
             
-        _, crop_normal = self.cap_data["face_crops"][0]
+        best_crop = None
+        max_blur = -1.0
+        valid_embeddings = []
+
+        for tag, crop in self.cap_data["face_crops"]:
+            if crop is not None and crop.size > 0:
+                gray_crop = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+                b_score = cv2.Laplacian(gray_crop, cv2.CV_64F).var()
+                if b_score > max_blur:
+                    max_blur = b_score
+                    best_crop = crop
+                
+                emb = self.model.get_embedding(crop)
+                if emb is not None:
+                    valid_embeddings.append(np.array(emb).flatten())
+
+        if best_crop is None:
+            _, best_crop = self.cap_data["face_crops"][0]
+
+        if len(valid_embeddings) > 0:
+            emb_normal = np.mean(valid_embeddings, axis=0) 
+        else:
+            emb_normal = self.model.get_embedding(best_crop)
+            
+        crop_low_light = Helpers.clone_low_light(best_crop)
+        crop_backlight = Helpers.clone_backlight(best_crop)
         
-        crop_low_light = Helpers.clone_low_light(crop_normal)
-        crop_backlight = Helpers.clone_backlight(crop_normal)
-        
-        emb_normal = self.model.get_embedding(crop_normal)
         emb_low_light = self.model.get_embedding(crop_low_light)
         emb_backlight = self.model.get_embedding(crop_backlight)
         
         if emb_normal is None or emb_low_light is None or emb_backlight is None:
-            Helpers.show_msg(display, "❌ GAGAL!", "Ekstraksi AI Gagal", config.COLOR_RED)
-            time.sleep(1.5); self.stage = RegistrationStage.COMPLETE; return
+            self._reset_registration(display, "❌ GAGAL!", "Ekstraksi AI Gagal")
+            return
             
         def norm_emb(e):
             e_arr = np.array(e).flatten()
@@ -332,7 +367,8 @@ class FaceRegistrationApp:
         anti_dup_thr = getattr(config, 'ANTI_DUPLICATE_THRESHOLD', 0.48)
         
         if match.get("name") and match.get("score", 0.0) >= anti_dup_thr and os.getenv("ALLOW_DUPLICATE", "false").lower() != "true": 
-            Helpers.show_msg(display, "❌ WAJAH SUDAH TERDAFTAR!", f"User: {match['name']}", config.COLOR_RED)
+            self._reset_registration(display, "❌ WAJAH SUDAH TERDAFTAR!", f"User: {match['name']}")
+            return
         else:
             self.cap_data["reg_latency_ms"] = total_waktu_sistem
             self.cap_data["individual_latencies"] = self.individual_latencies
@@ -350,16 +386,16 @@ class FaceRegistrationApp:
                 print(f" 👤 Nama User             : {self.name}")
                 print(f" 🔑 User ID (UUID)        : {self.user_id}")
                 print(f" 💡 Kondisi Live          : {light_cond}")
-                print(f" 🧠 Strategi              : Kloning Matriks 2D (Norm, Low, Back)")
+                print(f" 🧠 Strategi              : Centroid Averaging ({len(valid_embeddings)} Sampel) + Kloning Matriks 2D")
                 print("-" * 65)
                 print(f" ⏱️ Latensi Respon Subjek : {latensi_respon_subjek:.2f} ms")
-                print(f" ⏱️ Ekstraksi AI (3x)     : {mfn_latency:.2f} ms")
+                print(f" ⏱️ Ekstraksi AI          : {mfn_latency:.2f} ms")
                 print("="*65 + "\n")
+                with self.frame_lock: self.display_frame = display.copy()
+                time.sleep(1.5)
+                self.stage = RegistrationStage.COMPLETE 
             else:
-                Helpers.show_msg(display, "❌ GAGAL!", "Database Error", config.COLOR_RED)
-                
-        with self.frame_lock: self.display_frame = display.copy()
-        time.sleep(1.5); self.stage = RegistrationStage.COMPLETE 
+                self._reset_registration(display, "❌ GAGAL!", "Database Error")
 
     def _process_thread(self):
         try:
@@ -414,6 +450,7 @@ class FaceRegistrationApp:
                 if not sp_real:
                     self.fake_frames += 1
                     if self.fake_frames >= 4:
+                        # --- HANYA MENAMPILKAN PERINGATAN (TANPA MEMATIKAN PROGRAM) ---
                         Helpers.draw_hud(display, self.stage, "❌ DETEKSI SPOOFING!", f"Palsu: {sp_score:.2f}", hud_txt, f"{sp_label}", face.bbox, config.COLOR_RED)
                         with self.frame_lock: self.display_frame = display
                         continue 

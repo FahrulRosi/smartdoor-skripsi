@@ -61,16 +61,31 @@ class Helpers:
         if not bbox: return "Normal"
         bx, by, bw, bh = bbox
         fh, fw = raw_frame.shape[:2]
-        x1, y1, x2, y2 = max(0, bx), max(0, by), min(fw, bx + bw), min(fh, by + bh)
+        
+        # PERBAIKAN: Perkecil sedikit area crop ke dalam (margin 10px) agar lebih fokus ke wajah
+        x1, y1 = max(0, bx + 10), max(0, by + 10)
+        x2, y2 = min(fw, bx + bw - 10), min(fh, by + bh - 10)
         gray = cv2.cvtColor(raw_frame, cv2.COLOR_BGR2GRAY)
         
         L = np.mean(gray[y1:y2, x1:x2]) if gray[y1:y2, x1:x2].size > 0 else 100.0
-        top_bg = gray[0:max(0, y1-10), max(0, x1-30):min(fw, x2+30)]
+        overall_L = np.mean(gray) # PERBAIKAN: Cek kecerahan seluruh frame
+        
+        # Background ditarik 60 piksel dari atas kepala
+        bg_y1, bg_y2 = max(0, by - 60), max(0, by - 10)
+        bg_x1, bg_x2 = max(0, bx - 30), min(fw, bx + bw + 30)
+        top_bg = gray[bg_y1:bg_y2, bg_x1:bg_x2]
+        
         L_bg_atas = np.mean(top_bg) if top_bg.size > 0 else L
         
-        if (L_bg_atas - L) > 50 and L_bg_atas > 160 and L < 110: 
+        # LOGIKA BACKLIGHT
+        if (L_bg_atas - L) > 50 and L_bg_atas > 150 and L < 120: 
             return "Backlight"
-        return "Low Light" if (L_bg_atas < 95 or L < 95) else "Normal"
+            
+        # LOGIKA LOW LIGHT YANG LEBIH SENSITIF (Sama seperti di main.py)
+        if L < 130 or overall_L < 110 or (L_bg_atas < 90 and L < 140):
+            return "Low Light"
+            
+        return "Normal"
 
     @staticmethod
     def is_image_quality_good(frame, bbox):
@@ -145,7 +160,7 @@ class FaceRegistrationApp:
         self.in_ext, self.hold_frames, self.missed_frames = False, 0, 0
         self.fake_frames = 0
         self.is_running, self.display_frame, self.frame_lock = True, None, threading.Lock()
-        self.locked_light_cond = None  # Variabel Pengunci Cahaya
+        self.locked_light_cond = None 
         
         self.cap_data = {"facemesh_vector": None, "yaw_snapshots": [], "pitch_snapshots": [], "roll_snapshots": [], "blink_closed": None, "blink_open": None, "headpose_vector": None, "face_crops": []}
         self._pose_buf, self._blink_buf, self._prev_step = {"yaw": {}, "pitch": {}, "roll": {}}, {"closed": None, "open": None, "logged_closed": False, "logged_open": False}, "FACEMESH"
@@ -363,7 +378,6 @@ class FaceRegistrationApp:
         mfn_latency = round((time.time() - t_mfn_start) * 1000, 2)
         total_waktu_sistem = latensi_respon_subjek + mfn_latency
         
-        # --- PERBAIKAN UTAMA: SISTEM ANTI-DUPLIKAT MULTI-VECTOR CROSS MATCH MENYELURUH ---
         is_duplicate = False
         duplicate_name = ""
         anti_dup_thr = getattr(config, 'ANTI_DUPLICATE_THRESHOLD', 0.48)
@@ -378,7 +392,6 @@ class FaceRegistrationApp:
                         if not isinstance(emb_list[0], (list, np.ndarray)):
                             emb_list = [emb_list]
                         
-                        # Mengecek SEMUA vektor hasil ekstraksi vs SEMUA vektor di database
                         for q_emb in multi_master_embs:
                             q_vec = np.array(q_emb, dtype=np.float32)
                             q_vec = q_vec / (np.linalg.norm(q_vec) + 1e-6)
@@ -420,7 +433,7 @@ class FaceRegistrationApp:
                 print("\n" + "="*65)
                 print(" 🎉 REGISTRASI MULTI-VECTOR BERHASIL 🎉".center(65))
                 print("="*65)
-                print(f" 👤 Nama User             : {self.name}")
+                print(f" 👤 Nama User            : {self.name}")
                 print(f" 🔑 User ID (UUID)        : {self.user_id}")
                 print(f" 💡 Kondisi Live          : {light_cond}")
                 print(f" 🧠 Strategi              : Centroid Averaging ({len(valid_embeddings)} Sampel) + Kloning Matriks 2D")
@@ -464,7 +477,6 @@ class FaceRegistrationApp:
                 self.missed_frames, face = 0, faces[0]
                 bbox_memory = face.bbox
                 
-                # --- PERBAIKAN: LIGHT LOCKING REGISTRASI ---
                 current_light = Helpers.get_light_condition(raw, face.bbox)
                 if self.stage == RegistrationStage.FACEMESH or getattr(self, 'locked_light_cond', None) is None:
                     self.locked_light_cond = current_light

@@ -49,7 +49,6 @@ class UIHelper:
         if not lm or len(lm) < 400: return 0.0
         p = np.array([[lm[i].x, lm[i].y] for i in [33,160,158,133,153,144,362,385,387,263,373,380]])
         n = np.linalg.norm 
-        # --- FIX TYPO: Perbaikan Rumus Matematika Bawaan Array p[9] ---
         return ((n(p[1]-p[5])+n(p[2]-p[4]))/(2.0*n(p[0]-p[3])+1e-6) + (n(p[7]-p[11])+n(p[8]-p[10]))/(2.0*n(p[6]-p[9])+1e-6)) / 2.0
 
     @staticmethod
@@ -57,18 +56,31 @@ class UIHelper:
         if not bbox: return "Normal"
         bx, by, bw, bh = bbox
         fh, fw = raw.shape[:2]
-        x1, y1, x2, y2 = max(0, bx), max(0, by), min(fw, bx + bw), min(fh, by + bh)
+        
+        # PERBAIKAN: Perkecil sedikit area crop ke dalam (margin 10px)
+        x1, y1 = max(0, bx + 10), max(0, by + 10)
+        x2, y2 = min(fw, bx + bw - 10), min(fh, by + bh - 10)
         gray = cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY)
         
         L = np.mean(gray[y1:y2, x1:x2]) if gray[y1:y2, x1:x2].size > 0 else 100.0
-        top_bg = gray[0:max(0, y1-10), max(0, x1-30):min(fw, x2+30)]
+        overall_L = np.mean(gray) # PERBAIKAN: Cek kecerahan seluruh frame
+        
+        # Background ditarik 60 piksel dari atas kepala
+        bg_y1, bg_y2 = max(0, by - 60), max(0, by - 10)
+        bg_x1, bg_x2 = max(0, bx - 30), min(fw, bx + bw + 30)
+        top_bg = gray[bg_y1:bg_y2, bg_x1:bg_x2]
+        
         L_bg_atas = np.mean(top_bg) if top_bg.size > 0 else L
         
-        # LOGIKA CAHAYA INI SUDAH 100% SINKRON DENGAN REGISTER.PY
-        if (L_bg_atas - L) > 50 and L_bg_atas > 160 and L < 110: 
+        # LOGIKA BACKLIGHT
+        if (L_bg_atas - L) > 50 and L_bg_atas > 150 and L < 120: 
             return "Backlight"
             
-        return "Low Light" if (L_bg_atas < 95 or L < 95) else "Normal"
+        # PERBAIKAN: LOGIKA LOW LIGHT YANG LEBIH SENSITIF
+        if L < 130 or overall_L < 110 or (L_bg_atas < 90 and L < 140):
+            return "Low Light"
+            
+        return "Normal"
 
     @staticmethod
     def draw_ui(d, ui, locked):
@@ -158,7 +170,7 @@ class SmartDoorApp:
         self.seq, self.step_idx, self.reg_pose, self.pose_hold, self.prev_center = [], 0, [0.0, 0.0, 0.0], 0, None
         self.challenge_start_time, self.face_val_latency, self.final_display_acc = 0.0, 0.0, 0.0
         self.wait_center, self.blink_passed, self.blink_hold, self.ear_hist, self.print_counter, self.access_details, self.score_history = False, False, 0, [], 0, [], {}
-        self.locked_light_cond = None  # Variabel Pengunci Cahaya
+        self.locked_light_cond = None  
 
     def _fail(self, status, color=config.COLOR_RED, instr="", wait=False):
         self._reset_state(); self.fake_frames = 0
@@ -218,10 +230,11 @@ class SmartDoorApp:
         final_acc = float(sm_score * 100.0) if sm_score >= d_thr else 0.0
         return b_name, sm_score, d_thr, final_acc, (sm_score >= d_thr)
 
-    def _handle_spoofing(self, raw, face, is_recog, disp_name, sp_latency):
+    # PERBAIKAN: Menambahkan parameter l_str dan menghapus hardcode pada instr
+    def _handle_spoofing(self, raw, face, is_recog, disp_name, sp_latency, l_str="Normal"):
         self.fake_frames += 1
         if self.state == ValidationState.RECOGNIZING and not is_recog:
-            self.ui.update({"wait": False, "bbox": face.bbox, "status": "TIDAK DIKENAL", "color": config.COLOR_RED, "instr": "Live: Normal"})
+            self.ui.update({"wait": False, "bbox": face.bbox, "status": "TIDAK DIKENAL", "color": config.COLOR_RED, "instr": f"Live: {l_str}"})
             return True
         
         if self.fake_frames >= 3:
@@ -252,10 +265,11 @@ class SmartDoorApp:
                 self.missed_frames, tgt_face = 0, max(faces, key=lambda f: f.bbox[2] * f.bbox[3]) 
                 self.ui.update({"wait": False, "bbox": tgt_face.bbox}) 
                 
-                # --- PERBAIKAN: LIGHT LOCKING SINKRONISASI MAIN ---
                 current_light = UIHelper.get_light_condition(frame, tgt_face.bbox)
-                if self.state == ValidationState.IDLE or getattr(self, 'locked_light_cond', None) is None:
+                
+                if self.state in (ValidationState.IDLE, ValidationState.RECOGNIZING) or getattr(self, 'locked_light_cond', None) is None:
                     self.locked_light_cond = current_light
+                
                 l_str = self.locked_light_cond
                 
                 enhanced_adaptive = UIHelper.enhance_adaptive(frame.copy(), tgt_face.bbox, l_str)
@@ -270,7 +284,6 @@ class SmartDoorApp:
         self.prev_center = (cx, cy) 
         if h > int(config.FRAME_HEIGHT * 0.70): return self._fail("TERLALU DEKAT", config.COLOR_YELLOW, "Mundur")
         
-        # --- PERBAIKAN: Menggunakan Cahaya Terkunci Agar Stabil Saat Gerakan ---
         l_str = getattr(self, 'locked_light_cond', "Normal")
 
         if self.state == ValidationState.IDLE: 
@@ -284,7 +297,8 @@ class SmartDoorApp:
 
         t_sp_start = time.time()
         if not self.anti_spoof.is_real(raw, face.bbox).get("real", True):
-            if self._handle_spoofing(raw, face, is_recog, disp_name, (time.time() - t_sp_start) * 1000): return
+            # PERBAIKAN: Melempar variabel l_str ke fungsi _handle_spoofing
+            if self._handle_spoofing(raw, face, is_recog, disp_name, (time.time() - t_sp_start) * 1000, l_str): return
         self.fake_frames = 0
 
         if self.state == ValidationState.RECOGNIZING:

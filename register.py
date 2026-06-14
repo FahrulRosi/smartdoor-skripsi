@@ -62,26 +62,22 @@ class Helpers:
         bx, by, bw, bh = bbox
         fh, fw = raw_frame.shape[:2]
         
-        # PERBAIKAN: Perkecil sedikit area crop ke dalam (margin 10px) agar lebih fokus ke wajah
         x1, y1 = max(0, bx + 10), max(0, by + 10)
         x2, y2 = min(fw, bx + bw - 10), min(fh, by + bh - 10)
         gray = cv2.cvtColor(raw_frame, cv2.COLOR_BGR2GRAY)
         
         L = np.mean(gray[y1:y2, x1:x2]) if gray[y1:y2, x1:x2].size > 0 else 100.0
-        overall_L = np.mean(gray) # PERBAIKAN: Cek kecerahan seluruh frame
+        overall_L = np.mean(gray) 
         
-        # Background ditarik 60 piksel dari atas kepala
         bg_y1, bg_y2 = max(0, by - 60), max(0, by - 10)
         bg_x1, bg_x2 = max(0, bx - 30), min(fw, bx + bw + 30)
         top_bg = gray[bg_y1:bg_y2, bg_x1:bg_x2]
         
         L_bg_atas = np.mean(top_bg) if top_bg.size > 0 else L
         
-        # LOGIKA BACKLIGHT
         if (L_bg_atas - L) > 50 and L_bg_atas > 150 and L < 120: 
             return "Backlight"
             
-        # LOGIKA LOW LIGHT YANG LEBIH SENSITIF (Sama seperti di main.py)
         if L < 130 or overall_L < 110 or (L_bg_atas < 90 and L < 140):
             return "Low Light"
             
@@ -162,8 +158,12 @@ class FaceRegistrationApp:
         self.is_running, self.display_frame, self.frame_lock = True, None, threading.Lock()
         self.locked_light_cond = None 
         
-        self.cap_data = {"facemesh_vector": None, "yaw_snapshots": [], "pitch_snapshots": [], "roll_snapshots": [], "blink_closed": None, "blink_open": None, "headpose_vector": None, "face_crops": []}
+        self.cap_data = {"facemesh_vector": None, "yaw_snapshots": [], "pitch_snapshots": [], "roll_snapshots": [], "blink_closed": None, "blink_open": None, "headpose_vector": None}
         self._pose_buf, self._blink_buf, self._prev_step = {"yaw": {}, "pitch": {}, "roll": {}}, {"closed": None, "open": None, "logged_closed": False, "logged_open": False}, "FACEMESH"
+        
+        # Buffer untuk Multi-Frame Averaging (5 Frame)
+        self.extraction_embeddings = []
+        self.last_extraction_time = 0
         
         self.db = FaceDatabase()
         self.cam = CameraStream(config.CAMERA_INDEX, config.FRAME_WIDTH, config.FRAME_HEIGHT).start()
@@ -194,10 +194,13 @@ class FaceRegistrationApp:
         time.sleep(3.0)
         
         self.stage = RegistrationStage.FACEMESH
-        self.cap_data = {"facemesh_vector": None, "yaw_snapshots": [], "pitch_snapshots": [], "roll_snapshots": [], "blink_closed": None, "blink_open": None, "headpose_vector": None, "face_crops": []}
+        self.cap_data = {"facemesh_vector": None, "yaw_snapshots": [], "pitch_snapshots": [], "roll_snapshots": [], "blink_closed": None, "blink_open": None, "headpose_vector": None}
         self._pose_buf = {"yaw": {}, "pitch": {}, "roll": {}}
         self._blink_buf = {"closed": None, "open": None, "logged_closed": False, "logged_open": False}
         self._prev_step = "FACEMESH"
+        
+        self.extraction_embeddings = []
+        self.last_extraction_time = 0
         
         self.hold_frames = 0
         self.missed_frames = 0
@@ -217,24 +220,13 @@ class FaceRegistrationApp:
             if self.cap_data["facemesh_vector"] is None:
                 self.hold_frames += 1
                 
-                if self.hold_frames % 2 == 0 and len(self.cap_data["face_crops"]) < 5:
-                    crop = self.model.crop_face(enhanced, face.bbox)
-                    if crop is not None and crop.size > 0:
-                        idx = len(self.cap_data["face_crops"]) + 1
-                        self.cap_data["face_crops"].append((f"Frontal_{idx}", crop))
-                
                 if self.hold_frames >= 10: 
                     lat_ms = round((time.time() - self.action_start_time) * 1000, 2)
                     self.cap_data["facemesh_vector"] = np.array([[l.x, l.y, l.z] for l in face.landmarks], dtype=np.float32).flatten()
-                    
-                    if not self.cap_data["face_crops"]:
-                        crop = self.model.crop_face(enhanced, face.bbox)
-                        if crop is not None and crop.size > 0: 
-                            self.cap_data["face_crops"].append(("Frontal_Fallback", crop))
 
                     self.hold_frames = 0
                     self.individual_latencies["FaceMesh (3D)"] = lat_ms
-                    _log(f"   -> [Wajah 3D Terekam (5 Sampel)] | Latensi: {lat_ms:>8.2f} ms", "SUCCESS")
+                    _log(f"   -> [Wajah 3D Terekam] | Latensi: {lat_ms:>8.2f} ms", "SUCCESS")
                     self.action_start_time = time.time() 
 
         if self.stage in self.POSE_CFG:
@@ -315,69 +307,68 @@ class FaceRegistrationApp:
             self.hold_frames = 0
 
     def _process_extraction(self, raw_frame, frame, face, display, pose, score_txt, sp_score, sp_label):
-        missing = [k for k, v in [("FaceMesh", self.cap_data["facemesh_vector"] is not None), ("Yaw", len(self.cap_data["yaw_snapshots"])>1), ("Pitch", len(self.cap_data["pitch_snapshots"])>1), ("Roll", len(self.cap_data["roll_snapshots"])>1), ("Blink", self.cap_data["blink_closed"] is not None)] if not v]
+        # 1. Cek Validasi Kelengkapan Tantangan Liveness Mandiri
+        missing = [k for k, v in [("FaceMesh", self.cap_data["facemesh_vector"] is not None), 
+                                  ("Yaw", len(self.cap_data["yaw_snapshots"])>1), 
+                                  ("Pitch", len(self.cap_data["pitch_snapshots"])>1), 
+                                  ("Roll", len(self.cap_data["roll_snapshots"])>1), 
+                                  ("Blink", self.cap_data["blink_closed"] is not None)] if not v]
         if missing: 
             self._reset_registration(display, "❌ GAGAL EKTRAKSI!", f"Data Kurang: {','.join(missing)}")
             return
 
+        # 2. Sortir Kualitas Gambar (Mencegah Frame Blur/Noise ikut masuk rata-rata)
         quality_ok, brightness, blur_score = Helpers.is_image_quality_good(raw_frame, face.bbox)
         if not quality_ok:
             reason = "Cahaya Buruk" if not (50 < brightness < 200) else "Kamera Blur"
-            Helpers.show_msg(display, "⚠️ KUALITAS GAMBAR BURUK", f"{reason} | Harap diam", config.COLOR_YELLOW)
+            Helpers.draw_hud(display, self.stage, f"⚠️ {reason}!", "Mohon tetap diam...", score_txt, f"Real: {sp_score:.2f}", face.bbox, config.COLOR_YELLOW)
             with self.frame_lock: self.display_frame = display.copy()
-            time.sleep(1.5); return
+            return
 
+        # Berikan jeda mikro (100ms) antar frame agar terkumpul variasi mikro posisi wajah
+        current_time = time.time()
+        if current_time - self.last_extraction_time < 0.1:
+            collected = len(self.extraction_embeddings)
+            progress_pct = int((collected / 5) * 100)
+            Helpers.draw_hud(display, self.stage, f"🧠 EKSTRAKSI FITUR WAJAH ({progress_pct}%)", f"Mengambil data {collected}/5. Tahan posisi...", score_txt, f"Real: {sp_score:.2f}", face.bbox, config.COLOR_CYAN)
+            with self.frame_lock: self.display_frame = display.copy()
+            return
+        self.last_extraction_time = current_time
+
+        # 3. Ambil Embedding Potongan Wajah dari Frame Aktif
+        best_crop = self.model.crop_face(frame, face.bbox)
+        if best_crop is not None and best_crop.size > 0:
+            emb_final = self.model.get_embedding(best_crop)
+            if emb_final is None: return
+            
+            # Normalisasi unit vektor per frame sebelum masuk buffer list
+            emb_arr = np.array(emb_final).flatten()
+            norm_emb = emb_arr / (np.linalg.norm(emb_arr) + 1e-6)
+            self.extraction_embeddings.append(norm_emb)
+
+        # 4. Tampilkan Progress ke Layar
+        total_frames_needed = 5
+        collected = len(self.extraction_embeddings)
+        
+        if collected < total_frames_needed:
+            progress_pct = int((collected / total_frames_needed) * 100)
+            Helpers.draw_hud(display, self.stage, f"🧠 EKSTRAKSI FITUR WAJAH ({progress_pct}%)", f"Mengambil data {collected}/{total_frames_needed}. Tahan posisi...", score_txt, f"Real: {sp_score:.2f}", face.bbox, config.COLOR_CYAN)
+            with self.frame_lock: self.display_frame = display.copy()
+            return
+
+        # 5. [INTI PROSES] HITUNG RATA-RATA DARI 5 VECTOR (EMBEDDING AVERAGING)
+        averaged_emb = np.mean(self.extraction_embeddings, axis=0)
+        # Normalisasi ulang hasil rata-rata agar panjang total vektor tetap bernilai 1
+        final_emb_vector = (averaged_emb / (np.linalg.norm(averaged_emb) + 1e-6)).tolist()
+        single_master_emb = [final_emb_vector]
+
+        # 6. Kalkulasi Perhitungan Latensi Akhir
         light_cond = getattr(self, 'locked_light_cond', "Normal")
         latensi_respon_subjek = round(sum(self.individual_latencies.values()), 2)
-        t_mfn_start = time.time()
-        
-        if not self.cap_data.get("face_crops"):
-            crop_cadangan = self.model.crop_face(frame, face.bbox)
-            if crop_cadangan is not None: self.cap_data["face_crops"].append(("Frontal Akhir", crop_cadangan))
-            
-        best_crop = None
-        max_blur = -1.0
-        valid_embeddings = []
-
-        for tag, crop in self.cap_data["face_crops"]:
-            if crop is not None and crop.size > 0:
-                gray_crop = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-                b_score = cv2.Laplacian(gray_crop, cv2.CV_64F).var()
-                if b_score > max_blur:
-                    max_blur = b_score
-                    best_crop = crop
-                
-                emb = self.model.get_embedding(crop)
-                if emb is not None:
-                    valid_embeddings.append(np.array(emb).flatten())
-
-        if best_crop is None:
-            _, best_crop = self.cap_data["face_crops"][0]
-
-        if len(valid_embeddings) > 0:
-            emb_normal = np.mean(valid_embeddings, axis=0) 
-        else:
-            emb_normal = self.model.get_embedding(best_crop)
-            
-        crop_low_light = Helpers.clone_low_light(best_crop)
-        crop_backlight = Helpers.clone_backlight(best_crop)
-        
-        emb_low_light = self.model.get_embedding(crop_low_light)
-        emb_backlight = self.model.get_embedding(crop_backlight)
-        
-        if emb_normal is None or emb_low_light is None or emb_backlight is None:
-            self._reset_registration(display, "❌ GAGAL!", "Ekstraksi AI Gagal")
-            return
-            
-        def norm_emb(e):
-            e_arr = np.array(e).flatten()
-            return (e_arr / (np.linalg.norm(e_arr) + 1e-6)).tolist()
-            
-        multi_master_embs = [norm_emb(emb_normal), norm_emb(emb_low_light), norm_emb(emb_backlight)]
-
-        mfn_latency = round((time.time() - t_mfn_start) * 1000, 2)
+        mfn_latency = round((time.time() - self.action_start_time) * 1000, 2)
         total_waktu_sistem = latensi_respon_subjek + mfn_latency
         
+        # 7. Fitur Anti-Duplicate (Mencegah 1 Wajah Terdaftar Dua Kali di Database)
         is_duplicate = False
         duplicate_name = ""
         anti_dup_thr = getattr(config, 'ANTI_DUPLICATE_THRESHOLD', 0.48)
@@ -392,7 +383,7 @@ class FaceRegistrationApp:
                         if not isinstance(emb_list[0], (list, np.ndarray)):
                             emb_list = [emb_list]
                         
-                        for q_emb in multi_master_embs:
+                        for q_emb in single_master_emb:
                             q_vec = np.array(q_emb, dtype=np.float32)
                             q_vec = q_vec / (np.linalg.norm(q_vec) + 1e-6)
                             
@@ -420,26 +411,27 @@ class FaceRegistrationApp:
             self.stage = RegistrationStage.COMPLETE
             return
         else:
+            # 8. Commit Penyimpanan ke SQL Database Supabase / Local
             self.cap_data["reg_latency_ms"] = total_waktu_sistem
             self.cap_data["individual_latencies"] = self.individual_latencies
             self.cap_data.update({"headpose_vector": [float(pose["yaw"]), float(pose["pitch"]), float(pose["roll"])], "registration_accuracy": 100.0, "light_condition": light_cond})
             if "face_crops" in self.cap_data: del self.cap_data["face_crops"]
             
-            success_master = self.db.save_face(self.name, self.user_id, multi_master_embs, self.cap_data)
+            success_master = self.db.save_face(self.name, self.user_id, single_master_emb, self.cap_data)
             
             if success_master: 
-                Helpers.show_msg(display, "✅ REGISTRASI BERHASIL!", f"User: {self.name} | Multi-Vector", config.COLOR_GREEN)
+                Helpers.show_msg(display, "✅ REGISTRASI BERHASIL!", f"User: {self.name} | 5-Frame Centroid Vector", config.COLOR_GREEN)
                 
                 print("\n" + "="*65)
-                print(" 🎉 REGISTRASI MULTI-VECTOR BERHASIL 🎉".center(65))
+                print(" 🎉 REGISTRASI BERHASIL (5-FRAME CENTROID) 🎉".center(65))
                 print("="*65)
                 print(f" 👤 Nama User            : {self.name}")
                 print(f" 🔑 User ID (UUID)        : {self.user_id}")
                 print(f" 💡 Kondisi Live          : {light_cond}")
-                print(f" 🧠 Strategi              : Centroid Averaging ({len(valid_embeddings)} Sampel) + Kloning Matriks 2D")
+                print(f" 🧠 Strategi              : 5-Frame Averaging (Akurasi Check-In Tinggi)")
                 print("-" * 65)
                 print(f" ⏱️ Latensi Respon Subjek : {latensi_respon_subjek:.2f} ms")
-                print(f" ⏱️ Ekstraksi AI          : {mfn_latency:.2f} ms")
+                print(f" ⏱️ Ekstraksi Berkelompok : {mfn_latency:.2f} ms")
                 print("="*65 + "\n")
                 with self.frame_lock: self.display_frame = display.copy()
                 time.sleep(1.5)
@@ -539,5 +531,5 @@ class FaceRegistrationApp:
         finally: self.is_running = False; time.sleep(0.5); self.cam.stop(); self.detector.close(); cv2.destroyAllWindows()
 
 if __name__ == "__main__":
-    print(f"\n{'='*45}\n   SISTEM REGISTRASI WAJAH (MULTI-VECTOR)\n{'='*45}")
+    print(f"\n{'='*45}\n   SISTEM REGISTRASI WAJAH (MULTI-FRAME V2)\n{'='*45}")
     if nama_input := input("Masukan Nama Lengkap : ").strip(): FaceRegistrationApp(nama_input).run()

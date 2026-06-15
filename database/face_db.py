@@ -121,12 +121,10 @@ class FaceDatabase:
         with self.db_lock, closing(self._get_connection()) as conn:
             c = conn.cursor()
             
-            # Score dihapus dari registered_faces
             c.execute('''CREATE TABLE IF NOT EXISTS registered_faces (
                 id TEXT PRIMARY KEY, name TEXT NOT NULL, embedding TEXT NOT NULL, liveness_config TEXT,
                 reg_latency_ms REAL, created_at TEXT, is_synced INTEGER DEFAULT 0)''')
             
-            # _score diubah menjadi _data
             c.execute('''CREATE TABLE IF NOT EXISTS register_logs (
                 id TEXT PRIMARY KEY, name TEXT, 
                 user_id TEXT REFERENCES registered_faces(id) ON DELETE CASCADE, 
@@ -153,9 +151,9 @@ class FaceDatabase:
 
     def _is_online(self):
         try:
-            requests.head("https://1.1.1.1", timeout=2)
+            requests.head("https://1.1.1.1", timeout=3)
             return True
-        except requests.ConnectionError:
+        except requests.exceptions.RequestException:
             return False
 
     def check_user_exists(self, user_id):
@@ -338,6 +336,8 @@ class FaceDatabase:
                             except Exception: pass
                     except Exception: pass
                     
+                    # --- MULAI UKUR LATENSI CLOUD SINKRONISASI ---
+                    start_sync_time = time.time()
                     synced_count = 0
 
                     # 1. Sync Registered Faces
@@ -361,13 +361,13 @@ class FaceDatabase:
                                     except Exception: pass
                     except Exception as err_db: print(f"❌ Query Error (registered_faces): {err_db}")
                     
-                    # 2. Sync Register Logs
+                    # 2. Sync Register Logs (UPDATED to UPSERT)
                     try:
                         c.execute("SELECT id, name, user_id, status, yaw_data, pitch_data, roll_data, blink_data, light_condition, reg_latency_ms, created_at FROM register_logs WHERE is_synced = 0")
                         for r in c.fetchall():
                             payload = {"id": r[0], "name": r[1], "user_id": r[2], "status": r[3], "yaw_data": r[4] or "-", "pitch_data": r[5] or "-", "roll_data": r[6] or "-", "blink_data": r[7] or "-", "light_condition": r[8] or "-", "reg_latency_ms": float(r[9] or 0.0), "created_at": r[10]}
                             try:
-                                self.client.table("register_logs").insert(payload).execute()
+                                self.client.table("register_logs").upsert(payload, on_conflict="id").execute()
                                 c.execute("UPDATE register_logs SET is_synced = 1 WHERE id = ?", (r[0],))
                                 synced_count += 1
                             except Exception as e:
@@ -377,7 +377,7 @@ class FaceDatabase:
                                     payload.pop("light_condition", None)
                                     payload.pop("reg_latency_ms", None)
                                     try:
-                                        self.client.table("register_logs").insert(payload).execute()
+                                        self.client.table("register_logs").upsert(payload, on_conflict="id").execute()
                                         c.execute("UPDATE register_logs SET is_synced = 1 WHERE id = ?", (r[0],))
                                         synced_count += 1
                                     except Exception: 
@@ -386,13 +386,13 @@ class FaceDatabase:
                                     c.execute("UPDATE register_logs SET is_synced = 1 WHERE id = ?", (r[0],)) 
                     except Exception as err_db: print(f"❌ Query Error (register_logs): {err_db}")
                         
-                    # 3. Sync Access Logs
+                    # 3. Sync Access Logs (UPDATED to UPSERT)
                     try:
                         c.execute("SELECT id, name, user_id, status, face_val_latency_ms, headpose_data, blink_data, accuracy, light_condition, auth_latency_ms, created_at FROM access_logs WHERE is_synced = 0")
                         for r in c.fetchall():
                             payload = {"id": r[0], "name": r[1], "user_id": r[2], "status": r[3], "face_val_latency_ms": float(r[4] or 0.0), "headpose_data": r[5] or "-", "blink_data": r[6] or "-", "accuracy": float(r[7] or 0.0), "light_condition": r[8] or "-", "auth_latency_ms": float(r[9] or 0.0), "created_at": r[10]}
                             try:
-                                self.client.table("access_logs").insert(payload).execute()
+                                self.client.table("access_logs").upsert(payload, on_conflict="id").execute()
                                 c.execute("UPDATE access_logs SET is_synced = 1 WHERE id = ?", (r[0],))
                                 synced_count += 1
                             except Exception as e:
@@ -403,7 +403,7 @@ class FaceDatabase:
                                     payload.pop("auth_latency_ms", None)
                                     payload.pop("face_val_latency_ms", None)
                                     try:
-                                        self.client.table("access_logs").insert(payload).execute()
+                                        self.client.table("access_logs").upsert(payload, on_conflict="id").execute()
                                         c.execute("UPDATE access_logs SET is_synced = 1 WHERE id = ?", (r[0],))
                                         synced_count += 1
                                     except Exception: 
@@ -412,13 +412,13 @@ class FaceDatabase:
                                     c.execute("UPDATE access_logs SET is_synced = 1 WHERE id = ?", (r[0],))
                     except Exception as err_db: print(f"❌ Query Error (access_logs): {err_db}")
                         
-                    # 4. Sync Spoofing Logs
+                    # 4. Sync Spoofing Logs (UPDATED to UPSERT)
                     try:
                         c.execute("SELECT id, spoof_score, spoof_type, spoof_latency_ms, created_at FROM spoofing_logs WHERE is_synced = 0")
                         for r in c.fetchall():
                             payload = {"id": r[0], "spoof_score": float(r[1] or 0.0), "spoof_type": str(r[2] or "-"), "spoof_latency_ms": float(r[3] or 0.0), "created_at": r[4]}
                             try:
-                                self.client.table("spoofing_logs").insert(payload).execute()
+                                self.client.table("spoofing_logs").upsert(payload, on_conflict="id").execute()
                                 c.execute("UPDATE spoofing_logs SET is_synced = 1 WHERE id = ?", (r[0],))
                                 synced_count += 1
                             except Exception as e:
@@ -427,14 +427,17 @@ class FaceDatabase:
                                 if "could not find" in err or "column" in err:
                                     payload.pop("spoof_latency_ms", None)
                                     try:
-                                        self.client.table("spoofing_logs").insert(payload).execute()
+                                        self.client.table("spoofing_logs").upsert(payload, on_conflict="id").execute()
                                         c.execute("UPDATE spoofing_logs SET is_synced = 1 WHERE id = ?", (r[0],))
                                         synced_count += 1
                                     except Exception:
                                         c.execute("UPDATE spoofing_logs SET is_synced = 1 WHERE id = ?", (r[0],))
                     except Exception as err_db: print(f"❌ Query Error (spoofing_logs): {err_db}")
                     
-                    if synced_count > 0: print(f"\n[Background Sync] ☁️ Berhasil UPLOAD {synced_count} baris data ke Supabase!")
+                    # --- CETAK LATENSI UNGGAL REALTIME KE CLOUD ---
+                    if synced_count > 0: 
+                        latency_cloud_ms = (time.time() - start_sync_time) * 1000
+                        print(f"\n[Background Sync] ☁️ Berhasil UPLOAD {synced_count} baris data ke Supabase! | Latensi Cloud: {latency_cloud_ms:.0f} ms")
 
                     # --- PULL DARI CLOUD ---
                     try:

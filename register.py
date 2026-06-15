@@ -154,7 +154,10 @@ class FaceRegistrationApp:
         
         self.db = FaceDatabase()
         self.cam = CameraStream(config.CAMERA_INDEX, config.FRAME_WIDTH, config.FRAME_HEIGHT).start()
-        self.detector = FaceMeshDetector(min_detection_confidence=0.5, min_tracking_confidence=0.5)
+        
+        # PERUBAHAN: Confidence FaceMesh diturunkan menjadi 0.35 agar lebih pemaaf
+        self.detector = FaceMeshDetector(min_detection_confidence=0.35, min_tracking_confidence=0.35)
+        
         self.liveness, self.model = LivenessManager(), MobileFaceNet()
         self.anti_spoof = SilentAntiSpoofing(getattr(config, 'ANTI_SPOOFING_MODEL', "liveness/antispoofing.onnx"), getattr(config, 'ANTI_SPOOFING_THRESHOLD', 0.70))
         self.matcher = FaceMatcher(0.35) 
@@ -205,7 +208,8 @@ class FaceRegistrationApp:
         if self.stage == RegistrationStage.FACEMESH and face.landmarks:
             if self.cap_data["facemesh_vector"] is None:
                 self.hold_frames += 1
-                if self.hold_frames >= 10: 
+                # PERUBAHAN: Durasi menahan wajah untuk tahap Facemesh dikurangi dari 10 menjadi 4 frame
+                if self.hold_frames >= 4: 
                     lat_ms = round((time.time() - self.action_start_time) * 1000, 2)
                     self.cap_data["facemesh_vector"] = np.array([[l.x, l.y, l.z] for l in face.landmarks], dtype=np.float32).flatten()
                     self.hold_frames = 0
@@ -405,7 +409,8 @@ class FaceRegistrationApp:
                 
                 if not faces: 
                     self.missed_frames += 1
-                    if self.missed_frames >= 5: 
+                    # PERUBAHAN: Toleransi frame kosong ditingkatkan dari 5 menjadi 15
+                    if self.missed_frames >= 15: 
                         bbox_memory = None
                         display = cv2.flip(display, 1)
                         Helpers.draw_hud(display, self.stage, "Hadapkan wajah", "", "", "NO FACE", None, config.COLOR_RED)

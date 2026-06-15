@@ -44,29 +44,29 @@ class Helpers:
         ra = (np.linalg.norm(p[7]-p[11])+np.linalg.norm(p[8]-p[10]))/(2.0*np.linalg.norm(p[6]-p[9])+1e-6)
         return {"left_ear": la, "right_ear": ra, "avg_ear": (la+ra)/2.0}
 
+    # PERUBAHAN: Logika deteksi cahaya sekarang disamakan persis dengan main.py (menggunakan matriks 3 sisi & threshold ketat)
     @staticmethod
     def get_light_condition(raw_frame, bbox):
         if not bbox: return "Normal"
-        bx, by, bw, bh = bbox
-        fh, fw = raw_frame.shape[:2]
-        
-        x1, y1 = max(0, bx + 10), max(0, by + 10)
-        x2, y2 = min(fw, bx + bw - 10), min(fh, by + bh - 10)
+        bx, by, bw, bh = bbox; fh, fw = raw_frame.shape[:2]
         gray = cv2.cvtColor(raw_frame, cv2.COLOR_BGR2GRAY)
         
+        # Pemuatan crop margin wajah dinamis 20% sesuai main.py
+        x1, y1, x2, y2 = max(0, bx + int(bw * 0.2)), max(0, by + int(bh * 0.2)), min(fw, bx + int(bw * 0.8)), min(fh, by + int(bh * 0.8))
         L = np.mean(gray[y1:y2, x1:x2]) if gray[y1:y2, x1:x2].size > 0 else 100.0
-        overall_L = np.mean(gray) 
+        oL = np.mean(gray) 
         
-        bg_y1, bg_y2 = max(0, by - 60), max(0, by - 10)
-        bg_x1, bg_x2 = max(0, bx - 30), min(fw, bx + bw + 30)
-        top_bg = gray[bg_y1:bg_y2, bg_x1:bg_x2]
+        # Pengambilan background dari 3 sisi (Atas, Kiri, Kanan)
+        top = gray[max(0, by-80):max(0, by-20), max(0, bx-20):min(fw, bx+bw+20)]
+        left = gray[max(0, by):min(fh, by+bh), max(0, bx-80):max(0, bx-20)]
+        right = gray[max(0, by):min(fh, by+bh), min(fw, bx+bw+20):min(fw, bx+bw+80)]
         
-        L_bg_atas = np.mean(top_bg) if top_bg.size > 0 else L
+        max_bg = max(np.mean(top) if top.size else L, np.mean(left) if left.size else L, np.mean(right) if right.size else L)
         
-        if (L_bg_atas - L) > 50 and L_bg_atas > 150 and L < 100: 
+        # Threshold Backlight & Low Light disesuaikan dengan main.py
+        if (max_bg > 215 and (max_bg - L) > 90) or (oL > 210 and (oL - L) > 90): 
             return "Backlight"
-            
-        if L < 95 or overall_L < 80 or (L_bg_atas < 70 and L < 100):
+        if L < 80 and max_bg < 130: 
             return "Low Light"
             
         return "Normal"
@@ -155,7 +155,7 @@ class FaceRegistrationApp:
         self.db = FaceDatabase()
         self.cam = CameraStream(config.CAMERA_INDEX, config.FRAME_WIDTH, config.FRAME_HEIGHT).start()
         
-        # PERUBAHAN: Confidence FaceMesh diturunkan menjadi 0.35 agar lebih pemaaf
+        # KELONGGARAN 1: Confidence FaceMesh diturunkan menjadi 0.35 agar lebih pemaaf
         self.detector = FaceMeshDetector(min_detection_confidence=0.35, min_tracking_confidence=0.35)
         
         self.liveness, self.model = LivenessManager(), MobileFaceNet()
@@ -208,13 +208,13 @@ class FaceRegistrationApp:
         if self.stage == RegistrationStage.FACEMESH and face.landmarks:
             if self.cap_data["facemesh_vector"] is None:
                 self.hold_frames += 1
-                # PERUBAHAN: Durasi menahan wajah untuk tahap Facemesh dikurangi dari 10 menjadi 4 frame
+                # KELONGGARAN 2: Durasi menahan wajah untuk tahap Facemesh dikurangi dari 10 menjadi 4 frame
                 if self.hold_frames >= 4: 
                     lat_ms = round((time.time() - self.action_start_time) * 1000, 2)
                     self.cap_data["facemesh_vector"] = np.array([[l.x, l.y, l.z] for l in face.landmarks], dtype=np.float32).flatten()
                     self.hold_frames = 0
                     self.individual_latencies["FaceMesh (3D)"] = lat_ms
-                    _log(f"⏱️ Selesai Tahap FaceMesh (3D) | Latensi: {lat_ms:.2f} ms", "METRIK") # OUTPUT TERMINAL
+                    _log(f"⏱️ Selesai Tahap FaceMesh (3D) | Latensi: {lat_ms:.2f} ms", "METRIK")
                     self.action_start_time = time.time() 
 
         if self.stage in self.POSE_CFG:
@@ -234,7 +234,7 @@ class FaceRegistrationApp:
                         buf[tag]["tag"], buf[tag]["latency_ms"] = tag, lat_ms 
                         friendly_name = {"yaw_left": "Toleh Kiri", "yaw_right": "Toleh Kanan", "pitch_up": "Angguk Atas", "pitch_down": "Tunduk Bawah", "roll_left": "Miring Kiri", "roll_right": "Miring Kanan"}.get(tag, tag)
                         self.individual_latencies[friendly_name] = lat_ms
-                        _log(f"⏱️ Selesai Tahap Pose ({friendly_name}) | Latensi: {lat_ms:.2f} ms", "METRIK") # OUTPUT TERMINAL
+                        _log(f"⏱️ Selesai Tahap Pose ({friendly_name}) | Latensi: {lat_ms:.2f} ms", "METRIK")
                         self.action_start_time = time.time() 
                         self.hold_frames = 0
             else: 
@@ -250,14 +250,14 @@ class FaceRegistrationApp:
                     bv["latency_ms"] = lat_ms
                     self._blink_buf["closed"], self._blink_buf["logged_closed"] = bv, True
                     self.individual_latencies["Mata Menutup"] = lat_ms
-                    _log(f"⏱️ Selesai Tahap Blink (Mata Menutup) | Latensi: {lat_ms:.2f} ms", "METRIK") # OUTPUT TERMINAL
+                    _log(f"⏱️ Selesai Tahap Blink (Mata Menutup) | Latensi: {lat_ms:.2f} ms", "METRIK")
                     self.action_start_time = time.time() 
                 elif bv["avg_ear"] >= min_open and self._blink_buf.get("logged_closed") and not self._blink_buf.get("logged_open"):
                     lat_ms = round((time.time() - self.action_start_time) * 1000, 2)
                     bv["latency_ms"] = lat_ms
                     self._blink_buf["open"], self._blink_buf["logged_open"] = bv, True
                     self.individual_latencies["Mata Membuka"] = lat_ms
-                    _log(f"⏱️ Selesai Tahap Blink (Mata Membuka) | Latensi: {lat_ms:.2f} ms", "METRIK") # OUTPUT TERMINAL
+                    _log(f"⏱️ Selesai Tahap Blink (Mata Membuka) | Latensi: {lat_ms:.2f} ms", "METRIK")
                     self.action_start_time = time.time() 
                 if self._blink_buf.get("closed") and bv["avg_ear"] < self._blink_buf["closed"]["avg_ear"]: self._blink_buf["closed"].update(bv)
                 if self._blink_buf.get("open") and bv["avg_ear"] > self._blink_buf["open"]["avg_ear"]: self._blink_buf["open"].update(bv)
@@ -383,7 +383,6 @@ class FaceRegistrationApp:
             success_master = self.db.save_face(self.name, self.user_id, single_master_emb, self.cap_data)
             
             if success_master: 
-                # OUTPUT TERMINAL UNTUK TOTAL WAKTU EKSTRAKSI
                 _log(f"⏱️ Ekstraksi AI & Simpan DB Selesai | Latensi AI: {mfn_latency:.2f} ms", "METRIK")
                 _log(f"✅ Total Waktu Seluruh Registrasi | Latensi Sistem Total: {total_waktu_sistem:.2f} ms", "METRIK")
                 
@@ -409,7 +408,7 @@ class FaceRegistrationApp:
                 
                 if not faces: 
                     self.missed_frames += 1
-                    # PERUBAHAN: Toleransi frame kosong ditingkatkan dari 5 menjadi 15
+                    # KELONGGARAN 3: Toleransi frame kosong ditingkatkan dari 5 menjadi 15
                     if self.missed_frames >= 15: 
                         bbox_memory = None
                         display = cv2.flip(display, 1)

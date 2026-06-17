@@ -87,7 +87,16 @@ class UIHelper:
         cv2.putText(d, f"STATUS PINTU: {'TERKUNCI' if locked else 'TERBUKA'}", (10, fh - 8), c_font, 0.45, config.COLOR_RED if locked else config.COLOR_GREEN, 1, cv2.LINE_AA)
 
 class SmartDoorApp:
-    CHALLENGES = {"BLINK": "Kedipkan Mata", "KANAN": "Toleh KANAN", "KIRI": "Toleh KIRI", "ATAS": "Dongak ATAS", "BAWAH": "Tunduk BAWAH"}
+    # --- UPDATE 1: Penambahan CHALLENGES untuk MIRING ---
+    CHALLENGES = {
+        "BLINK": "Kedipkan Mata", 
+        "KANAN": "Toleh KANAN", 
+        "KIRI": "Toleh KIRI", 
+        "ATAS": "Dongak ATAS", 
+        "BAWAH": "Tunduk BAWAH", 
+        "MIRING_KANAN": "Miring KANAN", 
+        "MIRING_KIRI": "Miring KIRI"
+    }
 
     def __init__(self):
         print(f"\n{'='*50}\n[SYSTEM] SISTEM DOOR LOCK MULTI-VECTOR MATRIKS 2D\n{'='*50}\n")
@@ -143,6 +152,7 @@ class SmartDoorApp:
         self._reset_state()
         self.ui.update({"wait": wait, "bbox": None if wait else self.ui.get("bbox"), "status": status, "color": color, "instr": instr, "light_cond": None})
 
+    # --- UPDATE 2: Modifikasi _check_action untuk kemiringan (Roll) ---
     def _check_action(self, action, face):
         if action == "BLINK": 
             self.ear_hist.append(UIHelper.get_ear(face))
@@ -152,11 +162,23 @@ class SmartDoorApp:
             return self.blink_passed, 1.0, 1.0, False  
 
         est = self.pose_estimator.estimate(face, self.detector)
-        dy, dp = est.get("yaw", 0) - self.reg_pose[0], est.get("pitch", 0) - self.reg_pose[1]
-        ty, tp = getattr(config, 'CHALLENGE_YAW', 25.0), getattr(config, 'CHALLENGE_PITCH', 20.0)
+        dy = est.get("yaw", 0) - self.reg_pose[0]
+        dp = est.get("pitch", 0) - self.reg_pose[1]
+        dr = est.get("roll", 0) - self.reg_pose[2] 
         
-        salah = (action=="KANAN" and dy<-12.0) or (action=="KIRI" and dy>12.0) or (action=="ATAS" and dp>12.0) or (action=="BAWAH" and dp<-12.0)
-        raw_val, tgt, passed = {"KANAN": (dy, ty, dy>ty), "KIRI": (-dy, ty, -dy>ty), "ATAS": (-dp, tp, -dp>tp), "BAWAH": (dp, tp, dp>tp)}.get(action, (0.0, 1.0, False))
+        ty = getattr(config, 'CHALLENGE_YAW', 25.0)
+        tp = getattr(config, 'CHALLENGE_PITCH', 20.0)
+        tr = getattr(config, 'CHALLENGE_ROLL', 20.0)
+        
+        salah = (action=="KANAN" and dy<-12.0) or (action=="KIRI" and dy>12.0) or \
+                (action=="ATAS" and dp>12.0) or (action=="BAWAH" and dp<-12.0) or \
+                (action=="MIRING_KANAN" and dr<-12.0) or (action=="MIRING_KIRI" and dr>12.0)
+        
+        raw_val, tgt, passed = {
+            "KANAN": (dy, ty, dy>ty), "KIRI": (-dy, ty, -dy>ty), 
+            "ATAS": (-dp, tp, -dp>tp), "BAWAH": (dp, tp, dp>tp),
+            "MIRING_KANAN": (dr, tr, dr>tr), "MIRING_KIRI": (-dr, tr, -dr>tr)
+        }.get(action, (0.0, 1.0, False))
         
         self.pose_hold = self.pose_hold + 1 if passed else 0
         return self.pose_hold >= 5, max(0.0, float(raw_val)), tgt, salah
@@ -186,28 +208,23 @@ class SmartDoorApp:
     def _handle_spoofing(self, raw, face, is_recog, disp_name, sp_lat, l_str, liveness_info=None):
         self.fake_frames += 1
         
-        # Menerima data langsung dari _process_face untuk menghindari AI mengeksekusi liveness 2 kali (mengurangi lag)
         sp = liveness_info if liveness_info is not None else self.anti_spoof.is_real(raw, face.bbox)
         lbl = sp.get("label_name", "FOTO/LAYAR").upper()
         sp_type = "FOTO CETAK" if any(k in lbl for k in ["PAPER", "PRINT", "FOTO"]) else ("LAYAR VIDEO" if any(k in lbl for k in ["SCREEN", "VIDEO", "LAYAR", "PHONE"]) else lbl)
         
         sp_sc = float(sp.get("score", sp.get(f"score_{'photo' if sp_type=='FOTO CETAK' else 'video'}", 0.99)))
         
-        # TINGKATKAN TOLERANSI: Membutuhkan 5 frame palsu berturut-turut untuk memicu alarm.
-        # Ini mencegah sistem memvonis "palsu" hanya karena motion blur ringan dari wajah asli.
         if self.fake_frames >= 5:
             self.ui.update({"wait": False, "bbox": face.bbox, "status": f"PALSU: {sp_type} ({sp_sc:.2f})", "color": config.COLOR_RED, "instr": "Akses Ditolak"})
             
-            # Log ke database hanya setiap 4 detik untuk mencegah spam
             if time.time() - self.last_spoof_log_time > 4.0:
                 self.last_spoof_log_time = time.time()
                 
-                # Membulatkan nilai spoofing ke database agar sinkron
                 if hasattr(self.db, 'log_spoofing_async'): 
                     self.db.log_spoofing_async(round(sp_sc, 2), round(sp_sc, 2), round(sp_sc, 2), sp_type, round(sp_lat, 2))
                 print(f"\n⚠️ SPOOF: {sp_type} | Trgt: {disp_name} | Scr: {sp_sc:.2f} | Lat: {sp_lat:.0f}ms")
                 
-        return True # Mengembalikan true agar proses pencocokan ID dibatalkan untuk sementara
+        return True 
 
     def _ai_worker(self):
         while self.running:
@@ -251,14 +268,11 @@ class SmartDoorApp:
 
         t_sp = time.time()
         if self.state == ValidationState.RECOGNIZING:
-            # Jalankan deteksi liveness dan tangkap hasilnya dalam sebuah variabel
             liveness_info = self.anti_spoof.is_real(raw, face.bbox)
             
-            # Jika hasilnya "False" (dicurigai palsu)
             if not liveness_info.get("real", True):
                 if self._handle_spoofing(raw, face, is_recog, disp_name, (time.time() - t_sp) * 1000, l_str, liveness_info): return
             else: 
-                # Jika sistem melihat ini wajah asli, langsung reset hitungan palsunya ke 0
                 self.fake_frames = 0
         else: self.fake_frames = 0
 
@@ -269,8 +283,7 @@ class SmartDoorApp:
                 self.face_val_latency = (time.time() - t_val) * 1000 
                 UIHelper.log(f"\nCocok (Multi-Vector): {disp_name} | {l_str} | Akurasi Murni: {f_acc:.2f}% | Lat: {self.face_val_latency:.0f} ms", "SUCCESS")
                 self.last_name, self.match_score, self.final_display_acc, self.state, self.step_idx, self.wait_center = b_name, sm_score, f_acc, ValidationState.CHALLENGE, 0, True
-                
-                self.seq, self.challenge_start_time = [random.choice(["KANAN", "KIRI", "ATAS", "BAWAH"]), "BLINK"], time.time()
+                self.seq, self.challenge_start_time = [random.choice(["KANAN", "KIRI", "ATAS", "BAWAH", "MIRING_KANAN", "MIRING_KIRI"]), "BLINK"], time.time()
                 
             else: self.ui.update({"status": "TIDAK DIKENAL", "color": config.COLOR_RED, "instr": f"Live: {l_str}"})
 

@@ -185,20 +185,29 @@ class SmartDoorApp:
 
     def _handle_spoofing(self, raw, face, is_recog, disp_name, sp_lat, l_str, liveness_info=None):
         self.fake_frames += 1
+        
+        # Menerima data langsung dari _process_face untuk menghindari AI mengeksekusi liveness 2 kali (mengurangi lag)
         sp = liveness_info if liveness_info is not None else self.anti_spoof.is_real(raw, face.bbox)
         lbl = sp.get("label_name", "FOTO/LAYAR").upper()
         sp_type = "FOTO CETAK" if any(k in lbl for k in ["PAPER", "PRINT", "FOTO"]) else ("LAYAR VIDEO" if any(k in lbl for k in ["SCREEN", "VIDEO", "LAYAR", "PHONE"]) else lbl)
         
         sp_sc = float(sp.get("score", sp.get(f"score_{'photo' if sp_type=='FOTO CETAK' else 'video'}", 0.99)))
         
+        # TINGKATKAN TOLERANSI: Membutuhkan 5 frame palsu berturut-turut untuk memicu alarm.
+        # Ini mencegah sistem memvonis "palsu" hanya karena motion blur ringan dari wajah asli.
         if self.fake_frames >= 5:
             self.ui.update({"wait": False, "bbox": face.bbox, "status": f"PALSU: {sp_type} ({sp_sc:.2f})", "color": config.COLOR_RED, "instr": "Akses Ditolak"})
+            
+            # Log ke database hanya setiap 4 detik untuk mencegah spam
             if time.time() - self.last_spoof_log_time > 4.0:
                 self.last_spoof_log_time = time.time()
+                
+                # Membulatkan nilai spoofing ke database agar sinkron
                 if hasattr(self.db, 'log_spoofing_async'): 
                     self.db.log_spoofing_async(round(sp_sc, 2), round(sp_sc, 2), round(sp_sc, 2), sp_type, round(sp_lat, 2))
                 print(f"\n⚠️ SPOOF: {sp_type} | Trgt: {disp_name} | Scr: {sp_sc:.2f} | Lat: {sp_lat:.0f}ms")
-        return True
+                
+        return True # Mengembalikan true agar proses pencocokan ID dibatalkan untuk sementara
 
     def _ai_worker(self):
         while self.running:
@@ -242,10 +251,15 @@ class SmartDoorApp:
 
         t_sp = time.time()
         if self.state == ValidationState.RECOGNIZING:
+            # Jalankan deteksi liveness dan tangkap hasilnya dalam sebuah variabel
             liveness_info = self.anti_spoof.is_real(raw, face.bbox)
+            
+            # Jika hasilnya "False" (dicurigai palsu)
             if not liveness_info.get("real", True):
                 if self._handle_spoofing(raw, face, is_recog, disp_name, (time.time() - t_sp) * 1000, l_str, liveness_info): return
-            else: self.fake_frames = 0
+            else: 
+                # Jika sistem melihat ini wajah asli, langsung reset hitungan palsunya ke 0
+                self.fake_frames = 0
         else: self.fake_frames = 0
 
         if self.state == ValidationState.RECOGNIZING:
@@ -256,12 +270,8 @@ class SmartDoorApp:
                 UIHelper.log(f"\nCocok (Multi-Vector): {disp_name} | {l_str} | Akurasi Murni: {f_acc:.2f}% | Lat: {self.face_val_latency:.0f} ms", "SUCCESS")
                 self.last_name, self.match_score, self.final_display_acc, self.state, self.step_idx, self.wait_center = b_name, sm_score, f_acc, ValidationState.CHALLENGE, 0, True
                 
-                pose_yaw = random.choice(["KANAN", "KIRI"])
-                pose_pitch = random.choice(["ATAS", "BAWAH"])
-                poses = [pose_yaw, pose_pitch]
-                random.shuffle(poses)
-                self.seq, self.challenge_start_time = poses + ["BLINK"], time.time()
-
+                self.seq, self.challenge_start_time = [random.choice(["KANAN", "KIRI", "ATAS", "BAWAH"]), "BLINK"], time.time()
+                
             else: self.ui.update({"status": "TIDAK DIKENAL", "color": config.COLOR_RED, "instr": f"Live: {l_str}"})
 
         elif self.state == ValidationState.CHALLENGE:
@@ -283,11 +293,19 @@ class SmartDoorApp:
                 else:
                     self.state = ValidationState.UNLOCKED; threading.Thread(target=self.door.unlock, daemon=True).start()
                     pts = self.last_name.split(" - ", 1); user_name = pts[1] if len(pts) > 1 else self.last_name
+                    
                     self.ui.update({"status": f"{user_name}", "color": config.COLOR_GREEN, "instr": f"Akses Diterima ({l_str})"})
+                    
                     print(f"\n{'='*60}\n🔓 AKSES DIBUKA | User: {user_name} | Acc Murni: {self.final_display_acc:.2f}%\n{'='*60}\n")
+                    
                     if hasattr(self.db, 'push_access_log_async'):
                         total_waktu_proses = self.face_val_latency + sum([d["latensi_ms"] for d in self.access_details])
-                        self.db.push_access_log_async(user_name, pts[0] if len(pts)>1 else None, "UNLOCKED", round(self.final_display_acc, 2), l_str, self.access_details, round(total_waktu_proses, 2), round(self.face_val_latency, 2))
+                        
+                        akurasi_db = round(self.final_display_acc, 2)
+                        latensi_wajah_db = round(self.face_val_latency, 2)
+                        total_waktu_db = round(total_waktu_proses, 2)
+                        
+                        self.db.push_access_log_async(user_name, pts[0] if len(pts)>1 else None, "UNLOCKED", akurasi_db, l_str, self.access_details, total_waktu_db, latensi_wajah_db)
 
     def run(self):
         try:

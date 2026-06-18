@@ -44,27 +44,24 @@ class Helpers:
         ra = (np.linalg.norm(p[7]-p[11])+np.linalg.norm(p[8]-p[10]))/(2.0*np.linalg.norm(p[6]-p[9])+1e-6)
         return {"left_ear": la, "right_ear": ra, "avg_ear": (la+ra)/2.0}
 
-    # PERUBAHAN: Logika deteksi cahaya sekarang disamakan persis dengan main.py (menggunakan matriks 3 sisi & threshold ketat)
     @staticmethod
     def get_light_condition(raw_frame, bbox):
         if not bbox: return "Normal"
         bx, by, bw, bh = bbox; fh, fw = raw_frame.shape[:2]
         gray = cv2.cvtColor(raw_frame, cv2.COLOR_BGR2GRAY)
         
-        # Pemuatan crop margin wajah dinamis 20% sesuai main.py
         x1, y1, x2, y2 = max(0, bx + int(bw * 0.2)), max(0, by + int(bh * 0.2)), min(fw, bx + int(bw * 0.8)), min(fh, by + int(bh * 0.8))
         L = np.mean(gray[y1:y2, x1:x2]) if gray[y1:y2, x1:x2].size > 0 else 100.0
         oL = np.mean(gray) 
         
-        # Pengambilan background dari 3 sisi (Atas, Kiri, Kanan)
         top = gray[max(0, by-80):max(0, by-20), max(0, bx-20):min(fw, bx+bw+20)]
         left = gray[max(0, by):min(fh, by+bh), max(0, bx-80):max(0, bx-20)]
         right = gray[max(0, by):min(fh, by+bh), min(fw, bx+bw+20):min(fw, bx+bw+80)]
         
         max_bg = max(np.mean(top) if top.size else L, np.mean(left) if left.size else L, np.mean(right) if right.size else L)
         
-        # Threshold Backlight & Low Light disesuaikan dengan main.py
-        if (max_bg > 215 and (max_bg - L) > 90) or (oL > 210 and (oL - L) > 90): 
+        # Threshold Backlight diturunkan agar lebih sensitif, sama persis dengan main.py
+        if (max_bg > 190 and (max_bg - L) > 60) or (oL > 190 and (oL - L) > 60): 
             return "Backlight"
         if L < 80 and max_bg < 130: 
             return "Low Light"

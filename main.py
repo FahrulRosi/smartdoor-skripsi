@@ -55,7 +55,8 @@ class UIHelper:
         top, left, right = gray[max(0, by-80):max(0, by-20), max(0, bx-20):min(fw, bx+bw+20)], gray[max(0, by):min(fh, by+bh), max(0, bx-80):max(0, bx-20)], gray[max(0, by):min(fh, by+bh), min(fw, bx+bw+20):min(fw, bx+bw+80)]
         max_bg = max(np.mean(top) if top.size else L, np.mean(left) if left.size else L, np.mean(right) if right.size else L)
         
-        if (max_bg > 215 and (max_bg - L) > 90) or (oL > 210 and (oL - L) > 90): return "Backlight"
+        # Threshold Backlight diturunkan agar lebih sensitif
+        if (max_bg > 190 and (max_bg - L) > 60) or (oL > 190 and (oL - L) > 60): return "Backlight"
         if L < 80 and max_bg < 130: return "Low Light"
         return "Normal"
 

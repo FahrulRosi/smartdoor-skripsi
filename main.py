@@ -48,16 +48,24 @@ class UIHelper:
         if not bbox: return "Normal"
         bx, by, bw, bh = bbox; fh, fw = raw.shape[:2]
         gray = cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY)
-        x1, y1, x2, y2 = max(0, bx + int(bw * 0.2)), max(0, by + int(bh * 0.2)), min(fw, bx + int(bw * 0.8)), min(fh, by + int(bh * 0.8))
+        
+        # Area wajah
+        x1, y1, x2, y2 = max(0, bx), max(0, by), min(fw, bx + bw), min(fh, by + bh)
         L = np.mean(gray[y1:y2, x1:x2]) if gray[y1:y2, x1:x2].size > 0 else 100.0
         oL = np.mean(gray) 
         
-        top, left, right = gray[max(0, by-80):max(0, by-20), max(0, bx-20):min(fw, bx+bw+20)], gray[max(0, by):min(fh, by+bh), max(0, bx-80):max(0, bx-20)], gray[max(0, by):min(fh, by+bh), min(fw, bx+bw+20):min(fw, bx+bw+80)]
+        # Jangkauan area background diperluas untuk menangani auto-exposure webcam
+        top = gray[max(0, by-100):max(0, by-10), max(0, bx-50):min(fw, bx+bw+50)]
+        left = gray[max(0, by-20):min(fh, by+bh+20), max(0, bx-100):max(0, bx-10)]
+        right = gray[max(0, by-20):min(fh, by+bh+20), min(fw, bx+bw+10):min(fw, bx+bw+100)]
+        
         max_bg = max(np.mean(top) if top.size else L, np.mean(left) if left.size else L, np.mean(right) if right.size else L)
         
-        # Threshold Backlight diturunkan agar lebih sensitif
-        if (max_bg > 190 and (max_bg - L) > 60) or (oL > 190 and (oL - L) > 60): return "Backlight"
-        if L < 80 and max_bg < 130: return "Low Light"
+        # Menggunakan logika threshold yang sangat peka terhadap backlight
+        if (max_bg > 150 and (max_bg - L) > 30) or (oL > 150 and (oL - L) > 30): 
+            return "Backlight"
+        if L < 80 and max_bg < 120: 
+            return "Low Light"
         return "Normal"
 
     @staticmethod
@@ -108,7 +116,12 @@ class SmartDoorApp:
 
     def _init_heavy_models(self):
         self.db, self.model, self.pose_estimator = FaceDatabase(), MobileFaceNet(), HeadPoseEstimator()
-        self.anti_spoof = SilentAntiSpoofing(getattr(config, 'ANTI_SPOOFING_MODEL', "liveness/antispoofing.onnx"), getattr(config, 'ANTI_SPOOFING_THRESHOLD', 0.85))
+        
+        # Modifikasi threshold anti-spoofing agar mentolerir noise webcam
+        spoof_thr = getattr(config, 'ANTI_SPOOFING_THRESHOLD', 0.85)
+        spoof_thr = min(spoof_thr, 0.75) # Batas maksimal untuk verifikasi
+        self.anti_spoof = SilentAntiSpoofing(getattr(config, 'ANTI_SPOOFING_MODEL', "liveness/antispoofing.onnx"), spoof_thr)
+        
         self.detector, self.door = FaceMeshDetector(min_detection_confidence=0.5, min_tracking_confidence=0.5), DoorLock(getattr(config, 'LOCK_GPIO_PIN', 18), getattr(config, 'UNLOCK_DURATION', 5))
         self.known_faces_2d = {k: [np.array(e, dtype=np.float32) for e in (v['embedding'] if isinstance(v['embedding'][0], list) else [v['embedding']])] for k, v in (self.db.load_all_faces() or {}).items() if isinstance(v, dict) and v.get('embedding')}
         
@@ -213,11 +226,12 @@ class SmartDoorApp:
         
         sp_sc = float(sp.get("score", sp.get(f"score_{'photo' if sp_type=='FOTO CETAK' else 'video'}", 0.99)))
         
-        if self.fake_frames < 5:
+        # Peningkatan batas frame (menjadi 8) agar tidak ditolak seketika karena noise kamera sesaat
+        if self.fake_frames < 8:
             self.ui.update({
                 "wait": False, 
                 "bbox": face.bbox, 
-                "status": f"MEMERIKSA LIVENESS ({self.fake_frames}/5)", 
+                "status": f"MEMERIKSA LIVENESS ({self.fake_frames}/8)", 
                 "color": config.COLOR_RED, 
                 "instr": f"Terindikasi {sp_type}"
             })

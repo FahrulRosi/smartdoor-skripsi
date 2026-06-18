@@ -50,20 +50,21 @@ class Helpers:
         bx, by, bw, bh = bbox; fh, fw = raw_frame.shape[:2]
         gray = cv2.cvtColor(raw_frame, cv2.COLOR_BGR2GRAY)
         
-        x1, y1, x2, y2 = max(0, bx + int(bw * 0.2)), max(0, by + int(bh * 0.2)), min(fw, bx + int(bw * 0.8)), min(fh, by + int(bh * 0.8))
+        x1, y1, x2, y2 = max(0, bx), max(0, by), min(fw, bx + bw), min(fh, by + bh)
         L = np.mean(gray[y1:y2, x1:x2]) if gray[y1:y2, x1:x2].size > 0 else 100.0
         oL = np.mean(gray) 
         
-        top = gray[max(0, by-80):max(0, by-20), max(0, bx-20):min(fw, bx+bw+20)]
-        left = gray[max(0, by):min(fh, by+bh), max(0, bx-80):max(0, bx-20)]
-        right = gray[max(0, by):min(fh, by+bh), min(fw, bx+bw+20):min(fw, bx+bw+80)]
+        # Jangkauan deteksi background diperluas agar tidak terjebak Auto-Exposure webcam
+        top = gray[max(0, by-100):max(0, by-10), max(0, bx-50):min(fw, bx+bw+50)]
+        left = gray[max(0, by-20):min(fh, by+bh+20), max(0, bx-100):max(0, bx-10)]
+        right = gray[max(0, by-20):min(fh, by+bh+20), min(fw, bx+bw+10):min(fw, bx+bw+100)]
         
         max_bg = max(np.mean(top) if top.size else L, np.mean(left) if left.size else L, np.mean(right) if right.size else L)
         
-        # Threshold Backlight diturunkan agar lebih sensitif, sama persis dengan main.py
-        if (max_bg > 190 and (max_bg - L) > 60) or (oL > 190 and (oL - L) > 60): 
+        # PERBAIKAN 1: Threshold diturunkan drastis (ke 150) dan selisih (ke 30) untuk melawan Auto-Exposure webcam
+        if (max_bg > 150 and (max_bg - L) > 30) or (oL > 150 and (oL - L) > 30): 
             return "Backlight"
-        if L < 80 and max_bg < 130: 
+        if L < 80 and max_bg < 120: 
             return "Low Light"
             
         return "Normal"
@@ -79,7 +80,7 @@ class Helpers:
         gray = cv2.cvtColor(face_roi, cv2.COLOR_BGR2GRAY)
         brightness = np.mean(gray)
         blur_score = cv2.Laplacian(gray, cv2.CV_64F).var()
-        return (50 < brightness < 200) and (blur_score > 80), brightness, blur_score
+        return (40 < brightness < 210) and (blur_score > 60), brightness, blur_score # Lebih toleran ke webcam
 
     @staticmethod
     def draw_hud(f, stg, instr, prog, score_txt, status, bbox, col):
@@ -152,11 +153,15 @@ class FaceRegistrationApp:
         self.db = FaceDatabase()
         self.cam = CameraStream(config.CAMERA_INDEX, config.FRAME_WIDTH, config.FRAME_HEIGHT).start()
         
-        # KELONGGARAN 1: Confidence FaceMesh diturunkan menjadi 0.35 agar lebih pemaaf
         self.detector = FaceMeshDetector(min_detection_confidence=0.35, min_tracking_confidence=0.35)
         
         self.liveness, self.model = LivenessManager(), MobileFaceNet()
-        self.anti_spoof = SilentAntiSpoofing(getattr(config, 'ANTI_SPOOFING_MODEL', "liveness/antispoofing.onnx"), getattr(config, 'ANTI_SPOOFING_THRESHOLD', 0.70))
+        
+        # PERBAIKAN 2: Batasi Threshold Anti-Spoofing menjadi max 0.70 di registrasi untuk menoleransi noise webcam
+        spoof_thr = getattr(config, 'ANTI_SPOOFING_THRESHOLD', 0.70)
+        spoof_thr = min(spoof_thr, 0.70) # Meskipun di config.py 0.85, disini akan dipaksa max 0.70
+        self.anti_spoof = SilentAntiSpoofing(getattr(config, 'ANTI_SPOOFING_MODEL', "liveness/antispoofing.onnx"), spoof_thr)
+        
         self.matcher = FaceMatcher(0.35) 
         
         try:
@@ -205,7 +210,6 @@ class FaceRegistrationApp:
         if self.stage == RegistrationStage.FACEMESH and face.landmarks:
             if self.cap_data["facemesh_vector"] is None:
                 self.hold_frames += 1
-                # KELONGGARAN 2: Durasi menahan wajah untuk tahap Facemesh dikurangi dari 10 menjadi 4 frame
                 if self.hold_frames >= 4: 
                     lat_ms = round((time.time() - self.action_start_time) * 1000, 2)
                     self.cap_data["facemesh_vector"] = np.array([[l.x, l.y, l.z] for l in face.landmarks], dtype=np.float32).flatten()
@@ -298,7 +302,7 @@ class FaceRegistrationApp:
 
         quality_ok, brightness, blur_score = Helpers.is_image_quality_good(raw_frame, face.bbox)
         if not quality_ok:
-            reason = "Cahaya Buruk" if not (50 < brightness < 200) else "Kamera Blur"
+            reason = "Cahaya Buruk" if not (40 < brightness < 210) else "Kamera Blur"
             Helpers.draw_hud(display, self.stage, f"⚠️ {reason}!", "Mohon tetap diam...", score_txt, f"Real: {sp_score:.2f}", face.bbox, config.COLOR_YELLOW)
             with self.frame_lock: self.display_frame = display.copy()
             return
@@ -405,7 +409,6 @@ class FaceRegistrationApp:
                 
                 if not faces: 
                     self.missed_frames += 1
-                    # KELONGGARAN 3: Toleransi frame kosong ditingkatkan dari 5 menjadi 15
                     if self.missed_frames >= 15: 
                         bbox_memory = None
                         display = cv2.flip(display, 1)
@@ -455,7 +458,8 @@ class FaceRegistrationApp:
                 
                 if not sp_real:
                     self.fake_frames += 1
-                    if self.fake_frames >= 4: 
+                    # PERBAIKAN 3: Toleransi frame palsu dinaikkan ke 8 frame agar tidak langsung menggagalkan pendaftaran karena noise sesaat
+                    if self.fake_frames >= 8: 
                         Helpers.draw_hud(display, self.stage, "❌ DETEKSI SPOOFING!", f"Palsu: {sp_score:.2f}", hud_txt, f"{sp_label}", face.bbox, config.COLOR_RED)
                         with self.frame_lock: self.display_frame = display
                         continue 

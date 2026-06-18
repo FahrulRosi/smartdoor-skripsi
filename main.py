@@ -217,7 +217,7 @@ class SmartDoorApp:
                 "wait": False, 
                 "bbox": face.bbox, 
                 "status": f"MEMERIKSA LIVENESS ({self.fake_frames}/5)", 
-                "color": config.COLOR_YELLOW, 
+                "color": config.COLOR_RED, 
                 "instr": f"Terindikasi {sp_type}"
             })
         else:

@@ -87,7 +87,6 @@ class UIHelper:
         cv2.putText(d, f"STATUS PINTU: {'TERKUNCI' if locked else 'TERBUKA'}", (10, fh - 8), c_font, 0.45, config.COLOR_RED if locked else config.COLOR_GREEN, 1, cv2.LINE_AA)
 
 class SmartDoorApp:
-    # --- UPDATE 1: Penambahan CHALLENGES untuk MIRING ---
     CHALLENGES = {
         "BLINK": "Kedipkan Mata", 
         "KANAN": "Toleh KANAN", 
@@ -108,7 +107,7 @@ class SmartDoorApp:
 
     def _init_heavy_models(self):
         self.db, self.model, self.pose_estimator = FaceDatabase(), MobileFaceNet(), HeadPoseEstimator()
-        self.anti_spoof = SilentAntiSpoofing(getattr(config, 'ANTI_SPOOFING_MODEL', "liveness/antispoofing.onnx"), getattr(config, 'ANTI_SPOOFING_THRESHOLD', 0.70))
+        self.anti_spoof = SilentAntiSpoofing(getattr(config, 'ANTI_SPOOFING_MODEL', "liveness/antispoofing.onnx"), getattr(config, 'ANTI_SPOOFING_THRESHOLD', 0.85))
         self.detector, self.door = FaceMeshDetector(min_detection_confidence=0.5, min_tracking_confidence=0.5), DoorLock(getattr(config, 'LOCK_GPIO_PIN', 18), getattr(config, 'UNLOCK_DURATION', 5))
         self.known_faces_2d = {k: [np.array(e, dtype=np.float32) for e in (v['embedding'] if isinstance(v['embedding'][0], list) else [v['embedding']])] for k, v in (self.db.load_all_faces() or {}).items() if isinstance(v, dict) and v.get('embedding')}
         
@@ -152,7 +151,6 @@ class SmartDoorApp:
         self._reset_state()
         self.ui.update({"wait": wait, "bbox": None if wait else self.ui.get("bbox"), "status": status, "color": color, "instr": instr, "light_cond": None})
 
-    # --- UPDATE 2: Modifikasi _check_action untuk kemiringan (Roll) ---
     def _check_action(self, action, face):
         if action == "BLINK": 
             self.ear_hist.append(UIHelper.get_ear(face))
@@ -214,12 +212,25 @@ class SmartDoorApp:
         
         sp_sc = float(sp.get("score", sp.get(f"score_{'photo' if sp_type=='FOTO CETAK' else 'video'}", 0.99)))
         
-        if self.fake_frames >= 5:
-            self.ui.update({"wait": False, "bbox": face.bbox, "status": f"PALSU: {sp_type} ({sp_sc:.2f})", "color": config.COLOR_RED, "instr": "Akses Ditolak"})
+        if self.fake_frames < 5:
+            self.ui.update({
+                "wait": False, 
+                "bbox": face.bbox, 
+                "status": f"MEMERIKSA LIVENESS ({self.fake_frames}/5)", 
+                "color": config.COLOR_YELLOW, 
+                "instr": f"Terindikasi {sp_type}"
+            })
+        else:
+            self.ui.update({
+                "wait": False, 
+                "bbox": face.bbox, 
+                "status": f"PALSU: {sp_type} ({sp_sc:.2f})", 
+                "color": config.COLOR_RED, 
+                "instr": "Akses Ditolak"
+            })
             
             if time.time() - self.last_spoof_log_time > 4.0:
                 self.last_spoof_log_time = time.time()
-                
                 if hasattr(self.db, 'log_spoofing_async'): 
                     self.db.log_spoofing_async(round(sp_sc, 2), round(sp_sc, 2), round(sp_sc, 2), sp_type, round(sp_lat, 2))
                 print(f"\n⚠️ SPOOF: {sp_type} | Trgt: {disp_name} | Scr: {sp_sc:.2f} | Lat: {sp_lat:.0f}ms")

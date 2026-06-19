@@ -49,7 +49,6 @@ class Helpers:
         fh, fw = raw.shape[:2]
         gray = cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY)
         
-        # Hitung kecerahan global (lingkungan sekitar)
         ambient_brightness = np.mean(gray)
         
         if bbox:
@@ -57,15 +56,13 @@ class Helpers:
             x1, y1, x2, y2 = max(0, bx), max(0, by), min(fw, bx + bw), min(fh, by + bh)
             face_brightness = np.mean(gray[y1:y2, x1:x2]) if gray[y1:y2, x1:x2].size > 0 else ambient_brightness
             
-            # Deteksi area sekitar kepala
             bg_top = gray[max(0, by-80):max(0, by-5), max(0, bx-30):min(fw, bx+bw+30)]
             bg_brightness = np.mean(bg_top) if bg_top.size > 0 else ambient_brightness
             
-            # PERBAIKAN: Hanya deteksi backlight jika wajah benar-benar underexposed (< 120)
+            # PERBAIKAN: Syarat ketat agar baju/tembok putih tidak terdeteksi backlight
             if bg_brightness > 150 and (bg_brightness - face_brightness) > 45 and face_brightness < 120:
                 return "Backlight"
 
-        # Evaluasi tingkat cahaya lingkungan secara keseluruhan
         if ambient_brightness < 65:
             return "Low Light"
         return "Normal"
@@ -421,10 +418,11 @@ class FaceRegistrationApp:
                 
                 current_light = Helpers.get_light_condition_dynamic(raw, face.bbox)
                 
-                if self.stage == RegistrationStage.FACEMESH or getattr(self, 'locked_light_cond', None) is None:
+                # PERBAIKAN: Kunci cahaya HANYA pada tahap awal (FACEMESH)
+                if self.stage == RegistrationStage.FACEMESH:
                     self.locked_light_cond = current_light
                 
-                light_cond = self.locked_light_cond
+                light_cond = getattr(self, 'locked_light_cond', "Normal")
                 
                 if time.time() - getattr(self, 'app_start_time', time.time()) < 2.5:
                     light_cond = "Normal"

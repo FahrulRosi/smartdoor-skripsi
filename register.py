@@ -59,7 +59,6 @@ class Helpers:
             bg_top = gray[max(0, by-80):max(0, by-5), max(0, bx-30):min(fw, bx+bw+30)]
             bg_brightness = np.mean(bg_top) if bg_top.size > 0 else ambient_brightness
             
-            # PERBAIKAN: Syarat ketat agar baju/tembok putih tidak terdeteksi backlight
             if bg_brightness > 150 and (bg_brightness - face_brightness) > 45 and face_brightness < 120:
                 return "Backlight"
 
@@ -418,7 +417,6 @@ class FaceRegistrationApp:
                 
                 current_light = Helpers.get_light_condition_dynamic(raw, face.bbox)
                 
-                # PERBAIKAN: Kunci cahaya HANYA pada tahap awal (FACEMESH)
                 if self.stage == RegistrationStage.FACEMESH:
                     self.locked_light_cond = current_light
                 

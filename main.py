@@ -43,8 +43,7 @@ class UIHelper:
             face_bright = np.mean(gray[y1:y2, x1:x2]) if gray[y1:y2, x1:x2].size > 0 else ambient
             bg_top = gray[max(0, by-80):max(0, by-5), max(0, bx-30):min(fw, bx+bw+30)]
             bg_bright = np.mean(bg_top) if bg_top.size > 0 else ambient
-            
-            # PERBAIKAN 1: Syarat ketat agar baju/tembok putih tidak terdeteksi backlight
+
             if bg_bright > 150 and (bg_bright - face_bright) > 45 and face_bright < 120: 
                 return "Backlight"
                 
@@ -77,7 +76,7 @@ class SmartDoorApp:
 
     def __init__(self):
         print(f"\n{'='*50}\n[SYSTEM] SISTEM DOOR LOCK MULTI-VECTOR MATRIKS 2D\n{'='*50}\n")
-        self._is_ready = False  # PERBAIKAN 2: Mencegah trigger tombol palsu saat startup
+        self._is_ready = False 
         self.lock, self.running, self.shared_frame = threading.Lock(), True, None
         self.ui = {"wait": True, "bbox": None, "status": "STARTING", "color": config.COLOR_WHITE, "instr": "", "light_cond": None}
         self.missed_frames = self.fake_frames = self.last_spoof_log_time = 0
@@ -103,7 +102,7 @@ class SmartDoorApp:
         threading.Thread(target=self._ai_worker, daemon=True).start()
         
         time.sleep(1.0)
-        self._is_ready = True # PERBAIKAN 2: Tombol aktif hanya setelah sistem benar-benar siap
+        self._is_ready = True
 
     def _button_polling_worker(self, pin):
         last_state = GPIO.HIGH
@@ -127,7 +126,7 @@ class SmartDoorApp:
         self.challenge_start_time, self.face_val_latency, self.final_display_acc = 0.0, 0.0, 0.0
         self.wait_center, self.blink_passed, self.blink_hold, self.ear_hist, self.print_counter, self.access_details = False, False, 0, [], 0, []
         self.fake_frames = self.recog_frames = 0  
-        self.locked_light_cond = "Normal" # PERBAIKAN 3: Default kondisi cahaya
+        self.locked_light_cond = "Normal" 
 
     def _fail(self, status, color=config.COLOR_RED, instr="", wait=False):
         self._reset_state(); self.ui.update({"wait": wait, "bbox": None if wait else self.ui.get("bbox"), "status": status, "color": color, "instr": instr})
@@ -151,18 +150,16 @@ class SmartDoorApp:
         return self.pose_hold >= 6, max(0.0, float(raw_val)), tgt, salah
 
     def _check_identity(self, raw, enhanced, face, l_str):
-        # PERBAIKAN 4: Turunkan batas kecocokan agar lebih toleran
-        if l_str == "Normal": d_thr = 0.60
-        elif l_str == "Backlight": d_thr = 0.58
-        elif l_str == "Low Light": d_thr = 0.55
-        else: d_thr = 0.60
+        if l_str == "Normal": d_thr = 0.70
+        elif l_str == "Backlight": d_thr = 0.67
+        elif l_str == "Low Light": d_thr = 0.65
+        else: d_thr = 0.70
+
 
         if not self.known_faces_2d: return "TIDAK DIKENAL", 0.0, d_thr, 0.0, False
         fh, fw = enhanced.shape[:2]; x, y, w, h = face.bbox
         cropped = self.model.crop_face(enhanced, [max(0, x), max(0, y), min(fw, x+w)-max(0, x), min(fh, y+h)-max(0, y)])
         if cropped is None or cropped.size == 0: return "TIDAK DIKENAL", 0.0, d_thr, 0.0, False
-        
-        # PERBAIKAN 4: Hapus map_illumination agar model melihat wajah secara lebih natural sesuai saat diregister
 
         if (raw_emb := self.model.get_embedding(cropped)) is None: return "TIDAK DIKENAL", 0.0, d_thr, 0.0, False
         q_emb = np.array(raw_emb, dtype=np.float32).flatten(); q_emb /= (np.linalg.norm(q_emb) + 1e-6)
@@ -194,7 +191,6 @@ class SmartDoorApp:
             else: 
                 self.missed_frames, face = 0, max(faces, key=lambda f: f.bbox[2] * f.bbox[3])
                 
-                # PERBAIKAN 3: Hanya kalkulasi cahaya saat IDLE atau RECOGNIZING, biarkan terkunci saat CHALLENGE
                 if self.state in (ValidationState.IDLE, ValidationState.RECOGNIZING):
                     self.locked_light_cond = UIHelper.get_light_condition_dynamic(frame, face.bbox)
                 
@@ -248,7 +244,6 @@ class SmartDoorApp:
             b_name, sm_score, d_thr, f_acc, is_recog = self._check_identity(raw, enhanced, face, l_str)
             disp_name = b_name.split(" - ", 1)[-1] if (b_name != "TIDAK DIKENAL") else "TIDAK DIKENAL"
 
-            # PERBAIKAN 4: Pisahkan logika penolakan dan konfirmasi multi-frame
             if b_name == "TIDAK DIKENAL":
                 UIHelper.print_inline(f"Ditolak... Cosine: {sm_score:.3f} < Target Thr:{d_thr:.2f} ({l_str})")
                 self.ui.update({"status": "TIDAK DIKENAL", "color": config.COLOR_RED, "instr": f"Akses Ditolak (Wajah Belum Terdaftar)"})

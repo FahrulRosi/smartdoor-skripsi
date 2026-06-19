@@ -46,10 +46,6 @@ class Helpers:
 
     @staticmethod
     def get_light_condition_dynamic(raw, bbox=None):
-        """
-        PERBAIKAN: Menggunakan sistem Ambient Light sama seperti pada main.
-        Membaca kecerahan seluruh lingkungan sekitar agar akurat walau wajah terkena cahaya layar.
-        """
         fh, fw = raw.shape[:2]
         gray = cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY)
         
@@ -61,11 +57,12 @@ class Helpers:
             x1, y1, x2, y2 = max(0, bx), max(0, by), min(fw, bx + bw), min(fh, by + bh)
             face_brightness = np.mean(gray[y1:y2, x1:x2]) if gray[y1:y2, x1:x2].size > 0 else ambient_brightness
             
-            # Deteksi area sekitar kepala untuk mengonfirmasi backlight
+            # Deteksi area sekitar kepala
             bg_top = gray[max(0, by-80):max(0, by-5), max(0, bx-30):min(fw, bx+bw+30)]
             bg_brightness = np.mean(bg_top) if bg_top.size > 0 else ambient_brightness
             
-            if bg_brightness > 145 and (bg_brightness - face_brightness) > 25:
+            # PERBAIKAN: Hanya deteksi backlight jika wajah benar-benar underexposed (< 120)
+            if bg_brightness > 150 and (bg_brightness - face_brightness) > 45 and face_brightness < 120:
                 return "Backlight"
 
         # Evaluasi tingkat cahaya lingkungan secara keseluruhan

@@ -50,7 +50,11 @@ class UIHelper:
             face_bright = np.mean(gray[y1:y2, x1:x2]) if gray[y1:y2, x1:x2].size > 0 else ambient
             bg_top = gray[max(0, by-80):max(0, by-5), max(0, bx-30):min(fw, bx+bw+30)]
             bg_bright = np.mean(bg_top) if bg_top.size > 0 else ambient
-            if bg_bright > 145 and (bg_bright - face_bright) > 25: return "Backlight"
+            
+            # PERBAIKAN: Cek apakah wajah benar-benar gelap (< 120) dan selisihnya ekstrem (> 45)
+            if bg_bright > 150 and (bg_bright - face_bright) > 45 and face_bright < 120: 
+                return "Backlight"
+                
         return "Low Light" if ambient < 65 else "Normal"
 
     @staticmethod

@@ -49,19 +49,16 @@ class UIHelper:
         bx, by, bw, bh = bbox; fh, fw = raw.shape[:2]
         gray = cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY)
         
-        # Area wajah
         x1, y1, x2, y2 = max(0, bx), max(0, by), min(fw, bx + bw), min(fh, by + bh)
         L = np.mean(gray[y1:y2, x1:x2]) if gray[y1:y2, x1:x2].size > 0 else 100.0
         oL = np.mean(gray) 
         
-        # Jangkauan area background diperluas untuk menangani auto-exposure webcam
         top = gray[max(0, by-100):max(0, by-10), max(0, bx-50):min(fw, bx+bw+50)]
         left = gray[max(0, by-20):min(fh, by+bh+20), max(0, bx-100):max(0, bx-10)]
         right = gray[max(0, by-20):min(fh, by+bh+20), min(fw, bx+bw+10):min(fw, bx+bw+100)]
         
         max_bg = max(np.mean(top) if top.size else L, np.mean(left) if left.size else L, np.mean(right) if right.size else L)
         
-        # Menggunakan logika threshold yang sangat peka terhadap backlight
         if (max_bg > 150 and (max_bg - L) > 30) or (oL > 150 and (oL - L) > 30): 
             return "Backlight"
         if L < 80 and max_bg < 120: 
@@ -117,9 +114,8 @@ class SmartDoorApp:
     def _init_heavy_models(self):
         self.db, self.model, self.pose_estimator = FaceDatabase(), MobileFaceNet(), HeadPoseEstimator()
         
-        # Modifikasi threshold anti-spoofing agar mentolerir noise webcam
         spoof_thr = getattr(config, 'ANTI_SPOOFING_THRESHOLD', 0.85)
-        spoof_thr = min(spoof_thr, 0.75) # Batas maksimal untuk verifikasi
+        spoof_thr = min(spoof_thr, 0.75) 
         self.anti_spoof = SilentAntiSpoofing(getattr(config, 'ANTI_SPOOFING_MODEL', "liveness/antispoofing.onnx"), spoof_thr)
         
         self.detector, self.door = FaceMeshDetector(min_detection_confidence=0.5, min_tracking_confidence=0.5), DoorLock(getattr(config, 'LOCK_GPIO_PIN', 18), getattr(config, 'UNLOCK_DURATION', 5))
@@ -182,9 +178,9 @@ class SmartDoorApp:
         tp = getattr(config, 'CHALLENGE_PITCH', 20.0)
         tr = getattr(config, 'CHALLENGE_ROLL', 20.0)
         
-        salah = (action=="KANAN" and dy<-12.0) or (action=="KIRI" and dy>12.0) or \
-                (action=="ATAS" and dp>12.0) or (action=="BAWAH" and dp<-12.0) or \
-                (action=="MIRING_KANAN" and dr<-12.0) or (action=="MIRING_KIRI" and dr>12.0)
+        salah = (action=="KANAN" and dy<-18.0) or (action=="KIRI" and dy>18.0) or \
+                (action=="ATAS" and dp>18.0) or (action=="BAWAH" and dp<-18.0) or \
+                (action=="MIRING_KANAN" and dr<-18.0) or (action=="MIRING_KIRI" and dr>18.0)
         
         raw_val, tgt, passed = {
             "KANAN": (dy, ty, dy>ty), "KIRI": (-dy, ty, -dy>ty), 
@@ -226,7 +222,6 @@ class SmartDoorApp:
         
         sp_sc = float(sp.get("score", sp.get(f"score_{'photo' if sp_type=='FOTO CETAK' else 'video'}", 0.99)))
         
-        # Peningkatan batas frame (menjadi 8) agar tidak ditolak seketika karena noise kamera sesaat
         if self.fake_frames < 8:
             self.ui.update({
                 "wait": False, 
@@ -267,7 +262,8 @@ class SmartDoorApp:
             
             if not faces:
                 self.missed_frames += 1 
-                if self.missed_frames >= 5: self._fail("", wait=True)
+                # PERBAIKAN: Toleransi wajah hilang sesaat dinaikkan dari 5 ke 15 frame
+                if self.missed_frames >= 15: self._fail("", wait=True)
             else: 
                 self.missed_frames, face = 0, max(faces, key=lambda f: f.bbox[2] * f.bbox[3])
                 
@@ -282,7 +278,10 @@ class SmartDoorApp:
     def _process_face(self, raw, enhanced, face, l_str):
         if self.ui.get("status") in ("DIBUKA MANUAL", "STARTING"): return
         cx, cy = face.bbox[0] + face.bbox[2]//2, face.bbox[1] + face.bbox[3]//2
-        if self.state.value > 1 and self.prev_center and np.hypot(cx-self.prev_center[0], cy-self.prev_center[1]) > max(face.bbox[2:])*0.4: return self._fail("WAJAH BERGANTI", instr="Mulai Ulang")
+        
+        # PERBAIKAN: Toleransi batas center wajah ("WAJAH BERGANTI") dilebarkan dari 0.4 ke 0.6
+        if self.state.value > 1 and self.prev_center and np.hypot(cx-self.prev_center[0], cy-self.prev_center[1]) > max(face.bbox[2:])*0.6: return self._fail("WAJAH BERGANTI", instr="Mulai Ulang")
+        
         self.prev_center = (cx, cy) 
         if face.bbox[3] > int(config.FRAME_HEIGHT * 0.70): return self._fail("TERLALU DEKAT", config.COLOR_YELLOW, "Mundur")
 

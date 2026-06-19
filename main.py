@@ -43,7 +43,8 @@ class UIHelper:
             face_bright = np.mean(gray[y1:y2, x1:x2]) if gray[y1:y2, x1:x2].size > 0 else ambient
             bg_top = gray[max(0, by-80):max(0, by-5), max(0, bx-30):min(fw, bx+bw+30)]
             bg_bright = np.mean(bg_top) if bg_top.size > 0 else ambient
-
+            
+            # Syarat ketat agar baju/tembok putih tidak terdeteksi backlight
             if bg_bright > 150 and (bg_bright - face_bright) > 45 and face_bright < 120: 
                 return "Backlight"
                 
@@ -76,7 +77,7 @@ class SmartDoorApp:
 
     def __init__(self):
         print(f"\n{'='*50}\n[SYSTEM] SISTEM DOOR LOCK MULTI-VECTOR MATRIKS 2D\n{'='*50}\n")
-        self._is_ready = False 
+        self._is_ready = False  
         self.lock, self.running, self.shared_frame = threading.Lock(), True, None
         self.ui = {"wait": True, "bbox": None, "status": "STARTING", "color": config.COLOR_WHITE, "instr": "", "light_cond": None}
         self.missed_frames = self.fake_frames = self.last_spoof_log_time = 0
@@ -102,7 +103,7 @@ class SmartDoorApp:
         threading.Thread(target=self._ai_worker, daemon=True).start()
         
         time.sleep(1.0)
-        self._is_ready = True
+        self._is_ready = True 
 
     def _button_polling_worker(self, pin):
         last_state = GPIO.HIGH
@@ -115,7 +116,7 @@ class SmartDoorApp:
             time.sleep(0.05) 
 
     def _manual_unlock(self, channel):
-        if not getattr(self, '_is_ready', False): return # PERBAIKAN 2: Tolak trigger bila sistem belum ready
+        if not getattr(self, '_is_ready', False): return 
         print(f"\n{'='*60}"); UIHelper.log("🔓 PINTU DIBUKA MANUAL VIA TOMBOL", "SUCCESS"); print(f"{'='*60}\n")
         self._reset_state(); self.ui.update({"wait": False, "bbox": None, "status": "DIBUKA MANUAL", "color": config.COLOR_GREEN, "instr": "Tombol Ditekan", "light_cond": None})
         threading.Thread(target=self.door.unlock, daemon=True).start()
@@ -143,7 +144,9 @@ class SmartDoorApp:
         dy, dp, dr = est.get("yaw", 0) - self.reg_pose[0], est.get("pitch", 0) - self.reg_pose[1], est.get("roll", 0) - self.reg_pose[2]
         ty, tp, tr = getattr(config, 'CHALLENGE_YAW', 25.0), getattr(config, 'CHALLENGE_PITCH', 20.0), getattr(config, 'CHALLENGE_ROLL', 20.0)
         
-        salah = (action=="KANAN" and dy<-18.0) or (action=="KIRI" and dy>18.0) or (action=="ATAS" and dp>18.0) or (action=="BAWAH" and dp<-18.0) or (action=="MIRING_KANAN" and dr<-18.0) or (action=="MIRING_KIRI" and dr>18.0)
+        # PERBAIKAN: Matikan penalti gerakan salah agar sesi tidak batal saat kepala bergoyang
+        salah = False
+        
         raw_val, tgt, passed = {"KANAN": (dy, ty, dy>ty), "KIRI": (-dy, ty, -dy>ty), "ATAS": (-dp, tp, -dp>tp), "BAWAH": (dp, tp, dp>tp), "MIRING_KANAN": (dr, tr, dr>tr), "MIRING_KIRI": (-dr, tr, -dr>tr)}.get(action, (0.0, 1.0, False))
         
         self.pose_hold = self.pose_hold + 1 if passed else 0
@@ -154,7 +157,6 @@ class SmartDoorApp:
         elif l_str == "Backlight": d_thr = 0.67
         elif l_str == "Low Light": d_thr = 0.65
         else: d_thr = 0.70
-
 
         if not self.known_faces_2d: return "TIDAK DIKENAL", 0.0, d_thr, 0.0, False
         fh, fw = enhanced.shape[:2]; x, y, w, h = face.bbox
@@ -187,7 +189,7 @@ class SmartDoorApp:
             
             if not faces:
                 self.missed_frames += 1 
-                if self.missed_frames >= 15: self._fail("", wait=True)
+                if self.missed_frames >= 30: self._fail("", wait=True)
             else: 
                 self.missed_frames, face = 0, max(faces, key=lambda f: f.bbox[2] * f.bbox[3])
                 
@@ -203,14 +205,15 @@ class SmartDoorApp:
     def _process_face(self, raw, enhanced, face, l_str):
         if self.ui.get("status") in ("DIBUKA MANUAL", "STARTING"): return
         cx, cy = face.bbox[0] + face.bbox[2]//2, face.bbox[1] + face.bbox[3]//2
-        
-        if self.state.value > 1 and self.prev_center and np.hypot(cx-self.prev_center[0], cy-self.prev_center[1]) > max(face.bbox[2:])*0.6: return self._fail("WAJAH BERGANTI", instr="Mulai Ulang")
+
+        if self.state.value > 1 and self.prev_center and np.hypot(cx-self.prev_center[0], cy-self.prev_center[1]) > max(face.bbox[2:])*1.2: 
+            return self._fail("WAJAH BERGANTI", instr="Mulai Ulang")
         self.prev_center = (cx, cy) 
+        
         if face.bbox[3] > int(config.FRAME_HEIGHT * 0.70): return self._fail("TERLALU DEKAT", config.COLOR_YELLOW, "Mundur")
         if self.state == ValidationState.IDLE: self.state, self.auth_start = ValidationState.RECOGNIZING, time.time(); return
 
         bx, by, bw, bh = face.bbox
-    
         as_bbox = [bx, by, bw, bh]
         as_frame = raw.copy() 
 
@@ -261,36 +264,18 @@ class SmartDoorApp:
             
             self.face_val_latency = (time.time() - t_val) * 1000 
             UIHelper.log(f"\nTerverifikasi: {disp_name} | Cosine: {sm_score:.3f} (Target Thr: {d_thr:.2f}) | Cahaya: {l_str}", "SUCCESS")
-            self.last_name, self.match_score, self.final_display_acc, self.state, self.step_idx, self.wait_center = b_name, sm_score, f_acc, ValidationState.CHALLENGE, 0, True
+            
+            # PERBAIKAN: Langsung set wait_center ke False untuk melewati kalibrasi awal
+            self.last_name, self.match_score, self.final_display_acc, self.state, self.step_idx, self.wait_center = b_name, sm_score, f_acc, ValidationState.CHALLENGE, 0, False
             self.seq, self.challenge_start_time = [random.choice(["KANAN", "KIRI", "ATAS", "BAWAH", "MIRING_KANAN", "MIRING_KIRI"]), "BLINK"], time.time()
+            self.reg_pose = [0.0, 0.0, 0.0] 
 
         elif self.state == ValidationState.CHALLENGE:
-            curr = self.pose_estimator.estimate(face, self.detector)
-            
-            if self.wait_center:
-                if self.step_idx == 0:
-                    if not hasattr(self, 'calib_pts'): self.calib_pts = []
-                    self.calib_pts.append([curr.get(k, 0) for k in ("yaw", "pitch", "roll")])
-                    self.ui.update({"status": "KALIBRASI POSISI", "color": config.COLOR_YELLOW, "instr": "Lihat Lurus ke Kamera"})
-                    if len(self.calib_pts) >= 3:
-                        self.reg_pose = np.mean(self.calib_pts, axis=0).tolist()
-                        self.wait_center = False
-                        delattr(self, 'calib_pts')
-                        self.challenge_start_time = time.time()
-                    return
-                else:
-                    dy = curr.get("yaw", 0) - self.reg_pose[0]
-                    dp = curr.get("pitch", 0) - self.reg_pose[1]
-                    self.ui.update({"status": "KEMBALI KE TENGAH", "color": config.COLOR_YELLOW, "instr": "Harap Luruskan Wajah Anda"})
-                    if abs(dy) < 12.0 and abs(dp) < 12.0:
-                        self.wait_center = False
-                        self.challenge_start_time = time.time()
-                    return
-                
             act = self.seq[self.step_idx]
             self.ui.update({"status": f"{self.last_name.split(' - ', 1)[-1]}", "color": config.COLOR_CYAN, "instr": f"Tantangan {self.step_idx+1}/{len(self.seq)}: {self.CHALLENGES[act]}"})
-            passed, val, tgt, salah = self._check_action(act, face)
             
+            passed, val, tgt, salah = self._check_action(act, face)
+
             if salah: return self._fail("GERAKAN SALAH", config.COLOR_RED, "Akses Ditolak", wait=True)
             if (time.time() - self.challenge_start_time) > 8.0: return self._fail("WAKTU HABIS", config.COLOR_RED, "Mulai Ulang", wait=True)
             
@@ -299,9 +284,9 @@ class SmartDoorApp:
                 UIHelper.log(f"Berhasil {self.CHALLENGES[act]} | Lat: {(time.time() - self.challenge_start_time)*1000:.0f} ms", "SUCCESS")
                 
                 self.step_idx, self.pose_hold, self.blink_passed = self.step_idx + 1, 0, False; self.ear_hist.clear()
+                
                 if self.step_idx < len(self.seq): 
                     self.challenge_start_time = time.time()
-                    self.wait_center = True
                 else:
                     self.state = ValidationState.UNLOCKED; threading.Thread(target=self.door.unlock, daemon=True).start()
                     pts = self.last_name.split(" - ", 1); user_name = pts[1] if len(pts) > 1 else self.last_name

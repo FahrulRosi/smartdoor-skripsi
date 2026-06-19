@@ -1,6 +1,5 @@
 # ── Camera & Hardware ────────────────────────────────────────────────────────
 CAMERA_INDEX    = 0
-# 🚨 PERBAIKAN: Disesuaikan dengan resolusi native LCD TFT 3.5 Inch (Landscape)
 FRAME_WIDTH     = 480
 FRAME_HEIGHT    = 320
 FPS             = 30
@@ -45,14 +44,14 @@ MIN_BLINK_DELTA      = 0.04
 
 # ── Anti-Spoofing & Recognition ──────────────────────────────────────────────
 ANTI_SPOOFING_MODEL     = "liveness/antispoofing.onnx"
-ANTI_SPOOFING_THRESHOLD = 0.85
+ANTI_SPOOFING_THRESHOLD = 0.80
 
 MATCH_THRESHOLD         = 0.70
 MOBILEFACENET_PATH      = "recognition/mobilefacenet.onnx"
 
 # ── Door Lock & UI ───────────────────────────────────────────────────────────
 LOCK_GPIO_PIN   = 18
-BUTTON_PIN      = 26  # Tetap di GPIO 26 sesuai skema alat Anda
+BUTTON_PIN      = 26  
 UNLOCK_DURATION = 5   
 
 # Definisi Warna BGR untuk OpenCV

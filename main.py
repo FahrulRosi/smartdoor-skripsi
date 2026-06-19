@@ -45,21 +45,14 @@ class UIHelper:
 
     @staticmethod
     def get_light_condition(raw, bbox):
-        fh, fw = raw.shape[:2]
+        if not bbox: return "Normal"
+        bx, by, bw, bh = bbox; fh, fw = raw.shape[:2]
         gray = cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY)
-        oL = np.mean(gray) 
-        
-        # PERBAIKAN: Jika tidak ada wajah, analisis kecerahan keseluruhan frame
-        if not bbox: 
-            if oL < 80: return "Low Light"
-            if oL > 150: return "Backlight"
-            return "Normal"
-            
-        bx, by, bw, bh = bbox
         
         # Area wajah
         x1, y1, x2, y2 = max(0, bx), max(0, by), min(fw, bx + bw), min(fh, by + bh)
         L = np.mean(gray[y1:y2, x1:x2]) if gray[y1:y2, x1:x2].size > 0 else 100.0
+        oL = np.mean(gray) 
         
         # Jangkauan area background diperluas untuk menangani auto-exposure webcam
         top = gray[max(0, by-100):max(0, by-10), max(0, bx-50):min(fw, bx+bw+50)]
@@ -116,7 +109,7 @@ class SmartDoorApp:
     def __init__(self):
         print(f"\n{'='*50}\n[SYSTEM] SISTEM DOOR LOCK MULTI-VECTOR MATRIKS 2D\n{'='*50}\n")
         self.lock, self.running, self.shared_frame = threading.Lock(), True, None
-        self.ui = {"wait": True, "bbox": None, "status": "STARTING", "color": config.COLOR_WHITE, "instr": "", "light_cond": "Normal"}
+        self.ui = {"wait": True, "bbox": None, "status": "STARTING", "color": config.COLOR_WHITE, "instr": "", "light_cond": None}
         self.missed_frames = self.fake_frames = self.last_spoof_log_time = 0
         if GPIO_AVAILABLE: GPIO.setwarnings(False)
         self._reset_state(); self._init_heavy_models()
@@ -124,8 +117,9 @@ class SmartDoorApp:
     def _init_heavy_models(self):
         self.db, self.model, self.pose_estimator = FaceDatabase(), MobileFaceNet(), HeadPoseEstimator()
         
+        # Modifikasi threshold anti-spoofing agar mentolerir noise webcam
         spoof_thr = getattr(config, 'ANTI_SPOOFING_THRESHOLD', 0.85)
-        spoof_thr = min(spoof_thr, 0.75) 
+        spoof_thr = min(spoof_thr, 0.75) # Batas maksimal untuk verifikasi
         self.anti_spoof = SilentAntiSpoofing(getattr(config, 'ANTI_SPOOFING_MODEL', "liveness/antispoofing.onnx"), spoof_thr)
         
         self.detector, self.door = FaceMeshDetector(min_detection_confidence=0.5, min_tracking_confidence=0.5), DoorLock(getattr(config, 'LOCK_GPIO_PIN', 18), getattr(config, 'UNLOCK_DURATION', 5))
@@ -140,7 +134,7 @@ class SmartDoorApp:
 
         self.cam = CameraStream(config.CAMERA_INDEX, config.FRAME_WIDTH, config.FRAME_HEIGHT).start()
         time.sleep(2.0)
-        self.ui.update({"wait": True, "bbox": None, "status": "", "color": config.COLOR_WHITE, "instr": "", "light_cond": "Normal"})
+        self.ui.update({"wait": True, "bbox": None, "status": "", "color": config.COLOR_WHITE, "instr": "", "light_cond": None})
         self.app_start_time = time.time()  
         threading.Thread(target=self._ai_worker, daemon=True).start()
 
@@ -157,7 +151,7 @@ class SmartDoorApp:
     def _manual_unlock(self, channel):
         print(f"\n{'='*60}"); UIHelper.log("🔓 PINTU DIBUKA MANUAL VIA TOMBOL", "SUCCESS"); print(f"{'='*60}\n")
         self._reset_state()
-        self.ui.update({"wait": False, "bbox": None, "status": "DIBUKA MANUAL", "color": config.COLOR_GREEN, "instr": "Tombol Ditekan"})
+        self.ui.update({"wait": False, "bbox": None, "status": "DIBUKA MANUAL", "color": config.COLOR_GREEN, "instr": "Tombol Ditekan", "light_cond": None})
         threading.Thread(target=self.door.unlock, daemon=True).start()
 
     def _reset_state(self):
@@ -169,7 +163,7 @@ class SmartDoorApp:
 
     def _fail(self, status, color=config.COLOR_RED, instr="", wait=False):
         self._reset_state()
-        self.ui.update({"wait": wait, "bbox": None if wait else self.ui.get("bbox"), "status": status, "color": color, "instr": instr})
+        self.ui.update({"wait": wait, "bbox": None if wait else self.ui.get("bbox"), "status": status, "color": color, "instr": instr, "light_cond": None})
 
     def _check_action(self, action, face):
         if action == "BLINK": 
@@ -232,6 +226,7 @@ class SmartDoorApp:
         
         sp_sc = float(sp.get("score", sp.get(f"score_{'photo' if sp_type=='FOTO CETAK' else 'video'}", 0.99)))
         
+        # Peningkatan batas frame (menjadi 8) agar tidak ditolak seketika karena noise kamera sesaat
         if self.fake_frames < 8:
             self.ui.update({
                 "wait": False, 
@@ -263,35 +258,25 @@ class SmartDoorApp:
             if frame is None: time.sleep(0.01); continue
             
             faces = self.detector.detect(frame)
-            
-            # PERBAIKAN: Selalu hitung kondisi cahaya, ada wajah ataupun tidak
-            current_bbox = max(faces, key=lambda f: f.bbox[2]*f.bbox[3]).bbox if faces else None
-            current_light = UIHelper.get_light_condition(frame, current_bbox)
-            
             if self.state == ValidationState.UNLOCKED:
                 if getattr(self.door, 'locked', True):
-                    self._reset_state()
-                    self.ui.update({"wait": True, "bbox": None, "status": "", "color": config.COLOR_WHITE, "instr": "", "light_cond": current_light})
+                    self._reset_state(); self.ui.update({"wait": True, "bbox": None, "status": "", "color": config.COLOR_WHITE, "instr": "", "light_cond": None})
                 else:
-                    self.ui.update({"wait": False, "bbox": current_bbox, "light_cond": current_light})
+                    self.ui.update({"wait": False, "bbox": max(faces, key=lambda f: f.bbox[2]*f.bbox[3]).bbox if faces else None})
                 time.sleep(0.02); continue
             
             if not faces:
                 self.missed_frames += 1 
-                if self.missed_frames >= 5: 
-                    self._fail("", wait=True)
-                    # Pastikan kondisi cahaya kembali disematkan di UI setelah reset
-                    self.ui["light_cond"] = current_light
+                if self.missed_frames >= 5: self._fail("", wait=True)
             else: 
                 self.missed_frames, face = 0, max(faces, key=lambda f: f.bbox[2] * f.bbox[3])
                 
                 if self.state == ValidationState.IDLE or not self.locked_light_cond:
-                    self.locked_light_cond = current_light
+                    self.locked_light_cond = UIHelper.get_light_condition(frame, face.bbox)
                 
                 l_str = "Normal" if time.time() - self.app_start_time < 2.5 else self.locked_light_cond
                 self.ui.update({"wait": False, "bbox": face.bbox, "light_cond": l_str}) 
                 self._process_face(frame.copy(), UIHelper.enhance_adaptive(frame.copy(), face.bbox, l_str), face, l_str)
-            
             time.sleep(0.01)
 
     def _process_face(self, raw, enhanced, face, l_str):

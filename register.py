@@ -45,28 +45,32 @@ class Helpers:
         return {"left_ear": la, "right_ear": ra, "avg_ear": (la+ra)/2.0}
 
     @staticmethod
-    def get_light_condition(raw_frame, bbox):
-        if not bbox: return "Normal"
-        bx, by, bw, bh = bbox; fh, fw = raw_frame.shape[:2]
-        gray = cv2.cvtColor(raw_frame, cv2.COLOR_BGR2GRAY)
+    def get_light_condition_dynamic(raw, bbox=None):
+        """
+        PERBAIKAN: Menggunakan sistem Ambient Light sama seperti pada main.
+        Membaca kecerahan seluruh lingkungan sekitar agar akurat walau wajah terkena cahaya layar.
+        """
+        fh, fw = raw.shape[:2]
+        gray = cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY)
         
-        x1, y1, x2, y2 = max(0, bx), max(0, by), min(fw, bx + bw), min(fh, by + bh)
-        L = np.mean(gray[y1:y2, x1:x2]) if gray[y1:y2, x1:x2].size > 0 else 100.0
-        oL = np.mean(gray) 
+        # Hitung kecerahan global (lingkungan sekitar)
+        ambient_brightness = np.mean(gray)
         
-        # Jangkauan deteksi background diperluas agar tidak terjebak Auto-Exposure webcam
-        top = gray[max(0, by-100):max(0, by-10), max(0, bx-50):min(fw, bx+bw+50)]
-        left = gray[max(0, by-20):min(fh, by+bh+20), max(0, bx-100):max(0, bx-10)]
-        right = gray[max(0, by-20):min(fh, by+bh+20), min(fw, bx+bw+10):min(fw, bx+bw+100)]
-        
-        max_bg = max(np.mean(top) if top.size else L, np.mean(left) if left.size else L, np.mean(right) if right.size else L)
-        
-        # PERBAIKAN 1: Threshold diturunkan drastis (ke 150) dan selisih (ke 30) untuk melawan Auto-Exposure webcam
-        if (max_bg > 150 and (max_bg - L) > 30) or (oL > 150 and (oL - L) > 30): 
-            return "Backlight"
-        if L < 80 and max_bg < 120: 
-            return "Low Light"
+        if bbox:
+            bx, by, bw, bh = bbox
+            x1, y1, x2, y2 = max(0, bx), max(0, by), min(fw, bx + bw), min(fh, by + bh)
+            face_brightness = np.mean(gray[y1:y2, x1:x2]) if gray[y1:y2, x1:x2].size > 0 else ambient_brightness
             
+            # Deteksi area sekitar kepala untuk mengonfirmasi backlight
+            bg_top = gray[max(0, by-80):max(0, by-5), max(0, bx-30):min(fw, bx+bw+30)]
+            bg_brightness = np.mean(bg_top) if bg_top.size > 0 else ambient_brightness
+            
+            if bg_brightness > 145 and (bg_brightness - face_brightness) > 25:
+                return "Backlight"
+
+        # Evaluasi tingkat cahaya lingkungan secara keseluruhan
+        if ambient_brightness < 65:
+            return "Low Light"
         return "Normal"
 
     @staticmethod
@@ -80,7 +84,7 @@ class Helpers:
         gray = cv2.cvtColor(face_roi, cv2.COLOR_BGR2GRAY)
         brightness = np.mean(gray)
         blur_score = cv2.Laplacian(gray, cv2.CV_64F).var()
-        return (40 < brightness < 210) and (blur_score > 60), brightness, blur_score # Lebih toleran ke webcam
+        return (40 < brightness < 210) and (blur_score > 60), brightness, blur_score 
 
     @staticmethod
     def draw_hud(f, stg, instr, prog, score_txt, status, bbox, col):
@@ -152,16 +156,11 @@ class FaceRegistrationApp:
         
         self.db = FaceDatabase()
         self.cam = CameraStream(config.CAMERA_INDEX, config.FRAME_WIDTH, config.FRAME_HEIGHT).start()
-        
         self.detector = FaceMeshDetector(min_detection_confidence=0.35, min_tracking_confidence=0.35)
-        
         self.liveness, self.model = LivenessManager(), MobileFaceNet()
         
-        # PERBAIKAN 2: Batasi Threshold Anti-Spoofing menjadi max 0.70 di registrasi untuk menoleransi noise webcam
-        spoof_thr = getattr(config, 'ANTI_SPOOFING_THRESHOLD', 0.70)
-        spoof_thr = min(spoof_thr, 0.70) # Meskipun di config.py 0.85, disini akan dipaksa max 0.70
+        spoof_thr = min(getattr(config, 'ANTI_SPOOFING_THRESHOLD', 0.70), 0.70) 
         self.anti_spoof = SilentAntiSpoofing(getattr(config, 'ANTI_SPOOFING_MODEL', "liveness/antispoofing.onnx"), spoof_thr)
-        
         self.matcher = FaceMatcher(0.35) 
         
         try:
@@ -423,7 +422,7 @@ class FaceRegistrationApp:
                 self.missed_frames, face = 0, faces[0]
                 bbox_memory = face.bbox
                 
-                current_light = Helpers.get_light_condition(raw, face.bbox)
+                current_light = Helpers.get_light_condition_dynamic(raw, face.bbox)
                 
                 if self.stage == RegistrationStage.FACEMESH or getattr(self, 'locked_light_cond', None) is None:
                     self.locked_light_cond = current_light
@@ -458,7 +457,6 @@ class FaceRegistrationApp:
                 
                 if not sp_real:
                     self.fake_frames += 1
-                    # PERBAIKAN 3: Toleransi frame palsu dinaikkan ke 8 frame agar tidak langsung menggagalkan pendaftaran karena noise sesaat
                     if self.fake_frames >= 8: 
                         Helpers.draw_hud(display, self.stage, "❌ DETEKSI SPOOFING!", f"Palsu: {sp_score:.2f}", hud_txt, f"{sp_label}", face.bbox, config.COLOR_RED)
                         with self.frame_lock: self.display_frame = display

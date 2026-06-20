@@ -243,13 +243,20 @@ class SmartDoorApp:
             if self.fake_frames >= 8: 
                 lbl = liveness_info.get("label_name", "FOTO/LAYAR").upper()
                 sp_type = "FOTO CETAK" if any(k in lbl for k in ["PAPER", "PRINT", "FOTO"]) else ("LAYAR VIDEO" if any(k in lbl for k in ["SCREEN", "VIDEO", "LAYAR", "PHONE"]) else lbl)
-                self.ui.update({"wait": False, "bbox": face.bbox, "status": f"SPOOF TRIPPED: {sp_type}", "color": config.COLOR_RED, "instr": "Akses Ditolak (Media Palsu)"})
+                
+                self.ui.update({"wait": False, "bbox": face.bbox, "status": f"SPOOF: {sp_type}", "color": config.COLOR_RED, "instr": "Akses Ditolak (Media Palsu)"})
+                
                 if time.time() - self.last_spoof_log_time > 4.0:
                     self.last_spoof_log_time = time.time()
                     print(f"\n⚠️ SECURITY BLOCK: Serangan Terkonfirmasi {sp_type}! | Score Liveness: {raw_liveness_score:.2f} < Target: {as_thr}")
+                    
+                    if hasattr(self.db, 'push_access_log_async'):
+                        spoof_details = [{"tantangan": "Anti-Spoofing", "keterangan": sp_type}]
+                        self.db.push_access_log_async("UNKNOWN", None, "SPOOF_ATTEMPT", round(raw_liveness_score * 100, 2), l_str, spoof_details, 0.0, 0.0)
                 return 
             else:
-                self.ui.update({"wait": False, "bbox": face.bbox, "status": f"MEMINDAI LIVENESS ({self.fake_frames}/8)", "color": config.COLOR_YELLOW, "instr": "Tahan Posisi..."})
+                self.ui.update({"wait": False, "bbox": face.bbox, "status": "MEMINDAI LIVENESS...", "color": config.COLOR_YELLOW, "instr": f"Tahan Posisi ({self.fake_frames}/8)..."})
+                UIHelper.print_inline(f"Memindai Liveness [{self.fake_frames}/8] | Dinamis Score: {raw_liveness_score:.2f} (Target: {as_thr})")
                 return
         else:
             self.fake_frames = 0 

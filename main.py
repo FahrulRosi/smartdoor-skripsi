@@ -231,15 +231,16 @@ class SmartDoorApp:
         as_frame = raw.copy() 
 
         liveness_info = self.anti_spoof.is_real(as_frame, as_bbox)
-        
-        raw_liveness_score = float(liveness_info.get("score_real", liveness_info.get("score", 0.0)))
+
+        model_confidence = float(liveness_info.get("score", 0.0))
         is_model_real = liveness_info.get("real", True)
+        model_label = liveness_info.get("label_name", "REAL").upper()
 
         if l_str == "Normal": as_thr = 0.88
         elif l_str == "Backlight": as_thr = 0.85
         else: as_thr = 0.85  
-        
-        is_actually_real = (raw_liveness_score >= as_thr) and is_model_real
+
+        is_actually_real = is_model_real and (model_confidence >= as_thr)
         
         if not is_actually_real:
             if self.fake_frames == 0:
@@ -247,28 +248,32 @@ class SmartDoorApp:
                 self.spoof_hist = []
 
             self.fake_frames += 1
-            self.spoof_hist.append(raw_liveness_score)
+            self.spoof_hist.append(model_confidence)
             
             current_avg_score = sum(self.spoof_hist) / len(self.spoof_hist)
 
             if self.fake_frames >= 8: 
                 latency_ms = (time.time() - self.spoof_start_time) * 1000
-                
-                lbl = liveness_info.get("label_name", "FOTO/LAYAR").upper()
-                sp_type = "FOTO CETAK" if any(k in lbl for k in ["PAPER", "PRINT", "FOTO"]) else ("LAYAR VIDEO" if any(k in lbl for k in ["SCREEN", "VIDEO", "LAYAR", "PHONE"]) else lbl)
+
+                sp_type = "FOTO CETAK" if any(k in model_label for k in ["PAPER", "PRINT", "FOTO"]) else ("LAYAR VIDEO" if any(k in model_label for k in ["SCREEN", "VIDEO", "LAYAR", "PHONE"]) else model_label)
+
+                if is_model_real and model_confidence < as_thr:
+                    sp_type = "TIDAK YAKIN (SKOR RENDAH)"
                 
                 self.ui.update({"wait": False, "bbox": face.bbox, "status": f"SPOOF: {sp_type}", "color": config.COLOR_RED, "instr": "Akses Ditolak (Media Palsu)"})
                 
                 if time.time() - self.last_spoof_log_time > 4.0:
                     self.last_spoof_log_time = time.time()
-                    
-                    # LOG TERMINAL DIPERBAIKI (Teks dinamis menyesuaikan alasan terblokir)
-                    if current_avg_score < as_thr:
-                        print(f"\n⚠️ SECURITY BLOCK: Serangan Terkonfirmasi {sp_type}! | Avg Liveness Score: {current_avg_score:.4f} < Target {as_thr} (Low Score) | Latensi: {latency_ms:.0f} ms")
+
+                    print(f"\n{'='*60}")
+                    if is_model_real:
+                        print(f"⚠️ SECURITY BLOCK: Ditolak karena Skor Rendah!")
+                        print(f"   Alasan: AI Confidence {current_avg_score:.4f} < Threshold {as_thr}")
                     else:
-                        print(f"\n⚠️ SECURITY BLOCK: Serangan Terkonfirmasi {sp_type}! | Avg Liveness Score: {current_avg_score:.4f} >= Target {as_thr} (Blocked by Model Flag) | Latensi: {latency_ms:.0f} ms")
-                    
-                    # DATABASE LOG DIPERBAIKI (Tidak dikali 100, format raw decimal)
+                        print(f"⚠️ SECURITY BLOCK: Serangan Terkonfirmasi {sp_type}!")
+                        print(f"   Alasan: Terblokir oleh Label Model (AI Confidence {(current_avg_score*100):.1f}% Yakin benda tersebut palsu)")
+                    print(f"   Latensi Deteksi: {latency_ms:.0f} ms\n{'='*60}")
+
                     if hasattr(self.db, 'log_spoofing_async'):
                         self.db.log_spoofing_async(
                             score_real=round(current_avg_score, 4), 
@@ -280,7 +285,7 @@ class SmartDoorApp:
                 return 
             else:
                 self.ui.update({"wait": False, "bbox": face.bbox, "status": "MEMINDAI LIVENESS...", "color": config.COLOR_YELLOW, "instr": f"Tahan Posisi ({self.fake_frames}/8)..."})
-                UIHelper.print_inline(f"Memindai Liveness [{self.fake_frames}/8] | Frame Score: {raw_liveness_score:.4f} | Rata-rata: {current_avg_score:.4f}")
+                print(f" ⏳ Memindai Liveness [{self.fake_frames}/8] | Prediksi Model: {model_label} | AI Confidence: {model_confidence:.4f}")
                 return
         else:
             self.fake_frames = 0 

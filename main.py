@@ -163,10 +163,10 @@ class SmartDoorApp:
         return self.pose_hold >= 3, max(0.0, float(raw_val)), tgt, salah
 
     def _check_identity(self, raw, enhanced, face, l_str):
-        if l_str == "Normal": d_thr = 0.60
-        elif l_str == "Backlight": d_thr = 0.58
-        elif l_str == "Low Light": d_thr = 0.55
-        else: d_thr = 0.60
+        if l_str == "Normal": d_thr = 0.70
+        elif l_str == "Backlight": d_thr = 0.67
+        elif l_str == "Low Light": d_thr = 0.65
+        else: d_thr = 0.70
 
         if not self.known_faces_2d: return "TIDAK DIKENAL", 0.0, d_thr, 0.0, False
         fh, fw = enhanced.shape[:2]; x, y, w, h = face.bbox

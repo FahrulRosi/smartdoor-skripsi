@@ -261,20 +261,26 @@ class SmartDoorApp:
                 
                 if time.time() - self.last_spoof_log_time > 4.0:
                     self.last_spoof_log_time = time.time()
-                    print(f"\n⚠️ SECURITY BLOCK: Serangan Terkonfirmasi {sp_type}! | Avg Liveness Score: {current_avg_score:.3f} < Target: {as_thr} | Latensi: {latency_ms:.0f} ms")
-    
+                    
+                    # LOG TERMINAL DIPERBAIKI (Teks dinamis menyesuaikan alasan terblokir)
+                    if current_avg_score < as_thr:
+                        print(f"\n⚠️ SECURITY BLOCK: Serangan Terkonfirmasi {sp_type}! | Avg Liveness Score: {current_avg_score:.4f} < Target {as_thr} (Low Score) | Latensi: {latency_ms:.0f} ms")
+                    else:
+                        print(f"\n⚠️ SECURITY BLOCK: Serangan Terkonfirmasi {sp_type}! | Avg Liveness Score: {current_avg_score:.4f} >= Target {as_thr} (Blocked by Model Flag) | Latensi: {latency_ms:.0f} ms")
+                    
+                    # DATABASE LOG DIPERBAIKI (Tidak dikali 100, format raw decimal)
                     if hasattr(self.db, 'log_spoofing_async'):
                         self.db.log_spoofing_async(
-                            score_real=round(current_avg_score * 100, 2), 
-                            score_photo=0.0,  
-                            score_video=0.0,  
+                            score_real=round(current_avg_score, 4), 
+                            score_photo=0.0, 
+                            score_video=0.0, 
                             spoof_label=sp_type,
                             spoof_latency_ms=round(latency_ms, 2)
                         )
                 return 
             else:
                 self.ui.update({"wait": False, "bbox": face.bbox, "status": "MEMINDAI LIVENESS...", "color": config.COLOR_YELLOW, "instr": f"Tahan Posisi ({self.fake_frames}/8)..."})
-                UIHelper.print_inline(f"Memindai Liveness [{self.fake_frames}/8] | Frame Score: {raw_liveness_score:.3f} | Rata-rata: {current_avg_score:.3f}")
+                UIHelper.print_inline(f"Memindai Liveness [{self.fake_frames}/8] | Frame Score: {raw_liveness_score:.4f} | Rata-rata: {current_avg_score:.4f}")
                 return
         else:
             self.fake_frames = 0 

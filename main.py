@@ -140,7 +140,6 @@ class SmartDoorApp:
             return self.blink_passed, 1.0, 1.0, False  
 
         est = self.pose_estimator.estimate(face, self.detector)
-
         dy = est.get("yaw", 0) - self.reg_pose[0]
         dp = est.get("pitch", 0) - self.reg_pose[1]
         dr = est.get("roll", 0) - self.reg_pose[2]
@@ -164,10 +163,10 @@ class SmartDoorApp:
         return self.pose_hold >= 3, max(0.0, float(raw_val)), tgt, salah
 
     def _check_identity(self, raw, enhanced, face, l_str):
-        if l_str == "Normal": d_thr = 0.70
-        elif l_str == "Backlight": d_thr = 0.67
-        elif l_str == "Low Light": d_thr = 0.65
-        else: d_thr = 0.70
+        if l_str == "Normal": d_thr = 0.60
+        elif l_str == "Backlight": d_thr = 0.58
+        elif l_str == "Low Light": d_thr = 0.55
+        else: d_thr = 0.60
 
         if not self.known_faces_2d: return "TIDAK DIKENAL", 0.0, d_thr, 0.0, False
         fh, fw = enhanced.shape[:2]; x, y, w, h = face.bbox
@@ -229,13 +228,15 @@ class SmartDoorApp:
         as_frame = raw.copy() 
 
         liveness_info = self.anti_spoof.is_real(as_frame, as_bbox)
-        raw_liveness_score = liveness_info.get("score", 0.0)
-
-        if l_str == "Normal": as_thr = 0.82
-        elif l_str == "Backlight": as_thr = 0.75
-        else: as_thr = 0.70  
         
-        is_actually_real = raw_liveness_score >= as_thr
+        raw_liveness_score = float(liveness_info.get("score_real", liveness_info.get("score", 0.0)))
+        is_model_real = liveness_info.get("real", True)
+
+        if l_str == "Normal": as_thr = 0.88
+        elif l_str == "Backlight": as_thr = 0.85
+        else: as_thr = 0.85  
+        
+        is_actually_real = (raw_liveness_score >= as_thr) and is_model_real
         
         if not is_actually_real:
             self.fake_frames += 1
@@ -276,11 +277,9 @@ class SmartDoorApp:
             self.face_val_latency = (time.time() - t_val) * 1000 
             UIHelper.log(f"\nTerverifikasi: {disp_name} | Cosine: {sm_score:.3f} (Target Thr: {d_thr:.2f}) | Cahaya: {l_str}", "SUCCESS")
             
-            # LANGSUNG LEWATI KALIBRASI AWAL
             self.last_name, self.match_score, self.final_display_acc, self.state, self.step_idx, self.wait_center = b_name, sm_score, f_acc, ValidationState.CHALLENGE, 0, False
             self.seq, self.challenge_start_time = [random.choice(["KANAN", "KIRI", "ATAS", "BAWAH", "MIRING_KANAN", "MIRING_KIRI"]), "BLINK"], time.time()
             
-            # "KALIBRASI SILUMAN": Kunci posisi sudut wajah saat ini sebagai titik 0 (netral)
             curr_pose = self.pose_estimator.estimate(face, self.detector)
             self.reg_pose = [curr_pose.get("yaw", 0.0), curr_pose.get("pitch", 0.0), curr_pose.get("roll", 0.0)]
 

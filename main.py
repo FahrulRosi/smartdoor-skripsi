@@ -127,6 +127,10 @@ class SmartDoorApp:
         self.wait_center, self.blink_passed, self.blink_hold, self.ear_hist, self.print_counter, self.access_details = False, False, 0, [], 0, []
         self.fake_frames = self.recog_frames = 0  
         self.locked_light_cond = "Normal" 
+        
+        # Penambahan Histori & Waktu Spoofing
+        self.spoof_hist = []
+        self.spoof_start_time = 0.0
 
     def _fail(self, status, color=config.COLOR_RED, instr="", wait=False):
         self._reset_state(); self.ui.update({"wait": wait, "bbox": None if wait else self.ui.get("bbox"), "status": status, "color": color, "instr": instr})
@@ -239,8 +243,18 @@ class SmartDoorApp:
         is_actually_real = (raw_liveness_score >= as_thr) and is_model_real
         
         if not is_actually_real:
+            if self.fake_frames == 0:
+                self.spoof_start_time = time.time()
+                self.spoof_hist = []
+
             self.fake_frames += 1
+            self.spoof_hist.append(raw_liveness_score)
+
+            current_avg_score = sum(self.spoof_hist) / len(self.spoof_hist)
+
             if self.fake_frames >= 8: 
+                latency_ms = (time.time() - self.spoof_start_time) * 1000
+                
                 lbl = liveness_info.get("label_name", "FOTO/LAYAR").upper()
                 sp_type = "FOTO CETAK" if any(k in lbl for k in ["PAPER", "PRINT", "FOTO"]) else ("LAYAR VIDEO" if any(k in lbl for k in ["SCREEN", "VIDEO", "LAYAR", "PHONE"]) else lbl)
                 
@@ -248,21 +262,23 @@ class SmartDoorApp:
                 
                 if time.time() - self.last_spoof_log_time > 4.0:
                     self.last_spoof_log_time = time.time()
-                    print(f"\n⚠️ SECURITY BLOCK: Serangan Terkonfirmasi {sp_type}! | Score Liveness: {raw_liveness_score:.2f} < Target: {as_thr}")
+                    print(f"\n⚠️ SECURITY BLOCK: Serangan Terkonfirmasi {sp_type}! | Avg Liveness Score: {current_avg_score:.3f} < Target: {as_thr} | Latensi: {latency_ms:.0f} ms")
+                    
                     if hasattr(self.db, 'push_spoofing_log_async'):
                         self.db.push_spoofing_log_async(
-                            name="UNKNOWN", 
-                            spoof_type=sp_type, 
-                            score=round(raw_liveness_score * 100, 2), 
-                            light_cond=l_str
+                            spoof_score=round(current_avg_score * 100, 2), 
+                            spoof_type=sp_type,
+                            spoof_latency_ms=round(latency_ms, 2)
                         )
                 return 
             else:
                 self.ui.update({"wait": False, "bbox": face.bbox, "status": "MEMINDAI LIVENESS...", "color": config.COLOR_YELLOW, "instr": f"Tahan Posisi ({self.fake_frames}/8)..."})
-                UIHelper.print_inline(f"Memindai Liveness [{self.fake_frames}/8] | Dinamis Score: {raw_liveness_score:.2f} (Target: {as_thr})")
+                # Menampilkan skor per-frame dan perubahan rata-rata secara langsung di inline terminal
+                UIHelper.print_inline(f"Memindai Liveness [{self.fake_frames}/8] | Frame Score: {raw_liveness_score:.3f} | Rata-rata: {current_avg_score:.3f}")
                 return
         else:
             self.fake_frames = 0 
+            self.spoof_hist = []
 
         if self.state == ValidationState.RECOGNIZING:
             t_val = time.time()

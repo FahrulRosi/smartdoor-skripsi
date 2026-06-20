@@ -128,7 +128,6 @@ class SmartDoorApp:
         self.fake_frames = self.recog_frames = 0  
         self.locked_light_cond = "Normal" 
         
-        # Penambahan Histori & Waktu Spoofing
         self.spoof_hist = []
         self.spoof_start_time = 0.0
 
@@ -249,7 +248,7 @@ class SmartDoorApp:
 
             self.fake_frames += 1
             self.spoof_hist.append(raw_liveness_score)
-
+            
             current_avg_score = sum(self.spoof_hist) / len(self.spoof_hist)
 
             if self.fake_frames >= 8: 
@@ -263,17 +262,18 @@ class SmartDoorApp:
                 if time.time() - self.last_spoof_log_time > 4.0:
                     self.last_spoof_log_time = time.time()
                     print(f"\n⚠️ SECURITY BLOCK: Serangan Terkonfirmasi {sp_type}! | Avg Liveness Score: {current_avg_score:.3f} < Target: {as_thr} | Latensi: {latency_ms:.0f} ms")
-                    
-                    if hasattr(self.db, 'push_spoofing_log_async'):
-                        self.db.push_spoofing_log_async(
-                            spoof_score=round(current_avg_score * 100, 2), 
-                            spoof_type=sp_type,
+    
+                    if hasattr(self.db, 'log_spoofing_async'):
+                        self.db.log_spoofing_async(
+                            score_real=round(current_avg_score * 100, 2), 
+                            score_photo=0.0,  
+                            score_video=0.0,  
+                            spoof_label=sp_type,
                             spoof_latency_ms=round(latency_ms, 2)
                         )
                 return 
             else:
                 self.ui.update({"wait": False, "bbox": face.bbox, "status": "MEMINDAI LIVENESS...", "color": config.COLOR_YELLOW, "instr": f"Tahan Posisi ({self.fake_frames}/8)..."})
-                # Menampilkan skor per-frame dan perubahan rata-rata secara langsung di inline terminal
                 UIHelper.print_inline(f"Memindai Liveness [{self.fake_frames}/8] | Frame Score: {raw_liveness_score:.3f} | Rata-rata: {current_avg_score:.3f}")
                 return
         else:

@@ -249,10 +249,13 @@ class SmartDoorApp:
                 if time.time() - self.last_spoof_log_time > 4.0:
                     self.last_spoof_log_time = time.time()
                     print(f"\n⚠️ SECURITY BLOCK: Serangan Terkonfirmasi {sp_type}! | Score Liveness: {raw_liveness_score:.2f} < Target: {as_thr}")
-                    
-                    if hasattr(self.db, 'push_access_log_async'):
-                        spoof_details = [{"tantangan": "Anti-Spoofing", "keterangan": sp_type}]
-                        self.db.push_access_log_async("UNKNOWN", None, "SPOOF_ATTEMPT", round(raw_liveness_score * 100, 2), l_str, spoof_details, 0.0, 0.0)
+                    if hasattr(self.db, 'push_spoofing_log_async'):
+                        self.db.push_spoofing_log_async(
+                            name="UNKNOWN", 
+                            spoof_type=sp_type, 
+                            score=round(raw_liveness_score * 100, 2), 
+                            light_cond=l_str
+                        )
                 return 
             else:
                 self.ui.update({"wait": False, "bbox": face.bbox, "status": "MEMINDAI LIVENESS...", "color": config.COLOR_YELLOW, "instr": f"Tahan Posisi ({self.fake_frames}/8)..."})

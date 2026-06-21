@@ -166,6 +166,7 @@ class SmartDoorApp:
         return self.pose_hold >= 3, max(0.0, float(raw_val)), tgt, salah
 
     def _check_identity(self, raw, enhanced, face, l_str):
+        # DIKEMBALIKAN KE THRESHOLD KETAT (0.70)
         if l_str == "Normal": d_thr = 0.70
         elif l_str == "Backlight": d_thr = 0.67
         elif l_str == "Low Light": d_thr = 0.65
@@ -219,7 +220,7 @@ class SmartDoorApp:
         if self.ui.get("status") in ("DIBUKA MANUAL", "STARTING"): return
         cx, cy = face.bbox[0] + face.bbox[2]//2, face.bbox[1] + face.bbox[3]//2
         
-        if self.state.value > 1 and self.prev_center and np.hypot(cx-self.prev_center[0], cy-self.prev_center[1]) > max(face.bbox[2:])*1.2: 
+        if self.state.value > 1 and self.prev_center and np.hypot(cx-self.prev_center[0], cy-self.prev_center[1]) > max(face.bbox[2:])*2.5: 
             return self._fail("WAJAH BERGANTI", instr="Mulai Ulang")
         self.prev_center = (cx, cy) 
         
@@ -231,7 +232,7 @@ class SmartDoorApp:
         as_frame = raw.copy() 
 
         liveness_info = self.anti_spoof.is_real(as_frame, as_bbox)
-
+        
         model_confidence = float(liveness_info.get("score", 0.0))
         is_model_real = liveness_info.get("real", True)
         model_label = liveness_info.get("label_name", "REAL").upper()
@@ -239,7 +240,7 @@ class SmartDoorApp:
         if l_str == "Normal": as_thr = 0.88
         elif l_str == "Backlight": as_thr = 0.85
         else: as_thr = 0.85  
-
+        
         is_actually_real = is_model_real and (model_confidence >= as_thr)
         
         if not is_actually_real:
@@ -254,17 +255,14 @@ class SmartDoorApp:
 
             if self.fake_frames >= 8: 
                 latency_ms = (time.time() - self.spoof_start_time) * 1000
-
                 sp_type = "FOTO CETAK" if any(k in model_label for k in ["PAPER", "PRINT", "FOTO"]) else ("LAYAR VIDEO" if any(k in model_label for k in ["SCREEN", "VIDEO", "LAYAR", "PHONE"]) else model_label)
-
-                if is_model_real and model_confidence < as_thr:
-                    sp_type = "TIDAK YAKIN (SKOR RENDAH)"
+                if is_model_real and model_confidence < as_thr: sp_type = "TIDAK YAKIN (SKOR RENDAH)"
                 
                 self.ui.update({"wait": False, "bbox": face.bbox, "status": f"SPOOF: {sp_type}", "color": config.COLOR_RED, "instr": "Akses Ditolak (Media Palsu)"})
                 
                 if time.time() - self.last_spoof_log_time > 4.0:
                     self.last_spoof_log_time = time.time()
-
+                    
                     print(f"\n{'='*60}")
                     if is_model_real:
                         print(f"⚠️ SECURITY BLOCK: Ditolak karena Skor Rendah!")
@@ -273,7 +271,7 @@ class SmartDoorApp:
                         print(f"⚠️ SECURITY BLOCK: Serangan Terkonfirmasi {sp_type}!")
                         print(f"   Alasan: Terblokir oleh Label Model (AI Confidence {(current_avg_score*100):.1f}% Yakin benda tersebut palsu)")
                     print(f"   Latensi Deteksi: {latency_ms:.0f} ms\n{'='*60}")
-
+                    
                     if hasattr(self.db, 'log_spoofing_async'):
                         self.db.log_spoofing_async(
                             score_real=round(current_avg_score, 4), 
@@ -317,6 +315,7 @@ class SmartDoorApp:
             self.last_name, self.match_score, self.final_display_acc, self.state, self.step_idx, self.wait_center = b_name, sm_score, f_acc, ValidationState.CHALLENGE, 0, False
             self.seq, self.challenge_start_time = [random.choice(["KANAN", "KIRI", "ATAS", "BAWAH", "MIRING_KANAN", "MIRING_KIRI"]), "BLINK"], time.time()
             
+            # Mendapatkan postur tegak sebagai referensi gerakan selanjutnya
             curr_pose = self.pose_estimator.estimate(face, self.detector)
             self.reg_pose = [curr_pose.get("yaw", 0.0), curr_pose.get("pitch", 0.0), curr_pose.get("roll", 0.0)]
 

@@ -151,22 +151,46 @@ class SmartDoorApp:
         tp = getattr(config, 'CHALLENGE_PITCH', 12.0)
         tr = getattr(config, 'CHALLENGE_ROLL', 12.0)
         
+        passed = False
         salah = False
-        
-        raw_val, tgt, passed = {
-            "KANAN": (abs(dy), ty, abs(dy) > ty), 
-            "KIRI": (abs(dy), ty, abs(dy) > ty), 
-            "ATAS": (abs(dp), tp, abs(dp) > tp), 
-            "BAWAH": (abs(dp), tp, abs(dp) > tp), 
-            "MIRING_KANAN": (abs(dr), tr, abs(dr) > tr), 
-            "MIRING_KIRI": (abs(dr), tr, abs(dr) > tr)
-        }.get(action, (0.0, 1.0, False))
-        
+        raw_val = 0.0
+        tgt = 1.0
+
+        # --- PERBAIKAN: Pengecekan arah mutlak (Sign-sensitive) ---
+        if action == "KANAN":
+            tgt, raw_val = ty, abs(dy)
+            passed = dy < -ty         # Target tercapai jika kepala bergerak ke Kanan
+            if dy > ty: salah = True  # Akan GAGAL jika kepala malah bergerak ke Kiri melebihi threshold
+            
+        elif action == "KIRI":
+            tgt, raw_val = ty, abs(dy)
+            passed = dy > ty          # Target tercapai jika kepala bergerak ke Kiri
+            if dy < -ty: salah = True # Akan GAGAL jika kepala malah bergerak ke Kanan
+            
+        elif action == "ATAS":
+            tgt, raw_val = tp, abs(dp)
+            passed = dp < -tp
+            if dp > tp: salah = True
+            
+        elif action == "BAWAH":
+            tgt, raw_val = tp, abs(dp)
+            passed = dp > tp
+            if dp < -tp: salah = True
+            
+        elif action == "MIRING_KANAN":
+            tgt, raw_val = tr, abs(dr)
+            passed = dr < -tr
+            if dr > tr: salah = True
+            
+        elif action == "MIRING_KIRI":
+            tgt, raw_val = tr, abs(dr)
+            passed = dr > tr
+            if dr < -tr: salah = True
+
         self.pose_hold = self.pose_hold + 1 if passed else 0
         return self.pose_hold >= 3, max(0.0, float(raw_val)), tgt, salah
 
     def _check_identity(self, raw, enhanced, face, l_str):
-        # TETAP MEMPERTAHANKAN THRESHOLD 0.70 SESUAI PERMINTAAN
         if l_str == "Normal": d_thr = 0.70
         elif l_str == "Backlight": d_thr = 0.67
         elif l_str == "Low Light": d_thr = 0.65
@@ -243,9 +267,6 @@ class SmartDoorApp:
         
         is_actually_real = is_model_real and (model_confidence >= as_thr)
         
-        # --- PERBAIKAN KRUSIAL LIVENESS ---
-        # Bypass (nonaktifkan) blokir anti-spoofing KHUSUS saat user sedang ditantang bergerak.
-        # Active challenge (gerak kepala) adalah bukti liveness terkuat.
         if self.state == ValidationState.CHALLENGE:
             is_actually_real = True
             self.fake_frames = 0
@@ -332,8 +353,6 @@ class SmartDoorApp:
             passed, val, tgt, salah = self._check_action(act, face)
             
             if salah: return self._fail("GERAKAN SALAH", config.COLOR_RED, "Akses Ditolak", wait=True)
-            
-            # Waktu challenge diperpanjang ke 12 detik supaya tidak mudah ter-reset 
             if (time.time() - self.challenge_start_time) > 12.0: return self._fail("WAKTU HABIS", config.COLOR_RED, "Mulai Ulang", wait=True)
             
             if passed:

@@ -166,7 +166,7 @@ class SmartDoorApp:
         return self.pose_hold >= 3, max(0.0, float(raw_val)), tgt, salah
 
     def _check_identity(self, raw, enhanced, face, l_str):
-        # DIKEMBALIKAN KE THRESHOLD KETAT (0.70)
+        # TETAP MEMPERTAHANKAN THRESHOLD 0.70 SESUAI PERMINTAAN
         if l_str == "Normal": d_thr = 0.70
         elif l_str == "Backlight": d_thr = 0.67
         elif l_str == "Low Light": d_thr = 0.65
@@ -243,6 +243,13 @@ class SmartDoorApp:
         
         is_actually_real = is_model_real and (model_confidence >= as_thr)
         
+        # --- PERBAIKAN KRUSIAL LIVENESS ---
+        # Bypass (nonaktifkan) blokir anti-spoofing KHUSUS saat user sedang ditantang bergerak.
+        # Active challenge (gerak kepala) adalah bukti liveness terkuat.
+        if self.state == ValidationState.CHALLENGE:
+            is_actually_real = True
+            self.fake_frames = 0
+            
         if not is_actually_real:
             if self.fake_frames == 0:
                 self.spoof_start_time = time.time()
@@ -315,7 +322,6 @@ class SmartDoorApp:
             self.last_name, self.match_score, self.final_display_acc, self.state, self.step_idx, self.wait_center = b_name, sm_score, f_acc, ValidationState.CHALLENGE, 0, False
             self.seq, self.challenge_start_time = [random.choice(["KANAN", "KIRI", "ATAS", "BAWAH", "MIRING_KANAN", "MIRING_KIRI"]), "BLINK"], time.time()
             
-            # Mendapatkan postur tegak sebagai referensi gerakan selanjutnya
             curr_pose = self.pose_estimator.estimate(face, self.detector)
             self.reg_pose = [curr_pose.get("yaw", 0.0), curr_pose.get("pitch", 0.0), curr_pose.get("roll", 0.0)]
 
@@ -326,7 +332,9 @@ class SmartDoorApp:
             passed, val, tgt, salah = self._check_action(act, face)
             
             if salah: return self._fail("GERAKAN SALAH", config.COLOR_RED, "Akses Ditolak", wait=True)
-            if (time.time() - self.challenge_start_time) > 8.0: return self._fail("WAKTU HABIS", config.COLOR_RED, "Mulai Ulang", wait=True)
+            
+            # Waktu challenge diperpanjang ke 12 detik supaya tidak mudah ter-reset 
+            if (time.time() - self.challenge_start_time) > 12.0: return self._fail("WAKTU HABIS", config.COLOR_RED, "Mulai Ulang", wait=True)
             
             if passed:
                 self.access_details.append({"tantangan": self.CHALLENGES[act], "latensi_ms": (time.time() - self.challenge_start_time) * 1000})

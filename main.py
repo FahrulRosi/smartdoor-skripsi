@@ -52,11 +52,12 @@ class UIHelper:
     def analyze_spoof_type(raw_frame, bbox):
         """
         VERSI OPTIMASI: Menghapus kalkulasi FFT (Fourier) dan Canny Edge yang berat.
-        Menggunakan analisis histogram HSV ringan agar latensi tidak melonjak.
+        Menggunakan analisis histogram HSV ringan agar latensi tidak melonjak di Raspberry Pi.
         """
         fh, fw = raw_frame.shape[:2]
         bx, by, bw, bh = bbox
         
+        # Memperkecil padding crop dari 0.40 menjadi 0.15 agar ukuran matriks gambar lebih hemat CPU
         pad_w, pad_h = int(bw * 0.15), int(bh * 0.15)
         x1, y1 = max(0, bx - pad_w), max(0, by - pad_h)
         x2, y2 = min(fw, bx + bw + pad_w), min(fh, by + bh + pad_h)
@@ -68,6 +69,7 @@ class UIHelper:
         avg_s = np.mean(hsv[:, :, 1])
         avg_v = np.mean(hsv[:, :, 2])
         
+        # Analisis kilat perbedaan saturasi layar HP/Monitor vs Kertas Cetak
         if avg_v > 135 and avg_s < 110: 
             return "LAYAR VIDEO"
         return "FOTO CETAK"
@@ -214,7 +216,7 @@ class SmartDoorApp:
         if self.ui.get("status") in ("DIBUKA MANUAL", "STARTING"): return
         cx, cy = face.bbox[0] + face.bbox[2]//2, face.bbox[1] + face.bbox[3]//2
         
-        if self.state.value > 1 and self.prev_center and np.hypot(cx-self.prev_center[0], cy-self.prev_center[1]) > max(face.bbox[2:])*2.5: return self._fail("WAH BERGANTI", instr="Mulai Ulang")
+        if self.state.value > 1 and self.prev_center and np.hypot(cx-self.prev_center[0], cy-self.prev_center[1]) > max(face.bbox[2:])*2.5: return self._fail("WAJAH BERGANTI", instr="Mulai Ulang")
         self.prev_center = (cx, cy) 
         if face.bbox[3] > int(config.FRAME_HEIGHT * 0.70): return self._fail("TERLALU DEKAT", config.COLOR_YELLOW, "Mundur")
         if self.state == ValidationState.IDLE: self.state, self.auth_start = ValidationState.RECOGNIZING, time.time(); return
@@ -231,17 +233,18 @@ class SmartDoorApp:
             self.fake_frames += 1; self.spoof_hist.append(m_conf)
             avg_score = sum(self.spoof_hist) / len(self.spoof_hist)
 
-            # OPTIMASI: Syarat block diturunkan menjadi berturut-turut >= 2 frame agar keputusan tolak instan
             if self.fake_frames >= 2: 
                 lat_ms = (time.time() - self.spoof_start_time) * 1000
                 sp_type = "TIDAK YAKIN (SKOR RENDAH)" if is_m_real else UIHelper.analyze_spoof_type(raw, face.bbox)
                 
-                self.ui.update({"wait": False, "bbox": face.bbox, "status": f"SPOOF: {sp_type}", "color": config.COLOR_RED, "instr": "Akses Ditolak"})
                 if time.time() - self.last_spoof_log_time > 4.0:
                     self.last_spoof_log_time = time.time()
                     print(f"\n{'='*60}\n⚠️ SECURITY BLOCK: {'Ditolak Skor Rendah' if is_m_real else 'Serangan '+sp_type}\n   AI Confidence: {avg_score:.4f} | Latensi: {lat_ms:.0f} ms\n{'='*60}")
                     if hasattr(self.db, 'log_spoofing_async'): self.db.log_spoofing_async(round(avg_score, 4), 0.0, 0.0, sp_type, round(lat_ms, 2))
-                return 
+                
+                # INTEGRASI RESET: Langsung lempar ke _fail untuk freeze sistem 2 detik dan set fake_frames kembali ke 0
+                return self._fail(f"SPOOF: {sp_type}", config.COLOR_RED, "Akses Ditolak", wait=False)
+                
             self.ui.update({"wait": False, "bbox": face.bbox, "status": "MEMINDAI LIVENESS...", "color": config.COLOR_YELLOW, "instr": f"Tahan Posisi ({self.fake_frames}/2)..."}); return
         else:
             self.fake_frames, self.spoof_hist = 0, []

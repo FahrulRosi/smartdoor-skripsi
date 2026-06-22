@@ -310,11 +310,20 @@ class FaceRegistrationApp:
 
         best_crop = self.model.crop_face(frame, face.bbox)
         if best_crop is not None and best_crop.size > 0:
-            emb_final = self.model.get_embedding(best_crop)
-            if emb_final is None: return
-            emb_arr = np.array(emb_final).flatten()
-            norm_emb = emb_arr / (np.linalg.norm(emb_arr) + 1e-6)
-            self.extraction_embeddings.append(norm_emb)
+            emb_normal = self.model.get_embedding(best_crop)
+
+            img_lowlight = cv2.convertScaleAbs(best_crop, alpha=0.8, beta=-50)
+            emb_lowlight = self.model.get_embedding(img_lowlight)
+
+            img_backlight = cv2.convertScaleAbs(best_crop, alpha=0.5, beta=-90)
+            emb_backlight = self.model.get_embedding(img_backlight)
+            
+            if emb_normal is not None and emb_lowlight is not None and emb_backlight is not None:
+                self.extraction_embeddings.append({
+                    "normal": np.array(emb_normal).flatten(),
+                    "lowlight": np.array(emb_lowlight).flatten(),
+                    "backlight": np.array(emb_backlight).flatten()
+                })
 
         total_frames_needed = 5
         collected = len(self.extraction_embeddings)
@@ -325,9 +334,19 @@ class FaceRegistrationApp:
             with self.frame_lock: self.display_frame = display.copy()
             return
 
-        averaged_emb = np.mean(self.extraction_embeddings, axis=0)
-        final_emb_vector = (averaged_emb / (np.linalg.norm(averaged_emb) + 1e-6)).tolist()
-        single_master_emb = [final_emb_vector]
+        norm_list = [e["normal"] for e in self.extraction_embeddings]
+        low_list = [e["lowlight"] for e in self.extraction_embeddings]
+        back_list = [e["backlight"] for e in self.extraction_embeddings]
+
+        avg_norm = np.mean(norm_list, axis=0)
+        avg_low = np.mean(low_list, axis=0)
+        avg_back = np.mean(back_list, axis=0)
+
+        vec_norm = (avg_norm / (np.linalg.norm(avg_norm) + 1e-6)).tolist()
+        vec_low = (avg_low / (np.linalg.norm(avg_low) + 1e-6)).tolist()
+        vec_back = (avg_back / (np.linalg.norm(avg_back) + 1e-6)).tolist()
+
+        final_emb_vectors = [vec_norm, vec_low, vec_back]
 
         light_cond = getattr(self, 'locked_light_cond', "Normal")
         latensi_respon_subjek = round(sum(self.individual_latencies.values()), 2)
@@ -340,25 +359,48 @@ class FaceRegistrationApp:
         best_sim_score = 0.0
         
         all_faces_raw = self.db.load_all_faces()
+        existing_user_id = self.user_id
+        single_master_emb = final_emb_vectors
+
         if all_faces_raw:
-            for name, data in all_faces_raw.items():
-                if isinstance(data, dict) and 'embedding' in data:
-                    emb_list = data['embedding']
-                    if isinstance(emb_list, list) and len(emb_list) > 0:
-                        if not isinstance(emb_list[0], (list, np.ndarray)): emb_list = [emb_list]
-                        for q_emb in single_master_emb:
-                            q_vec = np.array(q_emb, dtype=np.float32)
-                            q_vec = q_vec / (np.linalg.norm(q_vec) + 1e-6)
-                            for db_emb in emb_list:
-                                db_vec = np.array(db_emb, dtype=np.float32)
-                                db_vec = db_vec / (np.linalg.norm(db_vec) + 1e-6)
-                                sim = np.dot(q_vec, db_vec)
-                                if sim > best_sim_score:
-                                    best_sim_score = sim
-                                    duplicate_name = name.split(" - ", 1)[-1]
-                                if sim >= anti_dup_thr: is_duplicate = True; break
-                            if is_duplicate: break
-                if is_duplicate: break
+            user_exists = False
+            for db_key, data in all_faces_raw.items():
+                db_name = db_key.split(" - ", 1)[-1] if " - " in db_key else db_key
+                
+                if db_name.lower() == self.name.lower():
+                    user_exists = True
+                    if 'user_id' in data: existing_user_id = data['user_id']
+
+                    if 'embedding' in data:
+                        emb_val = data['embedding']
+                        if isinstance(emb_val, list) and len(emb_val) > 0 and isinstance(emb_val[0], list):
+                            existing_embeddings = emb_val
+                        else:
+                            existing_embeddings = [emb_val] if emb_val else []
+
+                        single_master_emb = existing_embeddings + final_emb_vectors
+                    break
+
+            if not user_exists:
+                for name, data in all_faces_raw.items():
+                    if isinstance(data, dict) and 'embedding' in data:
+                        emb_list = data['embedding']
+                        if isinstance(emb_list, list) and len(emb_list) > 0:
+                            if not isinstance(emb_list[0], (list, np.ndarray)): emb_list = [emb_list]
+
+                            for q_emb in [vec_norm]: 
+                                q_vec = np.array(q_emb, dtype=np.float32)
+                                q_vec = q_vec / (np.linalg.norm(q_vec) + 1e-6)
+                                for db_emb in emb_list:
+                                    db_vec = np.array(db_emb, dtype=np.float32)
+                                    db_vec = db_vec / (np.linalg.norm(db_vec) + 1e-6)
+                                    sim = np.dot(q_vec, db_vec)
+                                    if sim > best_sim_score:
+                                        best_sim_score = sim
+                                        duplicate_name = name.split(" - ", 1)[-1]
+                                    if sim >= anti_dup_thr: is_duplicate = True; break
+                                if is_duplicate: break
+                    if is_duplicate: break
 
         if is_duplicate and os.getenv("ALLOW_DUPLICATE", "false").lower() != "true": 
             sim_percent = best_sim_score * 100
@@ -372,14 +414,14 @@ class FaceRegistrationApp:
             self.cap_data["individual_latencies"] = self.individual_latencies
             self.cap_data.update({"headpose_vector": [float(pose["yaw"]), float(pose["pitch"]), float(pose["roll"])], "registration_accuracy": 100.0, "light_condition": light_cond})
             if "face_crops" in self.cap_data: del self.cap_data["face_crops"]
-            
-            success_master = self.db.save_face(self.name, self.user_id, single_master_emb, self.cap_data)
+
+            success_master = self.db.save_face(self.name, existing_user_id, single_master_emb, self.cap_data)
             
             if success_master: 
                 _log(f"⏱️ Ekstraksi AI & Simpan DB Selesai | Latensi AI: {mfn_latency:.2f} ms", "METRIK")
                 _log(f"✅ Total Waktu Seluruh Registrasi | Latensi Sistem Total: {total_waktu_sistem:.2f} ms", "METRIK")
                 
-                Helpers.show_msg(display, "✅ REGISTRASI BERHASIL!", f"User: {self.name} | 5-Frame Centroid Vector", config.COLOR_GREEN)
+                Helpers.show_msg(display, "✅ REGISTRASI BERHASIL!", f"User: {self.name} | 3 Vektor Cahaya", config.COLOR_GREEN)
                 with self.frame_lock: self.display_frame = display.copy()
                 time.sleep(1.5)
                 self.stage = RegistrationStage.COMPLETE 

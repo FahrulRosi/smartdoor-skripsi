@@ -52,7 +52,7 @@ class UIHelper:
     def analyze_spoof_type(raw_frame, bbox):
         fh, fw = raw_frame.shape[:2]
         bx, by, bw, bh = bbox
-
+        
         pad_w, pad_h = int(bw * 0.15), int(bh * 0.15)
         x1, y1 = max(0, bx - pad_w), max(0, by - pad_h)
         x2, y2 = min(fw, bx + bw + pad_w), min(fh, by + bh + pad_h)
@@ -63,7 +63,7 @@ class UIHelper:
         hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
         avg_s = np.mean(hsv[:, :, 1])
         avg_v = np.mean(hsv[:, :, 2])
-
+        
         if avg_v > 135 and avg_s < 110: 
             return "LAYAR VIDEO"
         return "FOTO CETAK"
@@ -104,7 +104,10 @@ class SmartDoorApp:
     def _init_heavy_models(self):
         self.db, self.model, self.pose_estimator = FaceDatabase(), MobileFaceNet(), HeadPoseEstimator()
         self.anti_spoof = SilentAntiSpoofing(getattr(config, 'ANTI_SPOOFING_MODEL', "liveness/antispoofing_int8.onnx"), getattr(config, 'ANTI_SPOOFING_THRESHOLD', 0.85))
-        self.detector = FaceMeshDetector(min_detection_confidence=0.5, min_tracking_confidence=0.5)
+        
+        # SENSITIVITAS DIOPTIMALKAN: Diturunkan ke 0.35 agar objek wajah berukuran kecil/jauh bisa tertangkap
+        self.detector = FaceMeshDetector(min_detection_confidence=0.35, min_tracking_confidence=0.35)
+        
         self.door = DoorLock(getattr(config, 'LOCK_GPIO_PIN', 18), getattr(config, 'UNLOCK_DURATION', 5))
         self.known_faces_2d = {k: [np.array(e, dtype=np.float32) for e in (v['embedding'] if isinstance(v['embedding'][0], list) else [v['embedding']])] for k, v in (self.db.load_all_faces() or {}).items() if isinstance(v, dict) and v.get('embedding')}
         
@@ -236,8 +239,7 @@ class SmartDoorApp:
                     print(f"\n{'='*60}\n⚠️ SECURITY BLOCK: {'Ditolak Skor Rendah' if is_m_real else 'Serangan '+sp_type}\n   AI Confidence: {avg_score:.4f} | Latensi: {lat_ms:.0f} ms\n{'='*60}")
                     if hasattr(self.db, 'log_spoofing_async'): self.db.log_spoofing_async(round(avg_score, 4), 0.0, 0.0, sp_type, round(lat_ms, 2))
                 
-                # Sistem akan reset kembali ke 0 (karena memanggil self._reset_state() di dalam _fail)
-                # dan UI dibekukan selama 2 detik sebelum bisa mendeteksi wajah lagi.
+                # JEDA COOLDOWN: Membersihkan hitungan (fake_frames ke 0) dan freeze layar merah selama 2 detik
                 return self._fail(f"SPOOF: {sp_type}", config.COLOR_RED, "Akses Ditolak", wait=False)
                 
             self.ui.update({"wait": False, "bbox": face.bbox, "status": "MEMINDAI LIVENESS...", "color": config.COLOR_YELLOW, "instr": f"Tahan Posisi ({self.fake_frames}/2)..."}); return

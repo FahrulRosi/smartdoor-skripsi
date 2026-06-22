@@ -48,7 +48,7 @@ class UIHelper:
 
     @staticmethod
     def analyze_spoof_type(raw_frame, bbox):
-        """Menganalisis karakteristik fisik gambar untuk membedakan Kertas vs Layar HP"""
+        """Analisis Multi-Faktor (Voting System) untuk memisahkan Kertas Kaku vs Layar Emisif"""
         x, y, w, h = bbox
         x, y = max(0, x), max(0, y)
         crop = raw_frame[y:y+h, x:x+w]
@@ -56,16 +56,50 @@ class UIHelper:
         if crop.size == 0: 
             return "MEDIA PALSU" 
             
-        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
-        s_channel, v_channel = hsv[:, :, 1], hsv[:, :, 2]
-        avg_s, avg_v = np.mean(s_channel), np.mean(v_channel)
-        
         gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-        glare_ratio = np.sum(gray > 240) / (w * h)
-        laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
+        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+        
+        # 1. PENGUKURAN DISTORSI SPEKTRUM (FFT MOIRÉ)
+        # Layar gadget memiliki susunan sub-piksel vertikal/horizontal yang membentuk pola pita frekuensi
+        gray_res = cv2.resize(gray, (128, 128))
+        f_transform = np.fft.fft2(gray_res)
+        f_shift = np.fft.fftshift(f_transform)
+        magnitude_spectrum = 20 * np.log(np.abs(f_shift) + 1)
+        
+        # Abaikan pusat frekuensi rendah (pencahayaan global)
+        cy, cx = 64, 64
+        magnitude_spectrum[cy-10:cy+10, cx-10:cx+10] = 0
+        
+        moire_score = np.max(magnitude_spectrum) / (np.mean(magnitude_spectrum) + 1e-6)
+        
+        # 2. PENGUKURAN CHROMATIC EMISSION (Blue Light Shift)
+        # Kulit manusia asli atau cetakan kertas normal memiliki komponen Red > Blue.
+        # Layar LCD/OLED memancarkan backlight yang cenderung bergeser ke arah temperatur dingin (biru).
+        avg_b = np.mean(crop[:, :, 0])
+        avg_r = np.mean(crop[:, :, 2])
+        blue_ratio = avg_b / (avg_r + 1e-6)
+        
+        # 3. DETEKSI SPECULAR GLARE (Pantulan Senter/Lampu pada Kaca HP)
+        glare_mask = cv2.threshold(gray, 242, 255, cv2.THRESH_BINARY)[1]
+        glare_ratio = np.sum(glare_mask == 255) / (gray.size + 1e-6)
+        
+        # 4. TEKSTUR LAPLACIAN KETAJAMAN
+        lap_var = cv2.Laplacian(gray, cv2.CV_64F).var()
 
-        # Layar HP memancarkan cahaya (v tinggi), warna agak pudar (s rendah), dan ber-noise/pantulan keras
-        if avg_v > 150 and avg_s < 120 and (glare_ratio > 0.02 or laplacian_var > 1200):
+        # --- SISTEM KEPUTUSAN BERBASIS BOBOT (VOTING SYSTEM) ---
+        score = 0
+        
+        if moire_score > 3.0: 
+            score += 2  # Bukti kuat adanya intervensi grid digital
+        if blue_ratio > 0.90: 
+            score += 1  # Karakteristik pendaran cahaya gadget aktif
+        if glare_ratio > 0.015: 
+            score += 1  # Pantulan tajam khas karakter Gorilla Glass / Kaca HP
+        if np.mean(hsv[:, :, 2]) > 135 and np.mean(hsv[:, :, 1]) < 130:
+            score += 1  # Ciri khas warna pudar akibat backlight berlebih
+            
+        # Evaluasi Akhir
+        if score >= 2:
             return "LAYAR VIDEO"
         return "FOTO CETAK"
 
@@ -180,7 +214,6 @@ class SmartDoorApp:
         
         if b_score < d_thr: self.recog_frames = 0; return "TIDAK DIKENAL", b_score, d_thr, 0.0, False
         
-        # FILTER AKURASI TINGGI: Harus stabil dalam N frame konsekutif untuk membuang noise/motion blur
         req_frames = getattr(config, 'REQUIRED_STABLE_FRAMES', 6)
         self.recog_frames += 1
         return b_name, b_score, d_thr, float(b_score * 100.0), (self.recog_frames >= req_frames)
@@ -217,7 +250,7 @@ class SmartDoorApp:
         if face.bbox[3] > int(config.FRAME_HEIGHT * 0.70): return self._fail("TERLALU DEKAT", config.COLOR_YELLOW, "Mundur")
         if self.state == ValidationState.IDLE: self.state, self.auth_start = ValidationState.RECOGNIZING, time.time(); return
 
-        # ANTI SPOOFING MULTI-FRAME (Harus 8 Frame Konsisten sebelum vonis Blokir)
+        # ANTI SPOOFING ENGINE
         liveness_info = self.anti_spoof.is_real(raw.copy(), face.bbox)
         m_conf, is_m_real = float(liveness_info.get("score", 0.0)), liveness_info.get("real", True)
         as_thr = {"Normal": 0.88, "Backlight": 0.85, "Low Light": 0.85}.get(l_str, 0.85)
@@ -233,7 +266,7 @@ class SmartDoorApp:
             if self.fake_frames >= 8: 
                 lat_ms = (time.time() - self.spoof_start_time) * 1000
                 
-                # Ekstraksi tipe spoofing fisik (Foto Cetak vs Layar Video)
+                # Ekstraksi tipe serangan menggunakan Voting-Heuristic OpenCV yang baru
                 if is_m_real:
                     sp_type = "TIDAK YAKIN (SKOR RENDAH)"
                 else:
@@ -249,7 +282,7 @@ class SmartDoorApp:
         else:
             self.fake_frames, self.spoof_hist = 0, []
 
-        # PENGAKUAN IDENTITAS & MULTI-FRAME STABILIZATION
+        # IDENTIFICATION & CHALLENGE PHASE
         if self.state == ValidationState.RECOGNIZING:
             t_val = time.time()
             b_name, sm_score, d_thr, f_acc, is_recog = self._check_identity(raw, enhanced, face, l_str)
@@ -261,7 +294,6 @@ class SmartDoorApp:
                 if time.time() - self.auth_start > 5.0: return self._fail("TIDAK DIKENAL", config.COLOR_RED, "Mulai Ulang", wait=True)
                 return
 
-            # Jika frame belum mencapai target minimal kestabilan (noise-filtering), tampilkan progress bar di UI
             if not is_recog: 
                 req_f = getattr(config, 'REQUIRED_STABLE_FRAMES', 6)
                 self.ui.update({"status": "VERIFIKASI...", "color": config.COLOR_YELLOW, "instr": f"Tahan Posisi Berdiri ({self.recog_frames}/{req_f})..."})

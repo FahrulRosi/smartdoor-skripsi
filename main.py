@@ -47,6 +47,29 @@ class UIHelper:
         return "Low Light" if ambient < 65 else "Normal"
 
     @staticmethod
+    def analyze_spoof_type(raw_frame, bbox):
+        """Menganalisis karakteristik fisik gambar untuk membedakan Kertas vs Layar HP"""
+        x, y, w, h = bbox
+        x, y = max(0, x), max(0, y)
+        crop = raw_frame[y:y+h, x:x+w]
+        
+        if crop.size == 0: 
+            return "MEDIA PALSU" 
+            
+        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+        s_channel, v_channel = hsv[:, :, 1], hsv[:, :, 2]
+        avg_s, avg_v = np.mean(s_channel), np.mean(v_channel)
+        
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        glare_ratio = np.sum(gray > 240) / (w * h)
+        laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
+
+        # Layar HP memancarkan cahaya (v tinggi), warna agak pudar (s rendah), dan ber-noise/pantulan keras
+        if avg_v > 150 and avg_s < 120 and (glare_ratio > 0.02 or laplacian_var > 1200):
+            return "LAYAR VIDEO"
+        return "FOTO CETAK"
+
+    @staticmethod
     def draw_ui(d, ui, locked):
         fw, fh = d.shape[1], d.shape[0]; c_font = cv2.FONT_HERSHEY_SIMPLEX
         if ui.get("status") == "STARTING":
@@ -122,7 +145,7 @@ class SmartDoorApp:
 
     def _fail(self, status, color=config.COLOR_RED, instr="", wait=False):
         self._reset_state(); self.ui.update({"wait": wait, "bbox": None if wait else self.ui.get("bbox"), "status": status, "color": color, "instr": instr})
-        self.pause_until = time.time() + 2.0  # Cooldown UI/AI 2 detik
+        self.pause_until = time.time() + 2.0  
 
     def _check_action(self, action, face):
         if action == "BLINK": 
@@ -135,7 +158,6 @@ class SmartDoorApp:
         dy, dp, dr = est.get("yaw", 0) - self.reg_pose[0], est.get("pitch", 0) - self.reg_pose[1], est.get("roll", 0) - self.reg_pose[2]
         ty, tp, tr = getattr(config, 'CHALLENGE_YAW', 15.0), getattr(config, 'CHALLENGE_PITCH', 12.0), getattr(config, 'CHALLENGE_ROLL', 12.0)
         
-        # PENGHEMATAN BARIS: Pemetaan arah (Nilai, Threshold, Sign 1/-1)
         cmap = {"KANAN": (dy, ty, 1), "KIRI": (dy, ty, -1), "ATAS": (dp, tp, -1), "BAWAH": (dp, tp, 1), "MIRING_KANAN": (dr, tr, -1), "MIRING_KIRI": (dr, tr, 1)}
         val, thr, sign = cmap.get(action, (0, 1, 1))
         
@@ -157,7 +179,11 @@ class SmartDoorApp:
         b_name, b_score = max(((n, np.max([np.dot(q_emb, e) for e in el])) for n, el in self.known_faces_2d.items()), key=lambda x: x[1], default=("", 0.0))
         
         if b_score < d_thr: self.recog_frames = 0; return "TIDAK DIKENAL", b_score, d_thr, 0.0, False
-        self.recog_frames += 1; return b_name, b_score, d_thr, float(b_score * 100.0), (self.recog_frames >= 2)
+        
+        # FILTER AKURASI TINGGI: Harus stabil dalam N frame konsekutif untuk membuang noise/motion blur
+        req_frames = getattr(config, 'REQUIRED_STABLE_FRAMES', 6)
+        self.recog_frames += 1
+        return b_name, b_score, d_thr, float(b_score * 100.0), (self.recog_frames >= req_frames)
 
     def _ai_worker(self):
         while self.running:
@@ -191,9 +217,9 @@ class SmartDoorApp:
         if face.bbox[3] > int(config.FRAME_HEIGHT * 0.70): return self._fail("TERLALU DEKAT", config.COLOR_YELLOW, "Mundur")
         if self.state == ValidationState.IDLE: self.state, self.auth_start = ValidationState.RECOGNIZING, time.time(); return
 
-        # ANTI SPOOFING
+        # ANTI SPOOFING MULTI-FRAME (Harus 8 Frame Konsisten sebelum vonis Blokir)
         liveness_info = self.anti_spoof.is_real(raw.copy(), face.bbox)
-        m_conf, is_m_real, m_lbl = float(liveness_info.get("score", 0.0)), liveness_info.get("real", True), liveness_info.get("label_name", "REAL").upper()
+        m_conf, is_m_real = float(liveness_info.get("score", 0.0)), liveness_info.get("real", True)
         as_thr = {"Normal": 0.88, "Backlight": 0.85, "Low Light": 0.85}.get(l_str, 0.85)
         
         is_actually_real = True if self.state == ValidationState.CHALLENGE else (is_m_real and m_conf >= as_thr)
@@ -206,10 +232,14 @@ class SmartDoorApp:
 
             if self.fake_frames >= 8: 
                 lat_ms = (time.time() - self.spoof_start_time) * 1000
-                sp_type = "FOTO CETAK" if any(k in m_lbl for k in ["PAPER", "PRINT", "FOTO"]) else ("LAYAR VIDEO" if any(k in m_lbl for k in ["SCREEN", "VIDEO", "LAYAR", "PHONE"]) else m_lbl)
-                if is_m_real and m_conf < as_thr: sp_type = "TIDAK YAKIN (SKOR RENDAH)"
                 
-                self.ui.update({"wait": False, "bbox": face.bbox, "status": f"SPOOF: {sp_type}", "color": config.COLOR_RED, "instr": "Akses Ditolak (Media Palsu)"})
+                # Ekstraksi tipe spoofing fisik (Foto Cetak vs Layar Video)
+                if is_m_real:
+                    sp_type = "TIDAK YAKIN (SKOR RENDAH)"
+                else:
+                    sp_type = UIHelper.analyze_spoof_type(raw, face.bbox)
+                
+                self.ui.update({"wait": False, "bbox": face.bbox, "status": f"SPOOF: {sp_type}", "color": config.COLOR_RED, "instr": "Akses Ditolak"})
                 if time.time() - self.last_spoof_log_time > 4.0:
                     self.last_spoof_log_time = time.time()
                     print(f"\n{'='*60}\n⚠️ SECURITY BLOCK: {'Ditolak Skor Rendah' if is_m_real else 'Serangan '+sp_type}\n   AI Confidence: {avg_score:.4f} | Latensi: {lat_ms:.0f} ms\n{'='*60}")
@@ -219,7 +249,7 @@ class SmartDoorApp:
         else:
             self.fake_frames, self.spoof_hist = 0, []
 
-        # PENGAKUAN IDENTITAS & TANTANGAN
+        # PENGAKUAN IDENTITAS & MULTI-FRAME STABILIZATION
         if self.state == ValidationState.RECOGNIZING:
             t_val = time.time()
             b_name, sm_score, d_thr, f_acc, is_recog = self._check_identity(raw, enhanced, face, l_str)
@@ -231,7 +261,11 @@ class SmartDoorApp:
                 if time.time() - self.auth_start > 5.0: return self._fail("TIDAK DIKENAL", config.COLOR_RED, "Mulai Ulang", wait=True)
                 return
 
-            if not is_recog: self.ui.update({"status": "MEMVERIFIKASI...", "color": config.COLOR_YELLOW, "instr": "Tahan Posisi..."}); return
+            # Jika frame belum mencapai target minimal kestabilan (noise-filtering), tampilkan progress bar di UI
+            if not is_recog: 
+                req_f = getattr(config, 'REQUIRED_STABLE_FRAMES', 6)
+                self.ui.update({"status": "VERIFIKASI...", "color": config.COLOR_YELLOW, "instr": f"Tahan Posisi Berdiri ({self.recog_frames}/{req_f})..."})
+                return
 
             self.print_counter += 1
             if self.print_counter % 2 == 0: UIHelper.print_inline(f"Memproses {disp_name}... Cosine: {sm_score:.3f}")

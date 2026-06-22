@@ -1,6 +1,8 @@
 import cv2, random, time, threading, sys, numpy as np
-from datetime import datetime; from enum import Enum
+from datetime import datetime
+from enum import Enum
 import config
+
 from camera.camera_stream import CameraStream
 from facemesh.facemesh_detector import FaceMeshDetector
 from recognition.mobilefacenet import MobileFaceNet
@@ -48,7 +50,6 @@ class UIHelper:
 
     @staticmethod
     def analyze_spoof_type(raw_frame, bbox):
-        """Membedakan Kertas vs Layar dengan Context Padding & Optimasi Raspberry Pi"""
         fh, fw = raw_frame.shape[:2]
         bx, by, bw, bh = bbox
         
@@ -67,7 +68,7 @@ class UIHelper:
         f_shift = np.fft.fftshift(f_transform)
         magnitude_spectrum = 20 * np.log(np.abs(f_shift) + 1)
         cy, cx = 32, 32
-        magnitude_spectrum[cy-6:cy+6, cx-6:cx+6] = 0 
+        magnitude_spectrum[cy-6:cy+6, cx-6:cx+6] = 0
         moire_score = np.max(magnitude_spectrum) / (np.mean(magnitude_spectrum) + 1e-6)
         
         glare_mask = cv2.threshold(gray, 235, 255, cv2.THRESH_BINARY)[1]
@@ -78,18 +79,15 @@ class UIHelper:
         
         edges = cv2.Canny(gray, 100, 200)
         edge_density = np.sum(edges == 255) / (gray.size + 1e-6)
+
         score = 0
-        
         if moire_score > 2.2: score += 1
         if glare_ratio > 0.005: score += 1
         if avg_v > 135 and avg_s < 110: score += 1 
         if edge_density > 0.035: score += 1       
             
-        if glare_ratio > 0.02 or moire_score > 3.0:
-            return "LAYAR VIDEO"
-            
-        if score >= 2:
-            return "LAYAR VIDEO"
+        if glare_ratio > 0.02 or moire_score > 3.0: return "LAYAR VIDEO"
+        if score >= 2: return "LAYAR VIDEO"
         return "FOTO CETAK"
 
     @staticmethod
@@ -127,7 +125,7 @@ class SmartDoorApp:
 
     def _init_heavy_models(self):
         self.db, self.model, self.pose_estimator = FaceDatabase(), MobileFaceNet(), HeadPoseEstimator()
-        self.anti_spoof = SilentAntiSpoofing(getattr(config, 'ANTI_SPOOFING_MODEL', "liveness/antispoofing.onnx"), getattr(config, 'ANTI_SPOOFING_THRESHOLD', 0.85))
+        self.anti_spoof = SilentAntiSpoofing(getattr(config, 'ANTI_SPOOFING_MODEL', "liveness/antispoofing_int8.onnx"), getattr(config, 'ANTI_SPOOFING_THRESHOLD', 0.85))
         self.detector = FaceMeshDetector(min_detection_confidence=0.5, min_tracking_confidence=0.5)
         self.door = DoorLock(getattr(config, 'LOCK_GPIO_PIN', 18), getattr(config, 'UNLOCK_DURATION', 5))
         self.known_faces_2d = {k: [np.array(e, dtype=np.float32) for e in (v['embedding'] if isinstance(v['embedding'][0], list) else [v['embedding']])] for k, v in (self.db.load_all_faces() or {}).items() if isinstance(v, dict) and v.get('embedding')}
@@ -239,7 +237,6 @@ class SmartDoorApp:
         if face.bbox[3] > int(config.FRAME_HEIGHT * 0.70): return self._fail("TERLALU DEKAT", config.COLOR_YELLOW, "Mundur")
         if self.state == ValidationState.IDLE: self.state, self.auth_start = ValidationState.RECOGNIZING, time.time(); return
 
-        # ANTI SPOOFING ENGINE
         liveness_info = self.anti_spoof.is_real(raw.copy(), face.bbox)
         m_conf, is_m_real = float(liveness_info.get("score", 0.0)), liveness_info.get("real", True)
         as_thr = {"Normal": 0.88, "Backlight": 0.85, "Low Light": 0.85}.get(l_str, 0.85)
@@ -252,14 +249,9 @@ class SmartDoorApp:
             self.fake_frames += 1; self.spoof_hist.append(m_conf)
             avg_score = sum(self.spoof_hist) / len(self.spoof_hist)
 
-            # Optimasi Raspberry Pi: Turun dari 8 menjadi 3 frame berturut-turut
             if self.fake_frames >= 3: 
                 lat_ms = (time.time() - self.spoof_start_time) * 1000
-                
-                if is_m_real:
-                    sp_type = "TIDAK YAKIN (SKOR RENDAH)"
-                else:
-                    sp_type = UIHelper.analyze_spoof_type(raw, face.bbox)
+                sp_type = "TIDAK YAKIN (SKOR RENDAH)" if is_m_real else UIHelper.analyze_spoof_type(raw, face.bbox)
                 
                 self.ui.update({"wait": False, "bbox": face.bbox, "status": f"SPOOF: {sp_type}", "color": config.COLOR_RED, "instr": "Akses Ditolak"})
                 if time.time() - self.last_spoof_log_time > 4.0:

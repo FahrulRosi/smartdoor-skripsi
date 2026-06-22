@@ -10,15 +10,13 @@ from facemesh.facemesh_detector import FaceMeshDetector
 from liveness.head_pose import HeadPoseEstimator
 from liveness.blink import BlinkDetector
 
-
 class SilentAntiSpoofing:
     """
     Kelas untuk mendeteksi liveness secara pasif (Silent Anti-Spoofing).
-    Menggunakan model ONNX untuk membedakan wajah asli dengan wajah palsu 
-    (misal: foto cetak atau gambar dari layar HP).
+    Telah dioptimasi untuk arsitektur ARM (Raspberry Pi).
     """
     
-    def __init__(self, model_path="liveness/antispoofing.onnx", threshold=0.85):
+    def __init__(self, model_path="liveness/antispoofing_int8.onnx", threshold=0.85):
         self.threshold = threshold
         self._session = None
         self._input_name = ""
@@ -27,9 +25,23 @@ class SilentAntiSpoofing:
         if os.path.isfile(model_path):
             try:
                 import onnxruntime as ort
-                self._session = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+                
+                # --- OPTIMASI RASPBERRY PI ---
+                sess_options = ort.SessionOptions()
+                sess_options.intra_op_num_threads = 3  
+                sess_options.inter_op_num_threads = 1
+                sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+                
+                providers = ["XnnpackExecutionProvider", "CPUExecutionProvider"]
+                # -----------------------------
+
+                self._session = ort.InferenceSession(
+                    model_path, 
+                    sess_options=sess_options, 
+                    providers=providers
+                )
                 self._input_name = self._session.get_inputs()[0].name
-                print(f"[AntiSpoofing] Model ONNX berhasil dimuat: {model_path}")
+                print(f"[AntiSpoofing] Model ONNX berhasil dimuat dengan optimasi: {model_path}")
             except Exception as e:
                 print(f"[AntiSpoofing] Gagal memuat model: {e}")
         else:
@@ -67,9 +79,9 @@ class SilentAntiSpoofing:
         face_chw = np.transpose(face_float, (2, 0, 1))
         img_data = np.expand_dims(face_chw, axis=0)
 
-        t_start = time.time()
+        t_start = time.perf_counter()
         output = self._session.run(None, {self._input_name: img_data})[0]
-        latency_ms = (time.time() - t_start) * 1000.0
+        latency_ms = (time.perf_counter() - t_start) * 1000.0
 
         exp_output = np.exp(output - np.max(output, axis=1, keepdims=True))
         softmax_output = exp_output / np.sum(exp_output, axis=1, keepdims=True)

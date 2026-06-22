@@ -43,11 +43,13 @@ MAX_BLINK_CLOSED_EAR = 0.20
 MIN_BLINK_DELTA      = 0.04  
 
 # ── Anti-Spoofing & Recognition ──────────────────────────────────────────────
-ANTI_SPOOFING_MODEL     = "liveness/antispoofing.onnx"
+# Diarahkan ke model INT8 hasil kuantisasi
+ANTI_SPOOFING_MODEL     = "liveness/antispoofing_int8.onnx"
 ANTI_SPOOFING_THRESHOLD = 0.80
 
 MATCH_THRESHOLD         = 0.70
-MOBILEFACENET_PATH      = "recognition/mobilefacenet.onnx"
+# Diarahkan ke model INT8 hasil kuantisasi
+MOBILEFACENET_PATH      = "recognition/mobilefacenet_int8.onnx"
 
 # ── Door Lock & UI ───────────────────────────────────────────────────────────
 LOCK_GPIO_PIN   = 18

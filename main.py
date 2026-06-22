@@ -48,57 +48,54 @@ class UIHelper:
 
     @staticmethod
     def analyze_spoof_type(raw_frame, bbox):
-        """Analisis Multi-Faktor (Voting System) untuk memisahkan Kertas Kaku vs Layar Emisif"""
-        x, y, w, h = bbox
-        x, y = max(0, x), max(0, y)
-        crop = raw_frame[y:y+h, x:x+w]
+        """Membedakan Kertas vs Layar dengan Context Padding & Optimasi Raspberry Pi"""
+        fh, fw = raw_frame.shape[:2]
+        bx, by, bw, bh = bbox
         
-        if crop.size == 0: 
-            return "MEDIA PALSU" 
+        # Padding 40% untuk menangkap bezel HP & pantulan tepi layar
+        pad_w, pad_h = int(bw * 0.40), int(bh * 0.40)
+        x1, y1 = max(0, bx - pad_w), max(0, by - pad_h)
+        x2, y2 = min(fw, bx + bw + pad_w), min(fh, by + bh + pad_h)
+        
+        crop = raw_frame[y1:y2, x1:x2]
+        if crop.size == 0: return "MEDIA PALSU"
             
         gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
         hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
         
-        # 1. PENGUKURAN DISTORSI SPEKTRUM (FFT MOIRÉ)
-        # Layar gadget memiliki susunan sub-piksel vertikal/horizontal yang membentuk pola pita frekuensi
-        gray_res = cv2.resize(gray, (128, 128))
+        # 1. MOIRÉ PATTERN (Pola Grid Piksel Digital) - Dioptimasi ke 64x64 untuk RPi
+        gray_res = cv2.resize(gray, (64, 64))
         f_transform = np.fft.fft2(gray_res)
         f_shift = np.fft.fftshift(f_transform)
         magnitude_spectrum = 20 * np.log(np.abs(f_shift) + 1)
-        
-        # Abaikan pusat frekuensi rendah (pencahayaan global)
-        cy, cx = 64, 64
-        magnitude_spectrum[cy-10:cy+10, cx-10:cx+10] = 0
-        
+        cy, cx = 32, 32
+        magnitude_spectrum[cy-6:cy+6, cx-6:cx+6] = 0 # Abaikan lighting global
         moire_score = np.max(magnitude_spectrum) / (np.mean(magnitude_spectrum) + 1e-6)
         
-        # 2. PENGUKURAN CHROMATIC EMISSION (Blue Light Shift)
-        # Kulit manusia asli atau cetakan kertas normal memiliki komponen Red > Blue.
-        # Layar LCD/OLED memancarkan backlight yang cenderung bergeser ke arah temperatur dingin (biru).
-        avg_b = np.mean(crop[:, :, 0])
-        avg_r = np.mean(crop[:, :, 2])
-        blue_ratio = avg_b / (avg_r + 1e-6)
-        
-        # 3. DETEKSI SPECULAR GLARE (Pantulan Senter/Lampu pada Kaca HP)
-        glare_mask = cv2.threshold(gray, 242, 255, cv2.THRESH_BINARY)[1]
+        # 2. SPECULAR GLARE (Pantulan Kaca HP)
+        glare_mask = cv2.threshold(gray, 235, 255, cv2.THRESH_BINARY)[1]
         glare_ratio = np.sum(glare_mask == 255) / (gray.size + 1e-6)
         
-        # 4. TEKSTUR LAPLACIAN KETAJAMAN
-        lap_var = cv2.Laplacian(gray, cv2.CV_64F).var()
+        # 3. COLOR WASHOUT (Karakteristik pudar akibat Backlight)
+        avg_s = np.mean(hsv[:, :, 1])
+        avg_v = np.mean(hsv[:, :, 2])
+        
+        # 4. EDGE DENSITY (Mendeteksi garis keras bezel)
+        edges = cv2.Canny(gray, 100, 200)
+        edge_density = np.sum(edges == 255) / (gray.size + 1e-6)
 
-        # --- SISTEM KEPUTUSAN BERBASIS BOBOT (VOTING SYSTEM) ---
+        # --- SISTEM SCORING ---
         score = 0
         
-        if moire_score > 3.0: 
-            score += 2  # Bukti kuat adanya intervensi grid digital
-        if blue_ratio > 0.90: 
-            score += 1  # Karakteristik pendaran cahaya gadget aktif
-        if glare_ratio > 0.015: 
-            score += 1  # Pantulan tajam khas karakter Gorilla Glass / Kaca HP
-        if np.mean(hsv[:, :, 2]) > 135 and np.mean(hsv[:, :, 1]) < 130:
-            score += 1  # Ciri khas warna pudar akibat backlight berlebih
+        if moire_score > 2.2: score += 1
+        if glare_ratio > 0.005: score += 1
+        if avg_v > 135 and avg_s < 110: score += 1 
+        if edge_density > 0.035: score += 1       
             
-        # Evaluasi Akhir
+        # Bypass langsung jika tanda sangat kuat
+        if glare_ratio > 0.02 or moire_score > 3.0:
+            return "LAYAR VIDEO"
+            
         if score >= 2:
             return "LAYAR VIDEO"
         return "FOTO CETAK"
@@ -263,10 +260,10 @@ class SmartDoorApp:
             self.fake_frames += 1; self.spoof_hist.append(m_conf)
             avg_score = sum(self.spoof_hist) / len(self.spoof_hist)
 
-            if self.fake_frames >= 8: 
+            # Optimasi Raspberry Pi: Turun dari 8 menjadi 3 frame berturut-turut
+            if self.fake_frames >= 3: 
                 lat_ms = (time.time() - self.spoof_start_time) * 1000
                 
-                # Ekstraksi tipe serangan menggunakan Voting-Heuristic OpenCV yang baru
                 if is_m_real:
                     sp_type = "TIDAK YAKIN (SKOR RENDAH)"
                 else:
@@ -278,7 +275,7 @@ class SmartDoorApp:
                     print(f"\n{'='*60}\n⚠️ SECURITY BLOCK: {'Ditolak Skor Rendah' if is_m_real else 'Serangan '+sp_type}\n   AI Confidence: {avg_score:.4f} | Latensi: {lat_ms:.0f} ms\n{'='*60}")
                     if hasattr(self.db, 'log_spoofing_async'): self.db.log_spoofing_async(round(avg_score, 4), 0.0, 0.0, sp_type, round(lat_ms, 2))
                 return 
-            self.ui.update({"wait": False, "bbox": face.bbox, "status": "MEMINDAI LIVENESS...", "color": config.COLOR_YELLOW, "instr": f"Tahan Posisi ({self.fake_frames}/8)..."}); return
+            self.ui.update({"wait": False, "bbox": face.bbox, "status": "MEMINDAI LIVENESS...", "color": config.COLOR_YELLOW, "instr": f"Tahan Posisi ({self.fake_frames}/3)..."}); return
         else:
             self.fake_frames, self.spoof_hist = 0, []
 

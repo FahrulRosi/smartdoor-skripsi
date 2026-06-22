@@ -31,6 +31,45 @@ class UIHelper:
         return cv2.cvtColor(img_yuv, cv2.COLOR_YUV2BGR)
 
     @staticmethod
+    def get_aligned_crop(frame, face, target_size=(112, 112)):
+        """
+        FUNGSI UTAMA UNTUK MENINGKATKAN SKOR COSINE SIMILARITY
+        Mentransformasikan wajah miring/jauh menjadi tegak, simetris, dan presisi berbasis landmark mata.
+        """
+        lm = getattr(face, 'landmarks', [])
+        fh, fw = frame.shape[:2]
+        
+        if not lm or len(lm) < 363: 
+            bx, by, bw, bh = face.bbox
+            return frame[max(0, by):min(fh, by+bh), max(0, bx):min(fw, bx+bw)]
+        
+        le = np.array([(lm[33].x + lm[133].x) * fw / 2, (lm[33].y + lm[133].y) * fh / 2])
+        re = np.array([(lm[263].x + lm[362].x) * fw / 2, (lm[263].y + lm[362].y) * fh / 2])
+        
+        # Hitung sudut kemiringan wajah berdasarkan posisi kedua mata
+        dy = re[1] - le[1]
+        dx = re[0] - le[0]
+        angle = np.degrees(np.arctan2(dy, dx))
+
+        desired_left_eye_x = 0.35
+        desired_eye_y = 0.40
+        desired_right_eye_x = 0.65
+        
+        desired_dist = (desired_right_eye_x - desired_left_eye_x) * target_size[0]
+        current_dist = np.linalg.norm(re - le)
+        scale = desired_dist / (current_dist + 1e-6)
+        
+        eye_center = ((le[0] + re[0]) / 2, (le[1] + re[1]) / 2)
+        M = cv2.getRotationMatrix2D(eye_center, angle, scale)
+        
+        t_x = target_size[0] * 0.5
+        t_y = target_size[1] * desired_eye_y
+        M[0, 2] += (t_x - eye_center[0])
+        M[1, 2] += (t_y - eye_center[1])
+        
+        return cv2.warpAffine(frame, M, target_size, flags=cv2.INTER_CUBIC)
+
+    @staticmethod
     def get_ear(f):
         lm = getattr(f, 'landmarks', [])
         if not lm or len(lm) < 400: return 0.0
@@ -105,7 +144,6 @@ class SmartDoorApp:
         self.db, self.model, self.pose_estimator = FaceDatabase(), MobileFaceNet(), HeadPoseEstimator()
         self.anti_spoof = SilentAntiSpoofing(getattr(config, 'ANTI_SPOOFING_MODEL', "liveness/antispoofing_int8.onnx"), getattr(config, 'ANTI_SPOOFING_THRESHOLD', 0.85))
         
-        # SENSITIVITAS DIOPTIMALKAN: Diturunkan ke 0.35 agar objek wajah berukuran kecil/jauh bisa tertangkap
         self.detector = FaceMeshDetector(min_detection_confidence=0.35, min_tracking_confidence=0.35)
         
         self.door = DoorLock(getattr(config, 'LOCK_GPIO_PIN', 18), getattr(config, 'UNLOCK_DURATION', 5))
@@ -173,9 +211,10 @@ class SmartDoorApp:
         d_thr = {"Normal": 0.70, "Backlight": 0.67, "Low Light": 0.65}.get(l_str, 0.70)
         if not self.known_faces_2d: return "TIDAK DIKENAL", 0.0, d_thr, 0.0, False
         
-        fh, fw = enhanced.shape[:2]; x, y, w, h = face.bbox
-        cropped = self.model.crop_face(enhanced, [max(0, x), max(0, y), min(fw, x+w)-max(0, x), min(fh, y+h)-max(0, y)])
-        if cropped is None or cropped.size == 0 or (raw_emb := self.model.get_embedding(cropped)) is None: return "TIDAK DIKENAL", 0.0, d_thr, 0.0, False
+        cropped = UIHelper.get_aligned_crop(enhanced, face, target_size=(112, 112))
+        
+        if cropped is None or cropped.size == 0 or (raw_emb := self.model.get_embedding(cropped)) is None: 
+            return "TIDAK DIKENAL", 0.0, d_thr, 0.0, False
 
         q_emb = np.array(raw_emb, dtype=np.float32).flatten(); q_emb /= (np.linalg.norm(q_emb) + 1e-6)
         b_name, b_score = max(((n, np.max([np.dot(q_emb, e) for e in el])) for n, el in self.known_faces_2d.items()), key=lambda x: x[1], default=("", 0.0))
@@ -239,7 +278,6 @@ class SmartDoorApp:
                     print(f"\n{'='*60}\n⚠️ SECURITY BLOCK: {'Ditolak Skor Rendah' if is_m_real else 'Serangan '+sp_type}\n   AI Confidence: {avg_score:.4f} | Latensi: {lat_ms:.0f} ms\n{'='*60}")
                     if hasattr(self.db, 'log_spoofing_async'): self.db.log_spoofing_async(round(avg_score, 4), 0.0, 0.0, sp_type, round(lat_ms, 2))
                 
-                # JEDA COOLDOWN: Membersihkan hitungan (fake_frames ke 0) dan freeze layar merah selama 2 detik
                 return self._fail(f"SPOOF: {sp_type}", config.COLOR_RED, "Akses Ditolak", wait=False)
                 
             self.ui.update({"wait": False, "bbox": face.bbox, "status": "MEMINDAI LIVENESS...", "color": config.COLOR_YELLOW, "instr": f"Tahan Posisi ({self.fake_frames}/2)..."}); return

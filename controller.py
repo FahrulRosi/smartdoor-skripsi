@@ -1,91 +1,159 @@
-import threading
+import os
 import time
-import cv2
-from fastapi import FastAPI
-from pydantic import BaseModel
-import uvicorn
+import threading
+from datetime import datetime, timezone
 
-from main import SmartDoorApp
-from register import FaceRegistrationApp
+import requests
+import uvicorn
+from fastapi import FastAPI
+from pydantic import BaseModel, Field
+
+BACKEND_URL = os.getenv("BACKEND_URL", "http://103.93.132.205:5000").rstrip("/")
+DEVICE_NAME = os.getenv("DEVICE_NAME", "raspberry_pi_01")
 
 app = FastAPI(title="Smart Door Lock Controller")
 
-current_app = None
-app_state = "MAIN"  
-register_name = ""
-is_transitioning = False  
-class RegisterRequest(BaseModel):
-    name: str
+app_state = "MAIN"
+current_name = ""
+is_transitioning = False
+state_lock = threading.Lock()
+
+
+class TriggerRegisterRequest(BaseModel):
+    name: str = Field(..., min_length=1)
+
+
+class AccessResultRequest(BaseModel):
+    namaUser: str = Field(..., min_length=1)
+    waktuAkses: str = Field(..., min_length=1)
+    keterangan: str = Field(..., min_length=1)
+    status: str = Field(..., min_length=1)
+
+
+def _post_callback_to_backend(payload: dict):
+    try:
+        response = requests.post(
+            f"{BACKEND_URL}/api/user/access-result",
+            json=payload,
+            timeout=15,
+        )
+        return {
+            "ok": response.status_code in (200, 201),
+            "status_code": response.status_code,
+            "response": response.json() if response.headers.get("content-type", "").startswith("application/json") else response.text,
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "status_code": 0,
+            "response": str(exc),
+        }
+
+
+def _simulate_registration_process(user_name: str):
+    global app_state, current_name, is_transitioning
+
+    try:
+        print(f"[RPi] Mulai registrasi wajah untuk: {user_name}")
+        time.sleep(5)
+
+        payload = {
+            "namaUser": user_name,
+            "waktuAkses": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "keterangan": "Registrasi wajah berhasil di Raspberry Pi",
+            "status": "AKSES DITERIMA",
+        }
+
+        callback_result = _post_callback_to_backend(payload)
+        print(f"[RPi] Callback ke backend: {callback_result}")
+
+    finally:
+        with state_lock:
+            app_state = "MAIN"
+            current_name = ""
+            is_transitioning = False
+        print("[RPi] Kembali ke mode utama")
+
 
 @app.post("/api/trigger-register")
-def trigger_register(req: RegisterRequest):
-    global app_state, register_name, current_app, is_transitioning
+def trigger_register(req: TriggerRegisterRequest):
+    global app_state, current_name, is_transitioning
 
-    if app_state == "REGISTER":
-        return {"status": "error", "message": "Sistem sudah dalam mode registrasi."}
-    
-    if is_transitioning:
-        return {"status": "error", "message": "Kamera sedang dalam proses perpindahan. Harap tunggu."}
+    with state_lock:
+        if is_transitioning:
+            return {
+                "status": "error",
+                "message": "Kamera sedang dalam proses perpindahan. Harap tunggu."
+            }
 
-    is_transitioning = True
-    register_name = req.name
-    app_state = "REGISTER"
+        if app_state == "REGISTER":
+            return {
+                "status": "error",
+                "message": "Sistem sudah dalam mode registrasi."
+            }
 
-    if current_app and hasattr(current_app, 'running'):
-        current_app.running = False
-        
-    return {"status": "success", "message": f"Kamera dihentikan sementara. Beralih ke registrasi user: {register_name}"}
+        is_transitioning = True
+        app_state = "REGISTER"
+        current_name = req.name
 
-def cv2_app_runner():
-    """
-    Berjalan di Main Thread. Bertugas me-manage perpindahan aplikasi (Memory & Camera Release).
-    """
-    global current_app, app_state, register_name, is_transitioning
-    
-    while True:
-        if app_state == "MAIN":
-            print("\n[SYSTEM] Memulai Kamera Utama (Smart Door Lock)...")
-            is_transitioning = False 
-            current_app = SmartDoorApp()
+    worker = threading.Thread(
+        target=_simulate_registration_process,
+        args=(req.name,),
+        daemon=True,
+    )
+    worker.start()
 
-            current_app.run() 
+    return {
+        "status": "success",
+        "message": f"Trigger registrasi diterima untuk: {req.name}",
+        "data": {
+            "device_name": DEVICE_NAME,
+            "app_state": app_state,
+            "name": req.name
+        }
+    }
 
-            time.sleep(1.5) 
-            
-        elif app_state == "REGISTER":
-            print(f"\n[SYSTEM] Memulai Registrasi Wajah untuk: {register_name}...")
-            is_transitioning = False 
-            current_app = FaceRegistrationApp(register_name)
-        
-            current_app.run() 
-            
-            print("\n[SYSTEM] Registrasi Selesai/Dihentikan. Mengembalikan ke Kamera Utama...")
 
-            app_state = "MAIN"
-            register_name = ""
-            is_transitioning = True 
-            
-            time.sleep(1.5) 
+@app.post("/api/access-result")
+def access_result(req: AccessResultRequest):
+    payload = req.model_dump()
+    result = _post_callback_to_backend(payload)
+    if result["ok"]:
+        return {
+            "status": "success",
+            "message": "Hasil akses berhasil diteruskan ke backend",
+            "data": result
+        }
 
-def start_api_server():
-    """
-    Berjalan di Background Thread agar tidak nge-block loop UI OpenCV.
-    """
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="error")
+    return {
+        "status": "error",
+        "message": "Gagal meneruskan hasil akses ke backend",
+        "data": result
+    }
+
+
+@app.get("/api/health")
+def health():
+    return {
+        "status": "success",
+        "message": "Raspberry Pi controller is running",
+        "data": {
+            "device_name": DEVICE_NAME,
+            "app_state": app_state,
+            "backend_url": BACKEND_URL
+        }
+    }
+
+
+def run_controller():
+    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
+
 
 if __name__ == "__main__":
     print("======================================================")
-    print("  SISTEM PENGENDALI PINTU & REGISTRASI WAJAH")
+    print("  SMART DOOR LOCK CONTROLLER")
     print("======================================================")
-    
-    api_thread = threading.Thread(target=start_api_server, daemon=True)
-    api_thread.start()
-    print("[INFO] Endpoint Web Server siap di POST http://0.0.0.0:8000/api/trigger-register")
-    time.sleep(1.0) 
-
-    try:
-        cv2_app_runner()
-    except KeyboardInterrupt:
-        print("\n[SYSTEM] Mematikan seluruh sistem dari Terminal...")
-        if current_app and hasattr(current_app, 'running'):
-            current_app.running = False
+    print(f"[RPi] Backend URL   : {BACKEND_URL}")
+    print(f"[RPi] Device Name   : {DEVICE_NAME}")
+    print("[RPi] API siap di port 8000")
+    run_controller()

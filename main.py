@@ -45,8 +45,7 @@ class UIHelper:
         
         le = np.array([(lm[33].x + lm[133].x) * fw / 2, (lm[33].y + lm[133].y) * fh / 2])
         re = np.array([(lm[263].x + lm[362].x) * fw / 2, (lm[263].y + lm[362].y) * fh / 2])
-        
-        # Hitung sudut kemiringan wajah berdasarkan posisi kedua mata
+
         dy = re[1] - le[1]
         dx = re[0] - le[0]
         angle = np.degrees(np.arctan2(dy, dx))

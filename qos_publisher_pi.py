@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from database.face_db import FaceDatabase
 
 PUB_CONFIG = {
-    "iterations_per_table": 10,
+    "iterations_per_table": 30,
     "delay_between_records": 1.0, # Jeda waktu (detik) antar pengiriman untuk memberi napas pada _https_sync_worker
 }
 

@@ -50,44 +50,26 @@ class UIHelper:
 
     @staticmethod
     def analyze_spoof_type(raw_frame, bbox):
+        """
+        VERSI OPTIMASI: Menghapus kalkulasi FFT (Fourier) dan Canny Edge yang berat.
+        Menggunakan analisis histogram HSV ringan agar latensi tidak melonjak.
+        """
         fh, fw = raw_frame.shape[:2]
         bx, by, bw, bh = bbox
         
-        pad_w, pad_h = int(bw * 0.40), int(bh * 0.40)
+        pad_w, pad_h = int(bw * 0.15), int(bh * 0.15)
         x1, y1 = max(0, bx - pad_w), max(0, by - pad_h)
         x2, y2 = min(fw, bx + bw + pad_w), min(fh, by + bh + pad_h)
         
         crop = raw_frame[y1:y2, x1:x2]
         if crop.size == 0: return "MEDIA PALSU"
             
-        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
         hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
-        
-        gray_res = cv2.resize(gray, (64, 64))
-        f_transform = np.fft.fft2(gray_res)
-        f_shift = np.fft.fftshift(f_transform)
-        magnitude_spectrum = 20 * np.log(np.abs(f_shift) + 1)
-        cy, cx = 32, 32
-        magnitude_spectrum[cy-6:cy+6, cx-6:cx+6] = 0
-        moire_score = np.max(magnitude_spectrum) / (np.mean(magnitude_spectrum) + 1e-6)
-        
-        glare_mask = cv2.threshold(gray, 235, 255, cv2.THRESH_BINARY)[1]
-        glare_ratio = np.sum(glare_mask == 255) / (gray.size + 1e-6)
-        
         avg_s = np.mean(hsv[:, :, 1])
         avg_v = np.mean(hsv[:, :, 2])
         
-        edges = cv2.Canny(gray, 100, 200)
-        edge_density = np.sum(edges == 255) / (gray.size + 1e-6)
-
-        score = 0
-        if moire_score > 2.2: score += 1
-        if glare_ratio > 0.005: score += 1
-        if avg_v > 135 and avg_s < 110: score += 1 
-        if edge_density > 0.035: score += 1       
-            
-        if glare_ratio > 0.02 or moire_score > 3.0: return "LAYAR VIDEO"
-        if score >= 2: return "LAYAR VIDEO"
+        if avg_v > 135 and avg_s < 110: 
+            return "LAYAR VIDEO"
         return "FOTO CETAK"
 
     @staticmethod
@@ -232,7 +214,7 @@ class SmartDoorApp:
         if self.ui.get("status") in ("DIBUKA MANUAL", "STARTING"): return
         cx, cy = face.bbox[0] + face.bbox[2]//2, face.bbox[1] + face.bbox[3]//2
         
-        if self.state.value > 1 and self.prev_center and np.hypot(cx-self.prev_center[0], cy-self.prev_center[1]) > max(face.bbox[2:])*2.5: return self._fail("WAJAH BERGANTI", instr="Mulai Ulang")
+        if self.state.value > 1 and self.prev_center and np.hypot(cx-self.prev_center[0], cy-self.prev_center[1]) > max(face.bbox[2:])*2.5: return self._fail("WAH BERGANTI", instr="Mulai Ulang")
         self.prev_center = (cx, cy) 
         if face.bbox[3] > int(config.FRAME_HEIGHT * 0.70): return self._fail("TERLALU DEKAT", config.COLOR_YELLOW, "Mundur")
         if self.state == ValidationState.IDLE: self.state, self.auth_start = ValidationState.RECOGNIZING, time.time(); return
@@ -249,7 +231,8 @@ class SmartDoorApp:
             self.fake_frames += 1; self.spoof_hist.append(m_conf)
             avg_score = sum(self.spoof_hist) / len(self.spoof_hist)
 
-            if self.fake_frames >= 3: 
+            # OPTIMASI: Syarat block diturunkan menjadi berturut-turut >= 2 frame agar keputusan tolak instan
+            if self.fake_frames >= 2: 
                 lat_ms = (time.time() - self.spoof_start_time) * 1000
                 sp_type = "TIDAK YAKIN (SKOR RENDAH)" if is_m_real else UIHelper.analyze_spoof_type(raw, face.bbox)
                 
@@ -259,7 +242,7 @@ class SmartDoorApp:
                     print(f"\n{'='*60}\n⚠️ SECURITY BLOCK: {'Ditolak Skor Rendah' if is_m_real else 'Serangan '+sp_type}\n   AI Confidence: {avg_score:.4f} | Latensi: {lat_ms:.0f} ms\n{'='*60}")
                     if hasattr(self.db, 'log_spoofing_async'): self.db.log_spoofing_async(round(avg_score, 4), 0.0, 0.0, sp_type, round(lat_ms, 2))
                 return 
-            self.ui.update({"wait": False, "bbox": face.bbox, "status": "MEMINDAI LIVENESS...", "color": config.COLOR_YELLOW, "instr": f"Tahan Posisi ({self.fake_frames}/3)..."}); return
+            self.ui.update({"wait": False, "bbox": face.bbox, "status": "MEMINDAI LIVENESS...", "color": config.COLOR_YELLOW, "instr": f"Tahan Posisi ({self.fake_frames}/2)..."}); return
         else:
             self.fake_frames, self.spoof_hist = 0, []
 

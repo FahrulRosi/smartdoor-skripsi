@@ -50,14 +50,9 @@ class UIHelper:
 
     @staticmethod
     def analyze_spoof_type(raw_frame, bbox):
-        """
-        VERSI OPTIMASI: Menghapus kalkulasi FFT (Fourier) dan Canny Edge yang berat.
-        Menggunakan analisis histogram HSV ringan agar latensi tidak melonjak di Raspberry Pi.
-        """
         fh, fw = raw_frame.shape[:2]
         bx, by, bw, bh = bbox
-        
-        # Memperkecil padding crop dari 0.40 menjadi 0.15 agar ukuran matriks gambar lebih hemat CPU
+
         pad_w, pad_h = int(bw * 0.15), int(bh * 0.15)
         x1, y1 = max(0, bx - pad_w), max(0, by - pad_h)
         x2, y2 = min(fw, bx + bw + pad_w), min(fh, by + bh + pad_h)
@@ -68,8 +63,7 @@ class UIHelper:
         hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
         avg_s = np.mean(hsv[:, :, 1])
         avg_v = np.mean(hsv[:, :, 2])
-        
-        # Analisis kilat perbedaan saturasi layar HP/Monitor vs Kertas Cetak
+
         if avg_v > 135 and avg_s < 110: 
             return "LAYAR VIDEO"
         return "FOTO CETAK"
@@ -242,7 +236,8 @@ class SmartDoorApp:
                     print(f"\n{'='*60}\n⚠️ SECURITY BLOCK: {'Ditolak Skor Rendah' if is_m_real else 'Serangan '+sp_type}\n   AI Confidence: {avg_score:.4f} | Latensi: {lat_ms:.0f} ms\n{'='*60}")
                     if hasattr(self.db, 'log_spoofing_async'): self.db.log_spoofing_async(round(avg_score, 4), 0.0, 0.0, sp_type, round(lat_ms, 2))
                 
-                # INTEGRASI RESET: Langsung lempar ke _fail untuk freeze sistem 2 detik dan set fake_frames kembali ke 0
+                # Sistem akan reset kembali ke 0 (karena memanggil self._reset_state() di dalam _fail)
+                # dan UI dibekukan selama 2 detik sebelum bisa mendeteksi wajah lagi.
                 return self._fail(f"SPOOF: {sp_type}", config.COLOR_RED, "Akses Ditolak", wait=False)
                 
             self.ui.update({"wait": False, "bbox": face.bbox, "status": "MEMINDAI LIVENESS...", "color": config.COLOR_YELLOW, "instr": f"Tahan Posisi ({self.fake_frames}/2)..."}); return

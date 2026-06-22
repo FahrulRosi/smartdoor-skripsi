@@ -52,7 +52,6 @@ class UIHelper:
         fh, fw = raw_frame.shape[:2]
         bx, by, bw, bh = bbox
         
-        # Padding 40% untuk menangkap bezel HP & pantulan tepi layar
         pad_w, pad_h = int(bw * 0.40), int(bh * 0.40)
         x1, y1 = max(0, bx - pad_w), max(0, by - pad_h)
         x2, y2 = min(fw, bx + bw + pad_w), min(fh, by + bh + pad_h)
@@ -63,28 +62,22 @@ class UIHelper:
         gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
         hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
         
-        # 1. MOIRÉ PATTERN (Pola Grid Piksel Digital) - Dioptimasi ke 64x64 untuk RPi
         gray_res = cv2.resize(gray, (64, 64))
         f_transform = np.fft.fft2(gray_res)
         f_shift = np.fft.fftshift(f_transform)
         magnitude_spectrum = 20 * np.log(np.abs(f_shift) + 1)
         cy, cx = 32, 32
-        magnitude_spectrum[cy-6:cy+6, cx-6:cx+6] = 0 # Abaikan lighting global
+        magnitude_spectrum[cy-6:cy+6, cx-6:cx+6] = 0 
         moire_score = np.max(magnitude_spectrum) / (np.mean(magnitude_spectrum) + 1e-6)
         
-        # 2. SPECULAR GLARE (Pantulan Kaca HP)
         glare_mask = cv2.threshold(gray, 235, 255, cv2.THRESH_BINARY)[1]
         glare_ratio = np.sum(glare_mask == 255) / (gray.size + 1e-6)
         
-        # 3. COLOR WASHOUT (Karakteristik pudar akibat Backlight)
         avg_s = np.mean(hsv[:, :, 1])
         avg_v = np.mean(hsv[:, :, 2])
         
-        # 4. EDGE DENSITY (Mendeteksi garis keras bezel)
         edges = cv2.Canny(gray, 100, 200)
         edge_density = np.sum(edges == 255) / (gray.size + 1e-6)
-
-        # --- SISTEM SCORING ---
         score = 0
         
         if moire_score > 2.2: score += 1
@@ -92,7 +85,6 @@ class UIHelper:
         if avg_v > 135 and avg_s < 110: score += 1 
         if edge_density > 0.035: score += 1       
             
-        # Bypass langsung jika tanda sangat kuat
         if glare_ratio > 0.02 or moire_score > 3.0:
             return "LAYAR VIDEO"
             
@@ -279,7 +271,6 @@ class SmartDoorApp:
         else:
             self.fake_frames, self.spoof_hist = 0, []
 
-        # IDENTIFICATION & CHALLENGE PHASE
         if self.state == ValidationState.RECOGNIZING:
             t_val = time.time()
             b_name, sm_score, d_thr, f_acc, is_recog = self._check_identity(raw, enhanced, face, l_str)

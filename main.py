@@ -207,7 +207,7 @@ class SmartDoorApp:
         return self.pose_hold >= 3, abs(float(val)), thr, salah
 
     def _check_identity(self, raw, enhanced, face, l_str):
-        d_thr = {"Normal": 0.70, "Backlight": 0.67, "Low Light": 0.65}.get(l_str, 0.70)
+        d_thr = {"Normal": 0.70, "Backlight": 0.65, "Low Light": 0.67}.get(l_str, 0.70)
         if not self.known_faces_2d: return "TIDAK DIKENAL", 0.0, d_thr, 0.0, False
         
         cropped = UIHelper.get_aligned_crop(enhanced, face, target_size=(112, 112))

@@ -35,6 +35,34 @@ class Helpers:
         return cv2.cvtColor(img_yuv, cv2.COLOR_YUV2BGR)
 
     @staticmethod
+    def get_aligned_crop(frame, face, target_size=(112, 112)):
+        lm = getattr(face, 'landmarks', [])
+        fh, fw = frame.shape[:2]
+        
+        if not lm or len(lm) < 363: 
+            bx, by, bw, bh = face.bbox
+            return frame[max(0, by):min(fh, by+bh), max(0, bx):min(fw, bx+bw)]
+        
+        le = np.array([(lm[33].x + lm[133].x) * fw / 2, (lm[33].y + lm[133].y) * fh / 2])
+        re = np.array([(lm[263].x + lm[362].x) * fw / 2, (lm[263].y + lm[362].y) * fh / 2])
+
+        dy = re[1] - le[1]
+        dx = re[0] - le[0]
+        angle = np.degrees(np.arctan2(dy, dx))
+
+        desired_dist = (0.65 - 0.35) * target_size[0]
+        current_dist = np.linalg.norm(re - le)
+        scale = desired_dist / (current_dist + 1e-6)
+        
+        eye_center = ((le[0] + re[0]) / 2, (le[1] + re[1]) / 2)
+        M = cv2.getRotationMatrix2D(eye_center, angle, scale)
+        
+        M[0, 2] += (target_size[0] * 0.5 - eye_center[0])
+        M[1, 2] += (target_size[1] * 0.40 - eye_center[1])
+        
+        return cv2.warpAffine(frame, M, target_size, flags=cv2.INTER_CUBIC)
+
+    @staticmethod
     def capture_blink(face):
         if not getattr(face, 'landmarks', None) or len(face.landmarks) < 400: return None
         p = np.array([[face.landmarks[i].x, face.landmarks[i].y] for i in [33,160,158,133,153,144,362,385,387,263,373,380]])
@@ -296,7 +324,9 @@ class FaceRegistrationApp:
             return
         self.last_extraction_time = current_time
 
-        best_crop = self.model.crop_face(frame, face.bbox)
+        # === MENGGUNAKAN ALIGNED CROP AGAR SINKRON DENGAN MAIN.PY ===
+        best_crop = Helpers.get_aligned_crop(frame, face, target_size=(112, 112))
+        
         if best_crop is not None and best_crop.size > 0:
             emb_normal = self.model.get_embedding(best_crop)
             img_lowlight = cv2.convertScaleAbs(best_crop, alpha=0.8, beta=-50)
@@ -356,7 +386,6 @@ class FaceRegistrationApp:
                     if 'user_id' in data: existing_user_id = data['user_id']
                     if 'embedding' in data:
                         emb_val = data['embedding']
-                        # PERBAIKAN: Menjaga konsistensi array 2D saat update data user lama
                         if isinstance(emb_val, list) and len(emb_val) > 0 and isinstance(emb_val[0], list):
                             existing_embeddings = emb_val
                         elif isinstance(emb_val, list) and len(emb_val) == 1536:

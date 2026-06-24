@@ -148,19 +148,16 @@ class SmartDoorApp:
                 emb_data = data['embedding']
                 vectors = []
                 
-                # Kasus 1: Array 2D (List didalam List) -> Sesuai struktur simpan register baru
                 if isinstance(emb_data, list) and len(emb_data) > 0 and isinstance(emb_data[0], list):
                     for sub_emb in emb_data:
                         if len(sub_emb) == 512:
                             vectors.append(np.array(sub_emb, dtype=np.float32))
                 
-                # Kasus 2: List 1D panjang (1536 elemen) yang ter-flatten oleh DB driver
                 elif isinstance(emb_data, list) and len(emb_data) == 1536:
                     vectors.append(np.array(emb_data[0:512], dtype=np.float32))
                     vectors.append(np.array(emb_data[512:1024], dtype=np.float32))
                     vectors.append(np.array(emb_data[1024:1536], dtype=np.float32))
                     
-                # Kasus 3: Baris data lama tunggal berdimensi 512
                 elif isinstance(emb_data, list) and len(emb_data) == 512:
                     vectors.append(np.array(emb_data, dtype=np.float32))
                 
@@ -258,7 +255,7 @@ class SmartDoorApp:
                 self.missed_frames += 1 
                 if self.missed_frames >= 30: self._fail("", wait=True)
             else: 
-                self.missed_frames, face = 0, max(faces, key=lambda f: f.bbox[2] * f.bbox[3])
+                self.missed_frames, face = max(faces, key=lambda f: f.bbox[2] * f.bbox[3])
                 if self.state in (ValidationState.IDLE, ValidationState.RECOGNIZING): self.locked_light_cond = UIHelper.get_light_condition_dynamic(frame, face.bbox)
                 
                 l_str = self.locked_light_cond
@@ -303,6 +300,20 @@ class SmartDoorApp:
             self.fake_frames, self.spoof_hist = 0, []
 
         if self.state == ValidationState.RECOGNIZING:
+            # === FILTER FRAME TERBAIK (ANTI MENUNDUK & BLUR) ===
+            c_pose = self.pose_estimator.estimate(face, self.detector)
+            yaw, pitch, roll = c_pose.get("yaw", 0), c_pose.get("pitch", 0), c_pose.get("roll", 0)
+            
+            if abs(yaw) > 15 or abs(pitch) > 15 or abs(roll) > 15:
+                self.ui.update({"status": "MENGAMBIL FRAME...", "color": config.COLOR_YELLOW, "instr": "Tatap lurus ke kamera"})
+                return  
+            
+            gray_roi = cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY)[max(0, face.bbox[1]):min(raw.shape[0], face.bbox[1]+face.bbox[3]), max(0, face.bbox[0]):min(raw.shape[1], face.bbox[0]+face.bbox[2])]
+            if gray_roi.size > 0 and cv2.Laplacian(gray_roi, cv2.CV_64F).var() < 40:
+                self.ui.update({"status": "KAMERA BLUR", "color": config.COLOR_YELLOW, "instr": "Tahan posisi kepala"})
+                return
+            # ===================================================
+
             t_val = time.time()
             b_name, sm_score, d_thr, f_acc, is_recog = self._check_identity(raw, enhanced, face, l_str)
             disp_name = b_name.split(" - ", 1)[-1] if (b_name != "TIDAK DIKENAL") else "TIDAK DIKENAL"

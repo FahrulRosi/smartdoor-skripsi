@@ -32,6 +32,10 @@ class UIHelper:
 
     @staticmethod
     def get_aligned_crop(frame, face, target_size=(112, 112)):
+        """
+        FUNGSI UTAMA UNTUK MENINGKATKAN SKOR COSINE SIMILARITY
+        Mentransformasikan wajah miring/jauh menjadi tegak, simetris, dan presisi berbasis landmark mata.
+        """
         lm = getattr(face, 'landmarks', [])
         fh, fw = frame.shape[:2]
         
@@ -138,32 +142,12 @@ class SmartDoorApp:
     def _init_heavy_models(self):
         self.db, self.model, self.pose_estimator = FaceDatabase(), MobileFaceNet(), HeadPoseEstimator()
         self.anti_spoof = SilentAntiSpoofing(getattr(config, 'ANTI_SPOOFING_MODEL', "liveness/antispoofing_int8.onnx"), getattr(config, 'ANTI_SPOOFING_THRESHOLD', 0.85))
-        self.detector = FaceMeshDetector(min_detection_confidence=0.35, min_tracking_confidence=0.35)
-        self.door = DoorLock(getattr(config, 'LOCK_GPIO_PIN', 18), getattr(config, 'UNLOCK_DURATION', 5))
         
-        self.known_faces_2d = {}
-        raw_db_faces = self.db.load_all_faces() or {}
-        for name, data in raw_db_faces.items():
-            if isinstance(data, dict) and 'embedding' in data:
-                emb_data = data['embedding']
-                vectors = []
-                
-                if isinstance(emb_data, list) and len(emb_data) > 0 and isinstance(emb_data[0], list):
-                    for sub_emb in emb_data:
-                        if len(sub_emb) == 512:
-                            vectors.append(np.array(sub_emb, dtype=np.float32))
-                
-                elif isinstance(emb_data, list) and len(emb_data) == 1536:
-                    vectors.append(np.array(emb_data[0:512], dtype=np.float32))
-                    vectors.append(np.array(emb_data[512:1024], dtype=np.float32))
-                    vectors.append(np.array(emb_data[1024:1536], dtype=np.float32))
-                    
-                elif isinstance(emb_data, list) and len(emb_data) == 512:
-                    vectors.append(np.array(emb_data, dtype=np.float32))
-                
-                if vectors:
-                    self.known_faces_2d[name] = vectors
-
+        self.detector = FaceMeshDetector(min_detection_confidence=0.35, min_tracking_confidence=0.35)
+        
+        self.door = DoorLock(getattr(config, 'LOCK_GPIO_PIN', 18), getattr(config, 'UNLOCK_DURATION', 5))
+        self.known_faces_2d = {k: [np.array(e, dtype=np.float32) for e in (v['embedding'] if isinstance(v['embedding'][0], list) else [v['embedding']])] for k, v in (self.db.load_all_faces() or {}).items() if isinstance(v, dict) and v.get('embedding')}
+        
         if GPIO_AVAILABLE:
             btn = getattr(config, 'BUTTON_PIN', 26)
             try: GPIO.setmode(GPIO.BCM); GPIO.setup(btn, GPIO.IN, pull_up_down=GPIO.PUD_UP)
@@ -227,11 +211,11 @@ class SmartDoorApp:
         if not self.known_faces_2d: return "TIDAK DIKENAL", 0.0, d_thr, 0.0, False
         
         cropped = UIHelper.get_aligned_crop(enhanced, face, target_size=(112, 112))
+        
         if cropped is None or cropped.size == 0 or (raw_emb := self.model.get_embedding(cropped)) is None: 
             return "TIDAK DIKENAL", 0.0, d_thr, 0.0, False
 
         q_emb = np.array(raw_emb, dtype=np.float32).flatten(); q_emb /= (np.linalg.norm(q_emb) + 1e-6)
-        
         b_name, b_score = max(((n, np.max([np.dot(q_emb, e) for e in el])) for n, el in self.known_faces_2d.items()), key=lambda x: x[1], default=("", 0.0))
         
         if b_score < d_thr: self.recog_frames = 0; return "TIDAK DIKENAL", b_score, d_thr, 0.0, False
@@ -255,7 +239,8 @@ class SmartDoorApp:
                 self.missed_frames += 1 
                 if self.missed_frames >= 30: self._fail("", wait=True)
             else: 
-                self.missed_frames, face = 0, max(faces, key=lambda f: f.bbox[2] * f.bbox[3])
+                self.missed_frames = 0
+                face = max(faces, key=lambda f: f.bbox[2] * f.bbox[3])
                 if self.state in (ValidationState.IDLE, ValidationState.RECOGNIZING): self.locked_light_cond = UIHelper.get_light_condition_dynamic(frame, face.bbox)
                 
                 l_str = self.locked_light_cond
@@ -300,20 +285,6 @@ class SmartDoorApp:
             self.fake_frames, self.spoof_hist = 0, []
 
         if self.state == ValidationState.RECOGNIZING:
-            # === FILTER FRAME TERBAIK (ANTI MENUNDUK & BLUR) ===
-            c_pose = self.pose_estimator.estimate(face, self.detector)
-            yaw, pitch, roll = c_pose.get("yaw", 0), c_pose.get("pitch", 0), c_pose.get("roll", 0)
-            
-            if abs(yaw) > 15 or abs(pitch) > 15 or abs(roll) > 15:
-                self.ui.update({"status": "MENGAMBIL FRAME...", "color": config.COLOR_YELLOW, "instr": "Tatap lurus ke kamera"})
-                return  
-            
-            gray_roi = cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY)[max(0, face.bbox[1]):min(raw.shape[0], face.bbox[1]+face.bbox[3]), max(0, face.bbox[0]):min(raw.shape[1], face.bbox[0]+face.bbox[2])]
-            if gray_roi.size > 0 and cv2.Laplacian(gray_roi, cv2.CV_64F).var() < 40:
-                self.ui.update({"status": "KAMERA BLUR", "color": config.COLOR_YELLOW, "instr": "Tahan posisi kepala"})
-                return
-            # ===================================================
-
             t_val = time.time()
             b_name, sm_score, d_thr, f_acc, is_recog = self._check_identity(raw, enhanced, face, l_str)
             disp_name = b_name.split(" - ", 1)[-1] if (b_name != "TIDAK DIKENAL") else "TIDAK DIKENAL"

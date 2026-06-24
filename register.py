@@ -26,10 +26,8 @@ class Helpers:
     @staticmethod
     def enhance_adaptive(frame, bbox=None, l_str="Normal"):
         if not getattr(config, 'ENABLE_CLAHE_ENHANCEMENT', True): return frame
-        
         matrix_clip = {"Normal": 1.5, "Low Light": 2.0, "Backlight": 1.8}
         clip_limit = matrix_clip.get(l_str, 1.5)
-        
         denoised = cv2.bilateralFilter(frame, d=3, sigmaColor=30, sigmaSpace=30)
         img_yuv = cv2.cvtColor(denoised, cv2.COLOR_BGR2YUV)
         clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8))
@@ -48,22 +46,16 @@ class Helpers:
     def get_light_condition_dynamic(raw, bbox=None):
         fh, fw = raw.shape[:2]
         gray = cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY)
-        
         ambient_brightness = np.mean(gray)
-        
         if bbox:
             bx, by, bw, bh = bbox
             x1, y1, x2, y2 = max(0, bx), max(0, by), min(fw, bx + bw), min(fh, by + bh)
             face_brightness = np.mean(gray[y1:y2, x1:x2]) if gray[y1:y2, x1:x2].size > 0 else ambient_brightness
-            
             bg_top = gray[max(0, by-80):max(0, by-5), max(0, bx-30):min(fw, bx+bw+30)]
             bg_brightness = np.mean(bg_top) if bg_top.size > 0 else ambient_brightness
-            
             if bg_brightness > 150 and (bg_brightness - face_brightness) > 45 and face_brightness < 120:
                 return "Backlight"
-
-        if ambient_brightness < 65:
-            return "Low Light"
+        if ambient_brightness < 65: return "Low Light"
         return "Normal"
 
     @staticmethod
@@ -182,10 +174,8 @@ class FaceRegistrationApp:
         self._pose_buf = {"yaw": {}, "pitch": {}, "roll": {}}
         self._blink_buf = {"closed": None, "open": None, "logged_closed": False, "logged_open": False}
         self._prev_step = "FACEMESH"
-        
         self.extraction_embeddings = []
         self.last_extraction_time = 0
-        
         self.hold_frames = 0
         self.missed_frames = 0
         self.fake_frames = 0
@@ -198,7 +188,6 @@ class FaceRegistrationApp:
 
     def _record_data_buffers(self, face, pose, enhanced):
         if not self.action_start_time: return
-        
         if self.stage == RegistrationStage.FACEMESH and face.landmarks:
             if self.cap_data["facemesh_vector"] is None:
                 self.hold_frames += 1
@@ -281,7 +270,6 @@ class FaceRegistrationApp:
             self.cap_data.update({"blink_closed": bc, "blink_open": bo})
         
         self._prev_step, self.stage = cur_step, STEP_TO_STAGE.get(cur_step, self.stage)
-        
         if self.stage != RegistrationStage.COMPLETE:
             self.action_start_time = time.time()
             self.hold_frames = 0
@@ -311,10 +299,8 @@ class FaceRegistrationApp:
         best_crop = self.model.crop_face(frame, face.bbox)
         if best_crop is not None and best_crop.size > 0:
             emb_normal = self.model.get_embedding(best_crop)
-
             img_lowlight = cv2.convertScaleAbs(best_crop, alpha=0.8, beta=-50)
             emb_lowlight = self.model.get_embedding(img_lowlight)
-
             img_backlight = cv2.convertScaleAbs(best_crop, alpha=0.5, beta=-90)
             emb_backlight = self.model.get_embedding(img_backlight)
             
@@ -347,7 +333,6 @@ class FaceRegistrationApp:
         vec_back = (avg_back / (np.linalg.norm(avg_back) + 1e-6)).tolist()
 
         final_emb_vectors = [vec_norm, vec_low, vec_back]
-
         light_cond = getattr(self, 'locked_light_cond', "Normal")
         latensi_respon_subjek = round(sum(self.individual_latencies.values()), 2)
         mfn_latency = round((time.time() - self.action_start_time) * 1000, 2)
@@ -366,18 +351,18 @@ class FaceRegistrationApp:
             user_exists = False
             for db_key, data in all_faces_raw.items():
                 db_name = db_key.split(" - ", 1)[-1] if " - " in db_key else db_key
-                
                 if db_name.lower() == self.name.lower():
                     user_exists = True
                     if 'user_id' in data: existing_user_id = data['user_id']
-
                     if 'embedding' in data:
                         emb_val = data['embedding']
+                        # PERBAIKAN: Menjaga konsistensi array 2D saat update data user lama
                         if isinstance(emb_val, list) and len(emb_val) > 0 and isinstance(emb_val[0], list):
                             existing_embeddings = emb_val
+                        elif isinstance(emb_val, list) and len(emb_val) == 1536:
+                            existing_embeddings = [emb_val[0:512], emb_val[512:1024], emb_val[1024:1536]]
                         else:
                             existing_embeddings = [emb_val] if emb_val else []
-
                         single_master_emb = existing_embeddings + final_emb_vectors
                     break
 
@@ -386,12 +371,17 @@ class FaceRegistrationApp:
                     if isinstance(data, dict) and 'embedding' in data:
                         emb_list = data['embedding']
                         if isinstance(emb_list, list) and len(emb_list) > 0:
-                            if not isinstance(emb_list[0], (list, np.ndarray)): emb_list = [emb_list]
+                            if not isinstance(emb_list[0], (list, np.ndarray)): 
+                                if len(emb_list) == 1536:
+                                    emb_list = [emb_list[0:512], emb_list[512:1024], emb_list[1024:1536]]
+                                else:
+                                    emb_list = [emb_list]
 
                             for q_emb in [vec_norm]: 
                                 q_vec = np.array(q_emb, dtype=np.float32)
                                 q_vec = q_vec / (np.linalg.norm(q_vec) + 1e-6)
                                 for db_emb in emb_list:
+                                    if len(db_emb) != 512: continue
                                     db_vec = np.array(db_emb, dtype=np.float32)
                                     db_vec = db_vec / (np.linalg.norm(db_vec) + 1e-6)
                                     sim = np.dot(q_vec, db_vec)
@@ -416,11 +406,9 @@ class FaceRegistrationApp:
             if "face_crops" in self.cap_data: del self.cap_data["face_crops"]
 
             success_master = self.db.save_face(self.name, existing_user_id, single_master_emb, self.cap_data)
-            
             if success_master: 
                 _log(f"⏱️ Ekstraksi AI & Simpan DB Selesai | Latensi AI: {mfn_latency:.2f} ms", "METRIK")
                 _log(f"✅ Total Waktu Seluruh Registrasi | Latensi Sistem Total: {total_waktu_sistem:.2f} ms", "METRIK")
-                
                 Helpers.show_msg(display, "✅ REGISTRASI BERHASIL!", f"User: {self.name} | 3 Vektor Cahaya", config.COLOR_GREEN)
                 with self.frame_lock: self.display_frame = display.copy()
                 time.sleep(1.5)
@@ -456,25 +444,21 @@ class FaceRegistrationApp:
                     
                 self.missed_frames, face = 0, faces[0]
                 bbox_memory = face.bbox
-                
                 current_light = Helpers.get_light_condition_dynamic(raw, face.bbox)
                 
                 if self.stage == RegistrationStage.FACEMESH:
                     self.locked_light_cond = current_light
                 
                 light_cond = getattr(self, 'locked_light_cond', "Normal")
-                
                 if time.time() - getattr(self, 'app_start_time', time.time()) < 2.5:
                     light_cond = "Normal"
                     self.locked_light_cond = current_light 
                 
                 enhanced = Helpers.enhance_adaptive(raw, face.bbox, light_cond)
-                
                 if not self._timer_started: 
                     self.action_start_time, self._timer_started = time.time(), True
                     
                 display = cv2.flip(self.detector.draw(display, face), 1)
-                
                 if face.bbox[3] > int(config.FRAME_HEIGHT * 0.50): 
                     Helpers.draw_hud(display, self.stage, "Wajah Terlalu Dekat!", "Mundur", "", "TOO CLOSE", face.bbox, config.COLOR_YELLOW)
                     with self.frame_lock: self.display_frame = display
@@ -489,7 +473,6 @@ class FaceRegistrationApp:
                     sp_score, sp_real, sp_label = 1.0, True, "REAL"
 
                 hud_txt, term_txt = self._generate_metric_text(pose, ear_val, sp_score, light_cond)
-                
                 if not sp_real:
                     self.fake_frames += 1
                     if self.fake_frames >= 8: 

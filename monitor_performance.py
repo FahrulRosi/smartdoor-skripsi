@@ -154,7 +154,7 @@ def main():
     print("      RASPBERRY PI HARDWARE PERFORMANCE MONITOR")
     print("=" * 60)
     
-    targets = ["main.py", "register.py", "qos_publisher_pi.py"]
+    targets = ["main.py", "register.py"]
     print(f"Mencari proses aktif dari: {', '.join(targets)} ...")
     
     # Tunggu dan cari proses sampai ada yang aktif

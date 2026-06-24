@@ -195,17 +195,15 @@ def main():
             
             # Ambil metrik performa
             try:
-                # cpu_percent(interval=None) non-blocking mengukur cpu sejak pemanggilan terakhir
-                # Untuk proses multi-thread, nilai cpu_percent bisa > 100% (misal 4 core = maks 400%)
-                # Kita bagi dengan jumlah CPU core untuk mendapatkan persentase total rasional jika diinginkan,
-                # tapi psutil.Process.cpu_percent() biasanya mengukur kontribusi ke 1 core.
-                # Kita catat langsung performa proses murni.
-                proc_cpu = proc.cpu_percent(interval=None)
+                # Untuk proses multi-thread, nilai cpu_percent bisa > 100% (misal 4 core = maks 400%).
+                # Kita bagi dengan jumlah core agar skalanya sesuai dengan kapasitas sistem total (0% - 100%).
+                num_cores = psutil.cpu_count() or 1
+                proc_cpu = proc.cpu_percent(interval=None) / num_cores
                 
                 # Mengatasi nilai pertama kali ambil yang seringkali 0.0
                 if elapsed_sec < 1.0 and proc_cpu == 0.0:
                     time.sleep(0.1)
-                    proc_cpu = proc.cpu_percent(interval=None)
+                    proc_cpu = proc.cpu_percent(interval=None) / num_cores
                 
                 # RAM Usage (RSS) dalam MegaBytes (MB)
                 proc_ram_mb = proc.memory_info().rss / (1024 * 1024)

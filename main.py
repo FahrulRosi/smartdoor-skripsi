@@ -255,7 +255,7 @@ class SmartDoorApp:
                 self.missed_frames += 1 
                 if self.missed_frames >= 30: self._fail("", wait=True)
             else: 
-                self.missed_frames, face = max(faces, key=lambda f: f.bbox[2] * f.bbox[3])
+                self.missed_frames, face = 0, max(faces, key=lambda f: f.bbox[2] * f.bbox[3])
                 if self.state in (ValidationState.IDLE, ValidationState.RECOGNIZING): self.locked_light_cond = UIHelper.get_light_condition_dynamic(frame, face.bbox)
                 
                 l_str = self.locked_light_cond

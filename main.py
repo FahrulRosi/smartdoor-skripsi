@@ -26,16 +26,14 @@ class UIHelper:
     @staticmethod
     def enhance_adaptive(frame, bbox, l_str="Normal"):
         if not getattr(config, 'ENABLE_CLAHE_ENHANCEMENT', True): return frame
-        img_yuv = cv2.cvtColor(cv2.bilateralFilter(frame, 3, 30, 30), cv2.COLOR_BGR2YUV)
-        img_yuv[:,:,0] = cv2.createCLAHE(clipLimit={"Normal":1.5, "Low Light":2.2, "Backlight":1.8}.get(l_str, 1.5), tileGridSize=(8, 8)).apply(img_yuv[:,:,0])
+        img_yuv = cv2.cvtColor(cv2.bilateralFilter(frame, 5, 45, 45), cv2.COLOR_BGR2YUV)
+
+        clip_limits = {"Normal": 1.3, "Low Light": 1.9, "Backlight": 1.5}
+        img_yuv[:,:,0] = cv2.createCLAHE(clipLimit=clip_limits.get(l_str, 1.3), tileGridSize=(8, 8)).apply(img_yuv[:,:,0])
         return cv2.cvtColor(img_yuv, cv2.COLOR_YUV2BGR)
 
     @staticmethod
     def get_aligned_crop(frame, face, target_size=(112, 112)):
-        """
-        FUNGSI UTAMA UNTUK MENINGKATKAN SKOR COSINE SIMILARITY
-        Mentransformasikan wajah miring/jauh menjadi tegak, simetris, dan presisi berbasis landmark mata.
-        """
         lm = getattr(face, 'landmarks', [])
         fh, fw = frame.shape[:2]
         
@@ -210,15 +208,37 @@ class SmartDoorApp:
         d_thr = {"Normal": 0.70, "Backlight": 0.65, "Low Light": 0.67}.get(l_str, 0.70)
         if not self.known_faces_2d: return "TIDAK DIKENAL", 0.0, d_thr, 0.0, False
         
-        cropped = UIHelper.get_aligned_crop(enhanced, face, target_size=(112, 112))
+        cropped_enh = UIHelper.get_aligned_crop(enhanced, face, target_size=(112, 112))
+        cropped_raw = UIHelper.get_aligned_crop(raw, face, target_size=(112, 112))
         
-        if cropped is None or cropped.size == 0 or (raw_emb := self.model.get_embedding(cropped)) is None: 
+        current_embeddings = []
+        if cropped_enh is not None and cropped_enh.size > 0:
+            if (emb_e := self.model.get_embedding(cropped_enh)) is not None:
+                q_e = np.array(emb_e, dtype=np.float32).flatten()
+                q_e /= (np.linalg.norm(q_e) + 1e-6)
+                current_embeddings.append(q_e)
+                
+        if cropped_raw is not None and cropped_raw.size > 0:
+            if (emb_r := self.model.get_embedding(cropped_raw)) is not None:
+                q_r = np.array(emb_r, dtype=np.float32).flatten()
+                q_r /= (np.linalg.norm(q_r) + 1e-6)
+                current_embeddings.append(q_r)
+                
+        if not current_embeddings: 
             return "TIDAK DIKENAL", 0.0, d_thr, 0.0, False
 
-        q_emb = np.array(raw_emb, dtype=np.float32).flatten(); q_emb /= (np.linalg.norm(q_emb) + 1e-6)
-        b_name, b_score = max(((n, np.max([np.dot(q_emb, e) for e in el])) for n, el in self.known_faces_2d.items()), key=lambda x: x[1], default=("", 0.0))
+        b_name, b_score = "TIDAK DIKENAL", 0.0
+        for name, el in self.known_faces_2d.items():
+            for e in el:
+                for q_emb in current_embeddings:
+                    score = np.dot(q_emb, e)
+                    if score > b_score:
+                        b_score = score
+                        b_name = name
         
-        if b_score < d_thr: self.recog_frames = 0; return "TIDAK DIKENAL", b_score, d_thr, 0.0, False
+        if b_score < d_thr: 
+            self.recog_frames = 0
+            return "TIDAK DIKENAL", b_score, d_thr, 0.0, False
         
         req_frames = getattr(config, 'REQUIRED_STABLE_FRAMES', 6)
         self.recog_frames += 1

@@ -149,12 +149,11 @@ class Helpers:
             y_offset += 22
 
 class FaceRegistrationApp:
-    # PERBAIKAN: Dikembalikan ke logika asli untuk frame non-mirror 
-    # (Toleh/Miring Kanan secara fisik = Nilai Negatif, Kiri fisik = Positif)
+    # PERBAIKAN: Positif/Negatif Disesuaikan dengan Mirror Effect
     POSE_CFG = {
-        RegistrationStage.YAW: ("yaw_snapshots", "yaw_right", "yaw_left", "yaw", getattr(config, 'YAW_THRESHOLD', 25.0)), 
+        RegistrationStage.YAW: ("yaw_snapshots", "yaw_left", "yaw_right", "yaw", getattr(config, 'YAW_THRESHOLD', 25.0)), 
         RegistrationStage.PITCH: ("pitch_snapshots", "pitch_up", "pitch_down", "pitch", getattr(config, 'PITCH_THRESHOLD', 20.0)), 
-        RegistrationStage.ROLL: ("roll_snapshots", "roll_right", "roll_left", "roll", getattr(config, 'ROLL_THRESHOLD', 25.0))
+        RegistrationStage.ROLL: ("roll_snapshots", "roll_left", "roll_right", "roll", getattr(config, 'ROLL_THRESHOLD', 25.0))
     }
     
     def __init__(self, name):
@@ -232,7 +231,6 @@ class FaceRegistrationApp:
                     self.cap_data["facemesh_vector"] = np.array([[l.x, l.y, l.z] for l in face.landmarks], dtype=np.float32).flatten()
                     self.hold_frames = 0
                     self.individual_latencies["FaceMesh (3D)"] = lat_ms
-                    _log(f"⏱️ Selesai Tahap FaceMesh (3D) | Latensi: {lat_ms:.2f} ms", "METRIK")
                     self.action_start_time = time.time() 
 
         if self.stage in self.POSE_CFG:
@@ -250,10 +248,8 @@ class FaceRegistrationApp:
                         lat_ms = round((time.time() - self.action_start_time) * 1000, 2)
                         buf[tag] = {k: float(pose.get(k, 0.0)) for k in ("yaw", "pitch", "roll")}
                         buf[tag]["tag"], buf[tag]["latency_ms"] = tag, lat_ms 
-                        # PERBAIKAN: Tukar label agar Kanan = Negatif, Kiri = Positif
                         friendly_name = {"yaw_left": "Toleh Kiri", "yaw_right": "Toleh Kanan", "pitch_up": "Angguk Atas", "pitch_down": "Tunduk Bawah", "roll_left": "Miring Kiri", "roll_right": "Miring Kanan"}.get(tag, tag)
                         self.individual_latencies[friendly_name] = lat_ms
-                        _log(f"⏱️ Selesai Tahap Pose ({friendly_name}) | Latensi: {lat_ms:.2f} ms", "METRIK")
                         self.action_start_time = time.time() 
                         self.hold_frames = 0
             else: 
@@ -280,9 +276,6 @@ class FaceRegistrationApp:
                 elif ear > blink_thr + 0.01 and self._blink_buf.get("is_closed", False):
                     self._blink_buf["is_closed"] = False
                     self._blink_buf["count"] = self._blink_buf.get("count", 0) + 1
-                    
-                    lat_ms = round((time.time() - self.action_start_time) * 1000, 2)
-                    _log(f"⏱️ Blink {self._blink_buf['count']}/2 Terdeteksi | Latensi: {lat_ms:.2f} ms", "METRIK")
                     self.action_start_time = time.time()
 
     def _generate_metric_text(self, pose, ear_val, sp_score, light_cond):
@@ -304,9 +297,7 @@ class FaceRegistrationApp:
             self.cap_data[self.POSE_CFG[STEP_TO_STAGE[self._prev_step]][0]], self._pose_buf[axis] = list(self._pose_buf[axis].values()), {}  
             
         if cur_step == "DONE" and self._prev_step == "BLINK":
-            if self._blink_buf.get("count", 0) < 2:
-                return 
-            
+            if self._blink_buf.get("count", 0) < 2: return 
             self.cap_data["blink_closed"] = self._blink_buf.get("closed")
             self.cap_data["blink_open"] = self._blink_buf.get("open")
         
@@ -330,15 +321,10 @@ class FaceRegistrationApp:
 
         current_time = time.time()
         if current_time - self.last_extraction_time < 0.1:
-            collected = len(self.extraction_embeddings)
-            progress_pct = int((collected / 5) * 100)
-            Helpers.draw_hud(display, self.stage, f"🧠 EKSTRAKSI FITUR WAJAH ({progress_pct}%)", f"Mengambil data {collected}/5. Tahan posisi...", score_txt, f"Real: {sp_score:.2f}", face.bbox, config.COLOR_CYAN)
-            with self.frame_lock: self.display_frame = display.copy()
             return
         self.last_extraction_time = current_time
 
         best_crop = Helpers.get_aligned_crop(frame, face, target_size=(112, 112))
-        
         if best_crop is not None and best_crop.size > 0:
             emb_normal = self.model.get_embedding(best_crop)
             img_lowlight = cv2.convertScaleAbs(best_crop, alpha=0.8, beta=-50)
@@ -347,11 +333,7 @@ class FaceRegistrationApp:
             emb_backlight = self.model.get_embedding(img_backlight)
             
             if emb_normal is not None and emb_lowlight is not None and emb_backlight is not None:
-                self.extraction_embeddings.append({
-                    "normal": np.array(emb_normal).flatten(),
-                    "lowlight": np.array(emb_lowlight).flatten(),
-                    "backlight": np.array(emb_backlight).flatten()
-                })
+                self.extraction_embeddings.append({"normal": np.array(emb_normal).flatten(), "lowlight": np.array(emb_lowlight).flatten(), "backlight": np.array(emb_backlight).flatten()})
 
         total_frames_needed = 5
         collected = len(self.extraction_embeddings)
@@ -388,7 +370,6 @@ class FaceRegistrationApp:
         all_faces_raw = self.db.load_all_faces()
         existing_user_id = self.user_id
         single_master_emb = final_emb_vectors
-        
         q_len = len(vec_norm) 
 
         if all_faces_raw:
@@ -396,7 +377,6 @@ class FaceRegistrationApp:
                 if isinstance(data, dict) and 'embedding' in data:
                     emb_list = data['embedding']
                     if isinstance(emb_list, list) and len(emb_list) > 0:
-                        
                         if not isinstance(emb_list[0], (list, np.ndarray)): 
                             if len(emb_list) == q_len * 3:
                                 emb_list = [emb_list[0:q_len], emb_list[q_len:q_len*2], emb_list[q_len*2:q_len*3]]
@@ -406,17 +386,14 @@ class FaceRegistrationApp:
                         for q_emb in [vec_norm]: 
                             q_vec = np.array(q_emb, dtype=np.float32)
                             q_vec = q_vec / (np.linalg.norm(q_vec) + 1e-6)
-                            
                             for db_emb in emb_list:
                                 if len(db_emb) != q_len: continue 
                                 db_vec = np.array(db_emb, dtype=np.float32)
                                 db_vec = db_vec / (np.linalg.norm(db_vec) + 1e-6)
-                                
                                 sim = np.dot(q_vec, db_vec)
                                 if sim > best_sim_score:
                                     best_sim_score = sim
                                     duplicate_name = db_key.split(" - ", 1)[-1] if " - " in db_key else db_key
-                                
                                 if sim >= anti_dup_thr: 
                                     is_duplicate = True; break
                             if is_duplicate: break
@@ -449,13 +426,9 @@ class FaceRegistrationApp:
         self.cap_data["reg_latency_ms"] = total_waktu_sistem
         self.cap_data["individual_latencies"] = self.individual_latencies
         self.cap_data.update({"headpose_vector": [float(pose["yaw"]), float(pose["pitch"]), float(pose["roll"])], "registration_accuracy": 100.0, "light_condition": light_cond})
-        if "face_crops" in self.cap_data: del self.cap_data["face_crops"]
 
-        success_master = self.db.save_face(self.name, existing_user_id, single_master_emb, self.cap_data)
-        if success_master: 
-            _log(f"⏱️ Ekstraksi AI & Simpan DB Selesai | Latensi AI: {mfn_latency:.2f} ms", "METRIK")
-            _log(f"✅ Total Waktu Seluruh Registrasi | Latensi Sistem Total: {total_waktu_sistem:.2f} ms", "METRIK")
-            Helpers.show_msg(display, "✅ REGISTRASI BERHASIL!", f"User: {self.name} | 3 Vektor Cahaya", config.COLOR_GREEN)
+        if self.db.save_face(self.name, existing_user_id, single_master_emb, self.cap_data): 
+            Helpers.show_msg(display, "✅ REGISTRASI BERHASIL!", f"User: {self.name}", config.COLOR_GREEN)
             with self.frame_lock: self.display_frame = display.copy()
             time.sleep(1.5)
             self.stage = RegistrationStage.COMPLETE 
@@ -471,19 +444,20 @@ class FaceRegistrationApp:
                     time.sleep(0.01)
                     continue
                     
+                # PERBAIKAN: Video sekarang seperti Cermin!
+                frame = cv2.flip(frame, 1) 
+                
                 raw = frame.copy()
-                display = raw # PERBAIKAN: Gunakan frame asli tanpa pencerminan
+                display = raw 
                 faces = self.detector.detect(raw)
                 
                 if not faces: 
                     self.missed_frames += 1
                     if self.missed_frames >= 15: 
                         bbox_memory = None
-                        # PERBAIKAN: Hapus pencerminan
                         Helpers.draw_hud(display, self.stage, "Hadapkan wajah", "", "", "NO FACE", None, config.COLOR_RED)
                         self._timer_started = False
                     elif bbox_memory: 
-                        # PERBAIKAN: Hapus pencerminan
                         Helpers.draw_hud(display, self.stage, "Menganalisa...", "", "", "TRACKING", bbox_memory, config.COLOR_YELLOW)
                     with self.frame_lock: self.display_frame = display
                     continue
@@ -504,7 +478,6 @@ class FaceRegistrationApp:
                 if not self._timer_started: 
                     self.action_start_time, self._timer_started = time.time(), True
                     
-                # PERBAIKAN: Menggambar pada frame asli dan hapus pencerminan
                 display = self.detector.draw(display, face)
                 if face.bbox[3] > int(config.FRAME_HEIGHT * 0.50): 
                     Helpers.draw_hud(display, self.stage, "Wajah Terlalu Dekat!", "Mundur", "", "TOO CLOSE", face.bbox, config.COLOR_YELLOW)

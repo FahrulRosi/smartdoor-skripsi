@@ -14,7 +14,6 @@ class LivenessManager:
         self._hold_frames = 0         
         self._required_frames = 3     
         
-        # Variabel khusus Kedipan Mata
         self._blink_state = 0         
         self._ear_history = []
         self._blink_count = 0
@@ -47,14 +46,14 @@ class LivenessManager:
             else: self._hold_frames = 0
             return {"status": "pending", "step": "FACEMESH", "instruction": "1. Tatap Lurus ke Kamera", "progress": "Arahkan wajah ke depan"}
 
-        # ──── TAHAP 1: TOLEH KANAN (YAW KANAN = NEGATIF) ────
+        # ──── TAHAP 1: TOLEH KANAN (Efek Cermin = Positif) ────
         elif self._register_step == 1:
             if self._pose_state == "WAITING_EXTREME":
-                if yaw < -thr_y: # PERBAIKAN: Logika non-mirror (Kanan = Negatif)
+                if yaw > thr_y: 
                     self._hold_frames += 1
                     if self._hold_frames >= self._required_frames: self._pose_state = "WAITING_CENTER"; self._hold_frames = 0
                 else: self._hold_frames = 0
-                return {"status": "pending", "step": "YAW", "instruction": "2a. Toleh ke KANAN", "progress": f"Target: <{-thr_y}° | Saat ini: {yaw:.1f}°"}
+                return {"status": "pending", "step": "YAW", "instruction": "2a. Toleh ke KANAN", "progress": f"Target: >{thr_y}° | Saat ini: {yaw:.1f}°"}
             elif self._pose_state == "WAITING_CENTER":
                 if is_center:
                     self._hold_frames += 1
@@ -62,14 +61,14 @@ class LivenessManager:
                 else: self._hold_frames = 0
                 return {"status": "pending", "step": "YAW", "instruction": "Tahan LURUS ke Depan", "progress": "Tunggu wajah lurus..."}
 
-        # ──── TAHAP 2: TOLEH KIRI (YAW KIRI = POSITIF) ────
+        # ──── TAHAP 2: TOLEH KIRI (Efek Cermin = Negatif) ────
         elif self._register_step == 2:
             if self._pose_state == "WAITING_EXTREME":
-                if yaw > thr_y: # PERBAIKAN: Logika non-mirror (Kiri = Positif)
+                if yaw < -thr_y: 
                     self._hold_frames += 1
                     if self._hold_frames >= self._required_frames: self._pose_state = "WAITING_CENTER"; self._hold_frames = 0
                 else: self._hold_frames = 0
-                return {"status": "pending", "step": "YAW", "instruction": "2b. Toleh ke KIRI", "progress": f"Target: >{thr_y}° | Saat ini: {yaw:.1f}°"}
+                return {"status": "pending", "step": "YAW", "instruction": "2b. Toleh ke KIRI", "progress": f"Target: <{-thr_y}° | Saat ini: {yaw:.1f}°"}
             elif self._pose_state == "WAITING_CENTER":
                 if is_center:
                     self._hold_frames += 1
@@ -77,7 +76,7 @@ class LivenessManager:
                 else: self._hold_frames = 0
                 return {"status": "pending", "step": "YAW", "instruction": "Tahan LURUS ke Depan", "progress": "Tunggu wajah lurus..."}
 
-        # ──── TAHAP 3: DONGAK ATAS (PITCH ATAS = NEGATIF) ────
+        # ──── TAHAP 3: DONGAK ATAS (Pitch Negatif) ────
         elif self._register_step == 3:
             if self._pose_state == "WAITING_EXTREME":
                 if pitch < -thr_p: 
@@ -92,7 +91,7 @@ class LivenessManager:
                 else: self._hold_frames = 0
                 return {"status": "pending", "step": "PITCH", "instruction": "Tahan LURUS ke Depan", "progress": "Tunggu wajah lurus..."}
 
-        # ──── TAHAP 4: TUNDUK BAWAH (PITCH BAWAH = POSITIF) ────
+        # ──── TAHAP 4: TUNDUK BAWAH (Pitch Positif) ────
         elif self._register_step == 4:
             if self._pose_state == "WAITING_EXTREME":
                 if pitch > thr_p: 
@@ -107,14 +106,14 @@ class LivenessManager:
                 else: self._hold_frames = 0
                 return {"status": "pending", "step": "PITCH", "instruction": "Tahan LURUS ke Depan", "progress": "Tunggu wajah lurus..."}
 
-        # ──── TAHAP 5: MIRING KANAN (ROLL KANAN = NEGATIF) ────
+        # ──── TAHAP 5: MIRING KANAN (Efek Cermin = Positif) ────
         elif self._register_step == 5:
             if self._pose_state == "WAITING_EXTREME":
-                if roll < -thr_r: # PERBAIKAN: Logika non-mirror (Miring Kanan = Negatif)
+                if roll > thr_r: 
                     self._hold_frames += 1
                     if self._hold_frames >= self._required_frames: self._pose_state = "WAITING_CENTER"; self._hold_frames = 0
                 else: self._hold_frames = 0
-                return {"status": "pending", "step": "ROLL", "instruction": "4a. Miring ke KANAN", "progress": f"Target: <{-thr_r}° | Saat ini: {roll:.1f}°"}
+                return {"status": "pending", "step": "ROLL", "instruction": "4a. Miring ke KANAN", "progress": f"Target: >{thr_r}° | Saat ini: {roll:.1f}°"}
             elif self._pose_state == "WAITING_CENTER":
                 if is_center:
                     self._hold_frames += 1
@@ -122,14 +121,14 @@ class LivenessManager:
                 else: self._hold_frames = 0
                 return {"status": "pending", "step": "ROLL", "instruction": "Tahan LURUS ke Depan", "progress": "Tunggu wajah lurus..."}
 
-        # ──── TAHAP 6: MIRING KIRI (ROLL KIRI = POSITIF) ────
+        # ──── TAHAP 6: MIRING KIRI (Efek Cermin = Negatif) ────
         elif self._register_step == 6:
             if self._pose_state == "WAITING_EXTREME":
-                if roll > thr_r: # PERBAIKAN: Logika non-mirror (Miring Kiri = Positif)
+                if roll < -thr_r: 
                     self._hold_frames += 1
                     if self._hold_frames >= self._required_frames: self._pose_state = "WAITING_CENTER"; self._hold_frames = 0
                 else: self._hold_frames = 0
-                return {"status": "pending", "step": "ROLL", "instruction": "4b. Miring ke KIRI", "progress": f"Target: >{thr_r}° | Saat ini: {roll:.1f}°"}
+                return {"status": "pending", "step": "ROLL", "instruction": "4b. Miring ke KIRI", "progress": f"Target: <{-thr_r}° | Saat ini: {roll:.1f}°"}
             elif self._pose_state == "WAITING_CENTER":
                 if is_center:
                     self._hold_frames += 1

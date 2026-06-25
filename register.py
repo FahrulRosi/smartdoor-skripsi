@@ -293,9 +293,8 @@ class FaceRegistrationApp:
             self.cap_data[self.POSE_CFG[STEP_TO_STAGE[self._prev_step]][0]], self._pose_buf[axis] = list(self._pose_buf[axis].values()), {}  
             
         if cur_step == "DONE" and self._prev_step == "BLINK":
-            bc = self._blink_buf.get("closed") or {"avg_ear": 0.15, "latency_ms": 0}
-            bo = self._blink_buf.get("open") or {"avg_ear": 0.30, "latency_ms": 0}
-            self.cap_data.update({"blink_closed": bc, "blink_open": bo})
+            self.cap_data["blink_closed"] = self._blink_buf.get("closed")
+            self.cap_data["blink_open"] = self._blink_buf.get("open")
         
         self._prev_step, self.stage = cur_step, STEP_TO_STAGE.get(cur_step, self.stage)
         if self.stage != RegistrationStage.COMPLETE:
@@ -527,7 +526,7 @@ class FaceRegistrationApp:
                     if self.prev_instruction is None or res.get("instruction", "") != self.prev_instruction: 
                         self.prev_instruction, self.action_start_time, self.hold_frames = res.get("instruction", ""), time.time(), 0
                     
-                    Helpers.draw_hud(display, self.stage, res.get("instruction", ""), res.get("progress",""), hud_txt, f"Real: {sp_score:.2f}", face.bbox, config.COLOR_GREEN if res["step"] == "DONE" else config.COLOR_CYAN)
+                    Helpers.draw_hud(display, self.stage, res.get("instruction", ""), res.get("progress","\r"), hud_txt, f"Real: {sp_score:.2f}", face.bbox, config.COLOR_GREEN if res["step"] == "DONE" else config.COLOR_CYAN)
                 elif not self.in_ext: 
                     self._process_extraction(raw, enhanced, face, display, pose, hud_txt, sp_score, sp_label)
                     

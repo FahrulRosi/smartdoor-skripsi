@@ -105,11 +105,12 @@ class LivenessManager:
 
         elif self._register_step == 5:
             if self._pose_state == "WAITING_EXTREME":
-                if roll < -thr_r: 
+                # DIPERBAIKI: Mengubah tanda menjadi positif (> thr_r) untuk Miring KANAN
+                if roll > thr_r: 
                     self._hold_frames += 1
                     if self._hold_frames >= self._required_frames: self._pose_state = "WAITING_CENTER"; self._hold_frames = 0
                 else: self._hold_frames = 0
-                return {"status": "pending", "step": "ROLL", "instruction": "4a. Miring ke KANAN", "progress": f"Target: <{-thr_r}° | Saat ini: {roll:.1f}°"}
+                return {"status": "pending", "step": "ROLL", "instruction": "4a. Miring ke KANAN", "progress": f"Target: >{thr_r}° | Saat ini: {roll:.1f}°"}
             elif self._pose_state == "WAITING_CENTER":
                 if is_center:
                     self._hold_frames += 1
@@ -119,11 +120,12 @@ class LivenessManager:
 
         elif self._register_step == 6:
             if self._pose_state == "WAITING_EXTREME":
-                if roll > thr_r: 
+                # DIPERBAIKI: Mengubah tanda menjadi negatif (< -thr_r) untuk Miring KIRI
+                if roll < -thr_r: 
                     self._hold_frames += 1
                     if self._hold_frames >= self._required_frames: self._pose_state = "WAITING_CENTER"; self._hold_frames = 0
                 else: self._hold_frames = 0
-                return {"status": "pending", "step": "ROLL", "instruction": "4b. Miring ke KIRI", "progress": f"Target: >{thr_r}° | Saat ini: {roll:.1f}°"}
+                return {"status": "pending", "step": "ROLL", "instruction": "4b. Miring ke KIRI", "progress": f"Target: <{-thr_r}° | Saat ini: {roll:.1f}°"}
             elif self._pose_state == "WAITING_CENTER":
                 if is_center:
                     self._hold_frames += 1

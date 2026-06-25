@@ -29,6 +29,14 @@ class LivenessManager:
             return {"status": "pending", "step": "WAIT", "instruction": "Wajah tidak terdeteksi", "progress": "Mencari wajah..."}
 
         yaw, pitch, roll = pose["yaw"], pose["pitch"], pose["roll"]
+        
+        # --- PERBAIKAN EFEK CERMIN ---
+        # Membalikkan nilai Yaw dan Roll secara matematis agar 
+        # sesuai dengan gerakan fisik pengguna di depan kamera (mirror).
+        yaw = -yaw
+        roll = -roll
+        # -----------------------------
+
         is_center = abs(yaw) < 15.0 and abs(pitch) < 15.0 and abs(roll) < 15.0
 
         thr_y = getattr(config, 'CHALLENGE_YAW', 25.0)

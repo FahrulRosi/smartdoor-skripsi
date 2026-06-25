@@ -150,7 +150,11 @@ class Helpers:
             y_offset += 22
 
 class FaceRegistrationApp:
-    POSE_CFG = {RegistrationStage.YAW: ("yaw_snapshots", "yaw_left", "yaw_right", "yaw", getattr(config, 'YAW_THRESHOLD', 25.0)), RegistrationStage.PITCH: ("pitch_snapshots", "pitch_up", "pitch_down", "pitch", getattr(config, 'PITCH_THRESHOLD', 20.0)), RegistrationStage.ROLL: ("roll_snapshots", "roll_left", "roll_right", "roll", getattr(config, 'ROLL_THRESHOLD', 25.0))}
+    POSE_CFG = {
+        RegistrationStage.YAW: ("yaw_snapshots", "yaw_left", "yaw_right", "yaw", getattr(config, 'YAW_THRESHOLD', 25.0)), 
+        RegistrationStage.PITCH: ("pitch_snapshots", "pitch_up", "pitch_down", "pitch", getattr(config, 'PITCH_THRESHOLD', 20.0)), 
+        RegistrationStage.ROLL: ("roll_snapshots", "roll_right", "roll_left", "roll", getattr(config, 'ROLL_THRESHOLD', 25.0))
+    }
     
     def __init__(self, name):
         self.name = name
@@ -324,7 +328,6 @@ class FaceRegistrationApp:
             return
         self.last_extraction_time = current_time
 
-        # === MENGGUNAKAN ALIGNED CROP AGAR SINKRON DENGAN MAIN.PY ===
         best_crop = Helpers.get_aligned_crop(frame, face, target_size=(112, 112))
         
         if best_crop is not None and best_crop.size > 0:
@@ -370,7 +373,7 @@ class FaceRegistrationApp:
         
         is_duplicate = False
         duplicate_name = ""
-        anti_dup_thr = getattr(config, 'ANTI_DUPLICATE_THRESHOLD', 0.48)
+        anti_dup_thr = getattr(config, 'ANTI_DUPLICATE_THRESHOLD', 0.60)
         best_sim_score = 0.0
         
         all_faces_raw = self.db.load_all_faces()
@@ -378,11 +381,48 @@ class FaceRegistrationApp:
         single_master_emb = final_emb_vectors
 
         if all_faces_raw:
-            user_exists = False
+            for db_key, data in all_faces_raw.items():
+                if isinstance(data, dict) and 'embedding' in data:
+                    emb_list = data['embedding']
+                    if isinstance(emb_list, list) and len(emb_list) > 0:
+                        if not isinstance(emb_list[0], (list, np.ndarray)): 
+                            if len(emb_list) == 1536:
+                                emb_list = [emb_list[0:512], emb_list[512:1024], emb_list[1024:1536]]
+                            else:
+                                emb_list = [emb_list]
+
+                        for q_emb in [vec_norm]: 
+                            q_vec = np.array(q_emb, dtype=np.float32)
+                            q_vec = q_vec / (np.linalg.norm(q_vec) + 1e-6)
+                            
+                            for db_emb in emb_list:
+                                if len(db_emb) != 512: continue
+                                db_vec = np.array(db_emb, dtype=np.float32)
+                                db_vec = db_vec / (np.linalg.norm(db_vec) + 1e-6)
+                                
+                                sim = np.dot(q_vec, db_vec)
+                                if sim > best_sim_score:
+                                    best_sim_score = sim
+                                    duplicate_name = db_key.split(" - ", 1)[-1] if " - " in db_key else db_key
+                                
+                                if sim >= anti_dup_thr: 
+                                    is_duplicate = True; break
+                            if is_duplicate: break
+                if is_duplicate: break
+
+        if is_duplicate and os.getenv("ALLOW_DUPLICATE", "false").lower() != "true": 
+            sim_percent = best_sim_score * 100
+            Helpers.show_msg(display, "❌ WAJAH SUDAH TERDAFTAR!", f"Mirip {sim_percent:.1f}% dgn {duplicate_name}", config.COLOR_RED)
+            with self.frame_lock: self.display_frame = display.copy()
+            time.sleep(4.0)
+            self.stage = RegistrationStage.COMPLETE
+            return
+            
+        # 3. JIKA WAJAH BARU (TIDAK DUPLIKAT), BARU KITA CEK APAKAH NAMA SAMA 
+        if all_faces_raw:
             for db_key, data in all_faces_raw.items():
                 db_name = db_key.split(" - ", 1)[-1] if " - " in db_key else db_key
                 if db_name.lower() == self.name.lower():
-                    user_exists = True
                     if 'user_id' in data: existing_user_id = data['user_id']
                     if 'embedding' in data:
                         emb_val = data['embedding']
@@ -394,56 +434,23 @@ class FaceRegistrationApp:
                             existing_embeddings = [emb_val] if emb_val else []
                         single_master_emb = existing_embeddings + final_emb_vectors
                     break
+        # ====================================================================================
 
-            if not user_exists:
-                for name, data in all_faces_raw.items():
-                    if isinstance(data, dict) and 'embedding' in data:
-                        emb_list = data['embedding']
-                        if isinstance(emb_list, list) and len(emb_list) > 0:
-                            if not isinstance(emb_list[0], (list, np.ndarray)): 
-                                if len(emb_list) == 1536:
-                                    emb_list = [emb_list[0:512], emb_list[512:1024], emb_list[1024:1536]]
-                                else:
-                                    emb_list = [emb_list]
+        self.cap_data["reg_latency_ms"] = total_waktu_sistem
+        self.cap_data["individual_latencies"] = self.individual_latencies
+        self.cap_data.update({"headpose_vector": [float(pose["yaw"]), float(pose["pitch"]), float(pose["roll"])], "registration_accuracy": 100.0, "light_condition": light_cond})
+        if "face_crops" in self.cap_data: del self.cap_data["face_crops"]
 
-                            for q_emb in [vec_norm]: 
-                                q_vec = np.array(q_emb, dtype=np.float32)
-                                q_vec = q_vec / (np.linalg.norm(q_vec) + 1e-6)
-                                for db_emb in emb_list:
-                                    if len(db_emb) != 512: continue
-                                    db_vec = np.array(db_emb, dtype=np.float32)
-                                    db_vec = db_vec / (np.linalg.norm(db_vec) + 1e-6)
-                                    sim = np.dot(q_vec, db_vec)
-                                    if sim > best_sim_score:
-                                        best_sim_score = sim
-                                        duplicate_name = name.split(" - ", 1)[-1]
-                                    if sim >= anti_dup_thr: is_duplicate = True; break
-                                if is_duplicate: break
-                    if is_duplicate: break
-
-        if is_duplicate and os.getenv("ALLOW_DUPLICATE", "false").lower() != "true": 
-            sim_percent = best_sim_score * 100
-            Helpers.show_msg(display, "❌ WAJAH SUDAH TERDAFTAR!", f"Mirip {sim_percent:.1f}% dgn {duplicate_name}", config.COLOR_RED)
+        success_master = self.db.save_face(self.name, existing_user_id, single_master_emb, self.cap_data)
+        if success_master: 
+            _log(f"⏱️ Ekstraksi AI & Simpan DB Selesai | Latensi AI: {mfn_latency:.2f} ms", "METRIK")
+            _log(f"✅ Total Waktu Seluruh Registrasi | Latensi Sistem Total: {total_waktu_sistem:.2f} ms", "METRIK")
+            Helpers.show_msg(display, "✅ REGISTRASI BERHASIL!", f"User: {self.name} | 3 Vektor Cahaya", config.COLOR_GREEN)
             with self.frame_lock: self.display_frame = display.copy()
-            time.sleep(4.0)
-            self.stage = RegistrationStage.COMPLETE
-            return
+            time.sleep(1.5)
+            self.stage = RegistrationStage.COMPLETE 
         else:
-            self.cap_data["reg_latency_ms"] = total_waktu_sistem
-            self.cap_data["individual_latencies"] = self.individual_latencies
-            self.cap_data.update({"headpose_vector": [float(pose["yaw"]), float(pose["pitch"]), float(pose["roll"])], "registration_accuracy": 100.0, "light_condition": light_cond})
-            if "face_crops" in self.cap_data: del self.cap_data["face_crops"]
-
-            success_master = self.db.save_face(self.name, existing_user_id, single_master_emb, self.cap_data)
-            if success_master: 
-                _log(f"⏱️ Ekstraksi AI & Simpan DB Selesai | Latensi AI: {mfn_latency:.2f} ms", "METRIK")
-                _log(f"✅ Total Waktu Seluruh Registrasi | Latensi Sistem Total: {total_waktu_sistem:.2f} ms", "METRIK")
-                Helpers.show_msg(display, "✅ REGISTRASI BERHASIL!", f"User: {self.name} | 3 Vektor Cahaya", config.COLOR_GREEN)
-                with self.frame_lock: self.display_frame = display.copy()
-                time.sleep(1.5)
-                self.stage = RegistrationStage.COMPLETE 
-            else:
-                self._reset_registration(display, "❌ GAGAL!", "Database Error")
+            self._reset_registration(display, "❌ GAGAL!", "Database Error")
 
     def _process_thread(self):
         try:

@@ -14,7 +14,7 @@ class LivenessManager:
         self._hold_frames = 0         
         self._required_frames = 3     
         
-        # Variabel khusus Kedipan Mata (Tanpa Kalibrasi)
+        # Variabel khusus Kedipan Mata
         self._blink_state = 0         
         self._ear_history = []
         self._blink_count = 0
@@ -36,7 +36,7 @@ class LivenessManager:
         thr_p = getattr(config, 'CHALLENGE_PITCH', 20.0)
         thr_r = getattr(config, 'CHALLENGE_ROLL', 25.0)
 
-        # ──── TAHAPAN 0 - 6 (Wajah Lurus, Yaw, Pitch, Roll) ────
+        # ──── TAHAP 0: LURUS ────
         if self._register_step == 0:
             if is_center:
                 self._hold_frames += 1
@@ -47,13 +47,14 @@ class LivenessManager:
             else: self._hold_frames = 0
             return {"status": "pending", "step": "FACEMESH", "instruction": "1. Tatap Lurus ke Kamera", "progress": "Arahkan wajah ke depan"}
 
+        # ──── TAHAP 1: TOLEH KANAN (YAW KANAN = NEGATIF) ────
         elif self._register_step == 1:
             if self._pose_state == "WAITING_EXTREME":
-                if yaw > thr_y: 
+                if yaw < -thr_y: 
                     self._hold_frames += 1
                     if self._hold_frames >= self._required_frames: self._pose_state = "WAITING_CENTER"; self._hold_frames = 0
                 else: self._hold_frames = 0
-                return {"status": "pending", "step": "YAW", "instruction": "2a. Toleh ke KANAN", "progress": f"Target: >{thr_y}° | Saat ini: {yaw:.1f}°"}
+                return {"status": "pending", "step": "YAW", "instruction": "2a. Toleh ke KANAN", "progress": f"Target: <{-thr_y}° | Saat ini: {yaw:.1f}°"}
             elif self._pose_state == "WAITING_CENTER":
                 if is_center:
                     self._hold_frames += 1
@@ -61,13 +62,14 @@ class LivenessManager:
                 else: self._hold_frames = 0
                 return {"status": "pending", "step": "YAW", "instruction": "Tahan LURUS ke Depan", "progress": "Tunggu wajah lurus..."}
 
+        # ──── TAHAP 2: TOLEH KIRI (YAW KIRI = POSITIF) ────
         elif self._register_step == 2:
             if self._pose_state == "WAITING_EXTREME":
-                if yaw < -thr_y: 
+                if yaw > thr_y: 
                     self._hold_frames += 1
                     if self._hold_frames >= self._required_frames: self._pose_state = "WAITING_CENTER"; self._hold_frames = 0
                 else: self._hold_frames = 0
-                return {"status": "pending", "step": "YAW", "instruction": "2b. Toleh ke KIRI", "progress": f"Target: <{-thr_y}° | Saat ini: {yaw:.1f}°"}
+                return {"status": "pending", "step": "YAW", "instruction": "2b. Toleh ke KIRI", "progress": f"Target: >{thr_y}° | Saat ini: {yaw:.1f}°"}
             elif self._pose_state == "WAITING_CENTER":
                 if is_center:
                     self._hold_frames += 1
@@ -75,6 +77,7 @@ class LivenessManager:
                 else: self._hold_frames = 0
                 return {"status": "pending", "step": "YAW", "instruction": "Tahan LURUS ke Depan", "progress": "Tunggu wajah lurus..."}
 
+        # ──── TAHAP 3: DONGAK ATAS (PITCH ATAS = NEGATIF) ────
         elif self._register_step == 3:
             if self._pose_state == "WAITING_EXTREME":
                 if pitch < -thr_p: 
@@ -89,6 +92,7 @@ class LivenessManager:
                 else: self._hold_frames = 0
                 return {"status": "pending", "step": "PITCH", "instruction": "Tahan LURUS ke Depan", "progress": "Tunggu wajah lurus..."}
 
+        # ──── TAHAP 4: TUNDUK BAWAH (PITCH BAWAH = POSITIF) ────
         elif self._register_step == 4:
             if self._pose_state == "WAITING_EXTREME":
                 if pitch > thr_p: 
@@ -103,14 +107,14 @@ class LivenessManager:
                 else: self._hold_frames = 0
                 return {"status": "pending", "step": "PITCH", "instruction": "Tahan LURUS ke Depan", "progress": "Tunggu wajah lurus..."}
 
+        # ──── TAHAP 5: MIRING KANAN (ROLL KANAN = NEGATIF) ────
         elif self._register_step == 5:
             if self._pose_state == "WAITING_EXTREME":
-                # DIPERBAIKI: Mengubah tanda menjadi positif (> thr_r) untuk Miring KANAN
-                if roll > thr_r: 
+                if roll < -thr_r: 
                     self._hold_frames += 1
                     if self._hold_frames >= self._required_frames: self._pose_state = "WAITING_CENTER"; self._hold_frames = 0
                 else: self._hold_frames = 0
-                return {"status": "pending", "step": "ROLL", "instruction": "4a. Miring ke KANAN", "progress": f"Target: >{thr_r}° | Saat ini: {roll:.1f}°"}
+                return {"status": "pending", "step": "ROLL", "instruction": "4a. Miring ke KANAN", "progress": f"Target: <{-thr_r}° | Saat ini: {roll:.1f}°"}
             elif self._pose_state == "WAITING_CENTER":
                 if is_center:
                     self._hold_frames += 1
@@ -118,14 +122,14 @@ class LivenessManager:
                 else: self._hold_frames = 0
                 return {"status": "pending", "step": "ROLL", "instruction": "Tahan LURUS ke Depan", "progress": "Tunggu wajah lurus..."}
 
+        # ──── TAHAP 6: MIRING KIRI (ROLL KIRI = POSITIF) ────
         elif self._register_step == 6:
             if self._pose_state == "WAITING_EXTREME":
-                # DIPERBAIKI: Mengubah tanda menjadi negatif (< -thr_r) untuk Miring KIRI
-                if roll < -thr_r: 
+                if roll > thr_r: 
                     self._hold_frames += 1
                     if self._hold_frames >= self._required_frames: self._pose_state = "WAITING_CENTER"; self._hold_frames = 0
                 else: self._hold_frames = 0
-                return {"status": "pending", "step": "ROLL", "instruction": "4b. Miring ke KIRI", "progress": f"Target: <{-thr_r}° | Saat ini: {roll:.1f}°"}
+                return {"status": "pending", "step": "ROLL", "instruction": "4b. Miring ke KIRI", "progress": f"Target: >{thr_r}° | Saat ini: {roll:.1f}°"}
             elif self._pose_state == "WAITING_CENTER":
                 if is_center:
                     self._hold_frames += 1
@@ -137,14 +141,13 @@ class LivenessManager:
                 else: self._hold_frames = 0
                 return {"status": "pending", "step": "ROLL", "instruction": "Tahan LURUS ke Depan", "progress": "Tunggu wajah lurus..."}
 
-        # ──── TAHAP 7: BLINK (TANPA KALIBRASI MATA) ────
+        # ──── TAHAP 7: BLINK ────
         elif self._register_step == 7:
             ear_val = 1.0
             if face.landmarks and len(face.landmarks) >= 400:
                 p = np.array([[face.landmarks[i].x, face.landmarks[i].y] for i in [33,160,158,133,153,144,362,385,387,263,373,380]])
                 ear_val = ((np.linalg.norm(p[1]-p[5])+np.linalg.norm(p[2]-p[4]))/(2.0*np.linalg.norm(p[0]-p[3])+1e-6) + (np.linalg.norm(p[7]-p[11])+np.linalg.norm(p[8]-p[10]))/(2.0*np.linalg.norm(p[6]-p[9])+1e-6))/2.0
             
-            # Smoothing filter agar tidak terlalu goyang (noise)
             self._ear_history.append(ear_val)
             if len(self._ear_history) > 5: self._ear_history.pop(0)
             smooth_ear = sum(self._ear_history) / len(self._ear_history)
@@ -152,7 +155,6 @@ class LivenessManager:
             total_blinks = getattr(config, 'REGISTER_BLINK_COUNT', 2)
             blink_thr = getattr(config, 'BLINK_EAR_THRESHOLD', 0.21)
 
-            # State 0: Menunggu Mata Tertutup (Target < blink_thr)
             if self._blink_state == 0:
                 if smooth_ear <= blink_thr:
                     self._hold_frames += 1
@@ -164,7 +166,6 @@ class LivenessManager:
                 needed = total_blinks - self._blink_count
                 return {"status": "pending", "step": "BLINK", "instruction": f"5. Kedipkan Mata ({needed}x)", "progress": f"Tutup Mata (Target: < {blink_thr:.2f})"}
             
-            # State 1: Menunggu Mata Terbuka Kembali (Satu siklus kedipan dihitung)
             elif self._blink_state == 1:
                 target_open = blink_thr + 0.02
                 if smooth_ear >= target_open:
@@ -175,7 +176,7 @@ class LivenessManager:
                         self._hold_frames = 0
                         return {"status": "pending", "step": "BLINK", "instruction": f"✅ {total_blinks}x Kedipan Terekam", "progress": "Validasi Selesai..."}
                     else:
-                        self._blink_state = 0 # Kembali tunggu tutup mata untuk kedipan selanjutnya
+                        self._blink_state = 0 
                         self._hold_frames = 0
                         
                 needed = total_blinks - self._blink_count

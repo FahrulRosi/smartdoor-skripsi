@@ -150,10 +150,12 @@ class Helpers:
             y_offset += 22
 
 class FaceRegistrationApp:
+    # PERBAIKAN: Menukar tag right & left pada YAW dan ROLL karena posisi wajah diekstrak 
+    # dari frame asli yang belum dicerminkan, sehingga Kanan secara fisik adalah nilai Negatif.
     POSE_CFG = {
-        RegistrationStage.YAW: ("yaw_snapshots", "yaw_left", "yaw_right", "yaw", getattr(config, 'YAW_THRESHOLD', 25.0)), 
+        RegistrationStage.YAW: ("yaw_snapshots", "yaw_right", "yaw_left", "yaw", getattr(config, 'YAW_THRESHOLD', 25.0)), 
         RegistrationStage.PITCH: ("pitch_snapshots", "pitch_up", "pitch_down", "pitch", getattr(config, 'PITCH_THRESHOLD', 20.0)), 
-        RegistrationStage.ROLL: ("roll_snapshots", "roll_left", "roll_right", "roll", getattr(config, 'ROLL_THRESHOLD', 25.0))
+        RegistrationStage.ROLL: ("roll_snapshots", "roll_right", "roll_left", "roll", getattr(config, 'ROLL_THRESHOLD', 25.0))
     }
     
     def __init__(self, name):

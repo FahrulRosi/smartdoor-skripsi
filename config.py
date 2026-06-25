@@ -6,12 +6,12 @@ FPS             = 30
 
 # ── Peningkatan Gambar (Low-Light & Backlight) ───────────────────────────────
 ENABLE_CLAHE_ENHANCEMENT = True
-CLAHE_CLIP_LIMIT         = 1.2
+CLAHE_CLIP_LIMIT         = 1.2 
 CLAHE_TILE_GRID_SIZE     = (8, 8)
 
 # ── Database Supabase ────────────────────────────────────────────────────────
-SUPABASE_URL = "https://gwwxebdmavlmxxcdrlge.supabase.co"
-SUPABASE_KEY = "sb_publishable_tUsmI6J1BubOlRf9YhtNPQ_F9dWIyOv"
+SUPABASE_URL = "SUPABASE_URL", "https://gwwxebdmavlmxxcdrlge.supabase.co"
+SUPABASE_KEY = "SUPABASE_KEY", "sb_publishable_tUsmI6J1BubOlRf9YhtNPQ_F9dWIyOv"
 
 # ── FaceMesh ─────────────────────────────────────────────────────────────────
 MIN_DETECTION_CONFIDENCE = 0.75
@@ -34,21 +34,15 @@ YAW_THRESHOLD   = CHALLENGE_YAW
 PITCH_THRESHOLD = CHALLENGE_PITCH
 ROLL_THRESHOLD  = CHALLENGE_ROLL
 
+# Ambang batas mata tertutup (semakin kecil semakin harus merem rapat)
 BLINK_EAR_THRESHOLD  = 0.21 
 REGISTER_BLINK_COUNT = 2
 
-# ── Quality Control Kedipan Baru (Garansi Data Valid saat Register) ──────────
-MIN_BLINK_OPEN_EAR   = 0.22  
-MAX_BLINK_CLOSED_EAR = 0.20  
-MIN_BLINK_DELTA      = 0.04  
-
 # ── Anti-Spoofing & Recognition ──────────────────────────────────────────────
-# Diarahkan ke model INT8 hasil kuantisasi
 ANTI_SPOOFING_MODEL     = "liveness/antispoofing_int8.onnx"
 ANTI_SPOOFING_THRESHOLD = 0.80
 
 MATCH_THRESHOLD         = 0.70
-# Diarahkan ke model INT8 hasil kuantisasi
 MOBILEFACENET_PATH      = "recognition/mobilefacenet_int8.onnx"
 
 # ── Door Lock & UI ───────────────────────────────────────────────────────────

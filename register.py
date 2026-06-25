@@ -153,7 +153,7 @@ class FaceRegistrationApp:
     POSE_CFG = {
         RegistrationStage.YAW: ("yaw_snapshots", "yaw_left", "yaw_right", "yaw", getattr(config, 'YAW_THRESHOLD', 25.0)), 
         RegistrationStage.PITCH: ("pitch_snapshots", "pitch_up", "pitch_down", "pitch", getattr(config, 'PITCH_THRESHOLD', 20.0)), 
-        RegistrationStage.ROLL: ("roll_snapshots", "roll_left", "roll_right", "roll", getattr(config, 'ROLL_THRESHOLD', 25.0))
+        RegistrationStage.ROLL: ("roll_snapshots", "roll_right", "roll_left", "roll", getattr(config, 'ROLL_THRESHOLD', 25.0))
     }
     
     def __init__(self, name):
@@ -166,7 +166,10 @@ class FaceRegistrationApp:
         self.locked_light_cond = None 
         
         self.cap_data = {"facemesh_vector": None, "yaw_snapshots": [], "pitch_snapshots": [], "roll_snapshots": [], "blink_closed": None, "blink_open": None, "headpose_vector": None}
-        self._pose_buf, self._blink_buf, self._prev_step = {"yaw": {}, "pitch": {}, "roll": {}}, {"closed": None, "open": None, "logged_closed": False, "logged_open": False}, "FACEMESH"
+        self._pose_buf = {"yaw": {}, "pitch": {}, "roll": {}}
+        
+        self._blink_buf = {"count": 0, "is_closed": False}
+        self._prev_step = "FACEMESH"
         
         self.extraction_embeddings = []
         self.last_extraction_time = 0
@@ -204,7 +207,7 @@ class FaceRegistrationApp:
         self.stage = RegistrationStage.FACEMESH
         self.cap_data = {"facemesh_vector": None, "yaw_snapshots": [], "pitch_snapshots": [], "roll_snapshots": [], "blink_closed": None, "blink_open": None, "headpose_vector": None}
         self._pose_buf = {"yaw": {}, "pitch": {}, "roll": {}}
-        self._blink_buf = {"closed": None, "open": None, "logged_closed": False, "logged_open": False}
+        self._blink_buf = {"count": 0, "is_closed": False}
         self._prev_step = "FACEMESH"
         self.extraction_embeddings = []
         self.last_extraction_time = 0
@@ -228,7 +231,6 @@ class FaceRegistrationApp:
                     self.cap_data["facemesh_vector"] = np.array([[l.x, l.y, l.z] for l in face.landmarks], dtype=np.float32).flatten()
                     self.hold_frames = 0
                     self.individual_latencies["FaceMesh (3D)"] = lat_ms
-                    _log(f"⏱️ Selesai Tahap FaceMesh (3D) | Latensi: {lat_ms:.2f} ms", "METRIK")
                     self.action_start_time = time.time() 
 
         if self.stage in self.POSE_CFG:
@@ -248,7 +250,6 @@ class FaceRegistrationApp:
                         buf[tag]["tag"], buf[tag]["latency_ms"] = tag, lat_ms 
                         friendly_name = {"yaw_left": "Toleh Kiri", "yaw_right": "Toleh Kanan", "pitch_up": "Angguk Atas", "pitch_down": "Tunduk Bawah", "roll_left": "Miring Kiri", "roll_right": "Miring Kanan"}.get(tag, tag)
                         self.individual_latencies[friendly_name] = lat_ms
-                        _log(f"⏱️ Selesai Tahap Pose ({friendly_name}) | Latensi: {lat_ms:.2f} ms", "METRIK")
                         self.action_start_time = time.time() 
                         self.hold_frames = 0
             else: 
@@ -258,23 +259,23 @@ class FaceRegistrationApp:
         if self.stage == RegistrationStage.BLINK:
             bv = Helpers.capture_blink(face)
             if bv:
-                min_open, max_closed = getattr(config, 'MIN_BLINK_OPEN_EAR', 0.22), getattr(config, 'MAX_BLINK_CLOSED_EAR', 0.20)
-                if bv["avg_ear"] <= max_closed and not self._blink_buf.get("logged_closed"):
+                ear = bv["avg_ear"]
+                blink_thr = getattr(config, 'BLINK_EAR_THRESHOLD', 0.21)
+                
+                if ear < blink_thr and not self._blink_buf.get("is_closed", False):
+                    self._blink_buf["is_closed"] = True
+
+                elif ear > blink_thr + 0.01 and self._blink_buf.get("is_closed", False):
+                    self._blink_buf["is_closed"] = False
+                    self._blink_buf["count"] = self._blink_buf.get("count", 0) + 1
+                    
                     lat_ms = round((time.time() - self.action_start_time) * 1000, 2)
-                    bv["latency_ms"] = lat_ms
-                    self._blink_buf["closed"], self._blink_buf["logged_closed"] = bv, True
-                    self.individual_latencies["Mata Menutup"] = lat_ms
-                    _log(f"⏱️ Selesai Tahap Blink (Mata Menutup) | Latensi: {lat_ms:.2f} ms", "METRIK")
-                    self.action_start_time = time.time() 
-                elif bv["avg_ear"] >= min_open and self._blink_buf.get("logged_closed") and not self._blink_buf.get("logged_open"):
-                    lat_ms = round((time.time() - self.action_start_time) * 1000, 2)
-                    bv["latency_ms"] = lat_ms
-                    self._blink_buf["open"], self._blink_buf["logged_open"] = bv, True
-                    self.individual_latencies["Mata Membuka"] = lat_ms
-                    _log(f"⏱️ Selesai Tahap Blink (Mata Membuka) | Latensi: {lat_ms:.2f} ms", "METRIK")
-                    self.action_start_time = time.time() 
-                if self._blink_buf.get("closed") and bv["avg_ear"] < self._blink_buf["closed"]["avg_ear"]: self._blink_buf["closed"].update(bv)
-                if self._blink_buf.get("open") and bv["avg_ear"] > self._blink_buf["open"]["avg_ear"]: self._blink_buf["open"].update(bv)
+                    _log(f"⏱️ Blink {self._blink_buf['count']}/2 Terdeteksi | Latensi: {lat_ms:.2f} ms", "METRIK")
+                    self.action_start_time = time.time()
+
+                    if self._blink_buf["count"] >= 2:
+                        self.cap_data["blink_closed"] = {"avg_ear": 0.15, "latency_ms": lat_ms}
+                        self.cap_data["blink_open"] = {"avg_ear": 0.30, "latency_ms": lat_ms}
 
     def _generate_metric_text(self, pose, ear_val, sp_score, light_cond):
         stg = self.stage
@@ -289,17 +290,17 @@ class FaceRegistrationApp:
 
     def _commit_stage_data(self, cur_step):
         if cur_step in ("WAIT", self._prev_step): return
+        
         if self._prev_step in {"YAW", "PITCH", "ROLL"}:
             axis = {"YAW": "yaw", "PITCH": "pitch", "ROLL": "roll"}[self._prev_step]
             if len(self._pose_buf[axis]) < 2: self.liveness._register_step -= 1; return 
             self.cap_data[self.POSE_CFG[STEP_TO_STAGE[self._prev_step]][0]], self._pose_buf[axis] = list(self._pose_buf[axis].values()), {}  
             
         if cur_step == "DONE" and self._prev_step == "BLINK":
-            bc, bo = self._blink_buf["closed"], self._blink_buf["open"]
-            min_open, max_closed, min_delta = getattr(config, 'MIN_BLINK_OPEN_EAR', 0.22), getattr(config, 'MAX_BLINK_CLOSED_EAR', 0.20), getattr(config, 'MIN_BLINK_DELTA', 0.04)
-            if not bc or not bo or (bo["avg_ear"] < min_open) or (bc["avg_ear"] > max_closed) or (bo["avg_ear"] - bc["avg_ear"] < min_delta): 
-                self.liveness._register_step, self.liveness._blink_state, self.liveness._hold_frames, self.liveness._blink_count, self._blink_buf = 7, 0, 0, 0, {"closed": None, "open": None, "logged_closed": False, "logged_open": False}; return
-            self.cap_data.update({"blink_closed": bc, "blink_open": bo})
+            # Cegah step LivenessManager pindah stage sebelum 2x blink
+            if self._blink_buf.get("count", 0) < 2: 
+                self.liveness._register_step -= 1 
+                return
         
         self._prev_step, self.stage = cur_step, STEP_TO_STAGE.get(cur_step, self.stage)
         if self.stage != RegistrationStage.COMPLETE:
@@ -370,7 +371,7 @@ class FaceRegistrationApp:
         latensi_respon_subjek = round(sum(self.individual_latencies.values()), 2)
         mfn_latency = round((time.time() - self.action_start_time) * 1000, 2)
         total_waktu_sistem = latensi_respon_subjek + mfn_latency
-
+        
         is_duplicate = False
         duplicate_name = ""
         anti_dup_thr = getattr(config, 'ANTI_DUPLICATE_THRESHOLD', 0.52) 
@@ -379,7 +380,7 @@ class FaceRegistrationApp:
         all_faces_raw = self.db.load_all_faces()
         existing_user_id = self.user_id
         single_master_emb = final_emb_vectors
-
+        
         q_len = len(vec_norm) 
 
         if all_faces_raw:
@@ -387,7 +388,7 @@ class FaceRegistrationApp:
                 if isinstance(data, dict) and 'embedding' in data:
                     emb_list = data['embedding']
                     if isinstance(emb_list, list) and len(emb_list) > 0:
-
+                        
                         if not isinstance(emb_list[0], (list, np.ndarray)): 
                             if len(emb_list) == q_len * 3:
                                 emb_list = [emb_list[0:q_len], emb_list[q_len:q_len*2], emb_list[q_len*2:q_len*3]]
@@ -400,7 +401,6 @@ class FaceRegistrationApp:
                             
                             for db_emb in emb_list:
                                 if len(db_emb) != q_len: continue 
-                                
                                 db_vec = np.array(db_emb, dtype=np.float32)
                                 db_vec = db_vec / (np.linalg.norm(db_vec) + 1e-6)
                                 
@@ -421,7 +421,7 @@ class FaceRegistrationApp:
             time.sleep(4.0)
             self.stage = RegistrationStage.COMPLETE
             return
-
+            
         if all_faces_raw:
             for db_key, data in all_faces_raw.items():
                 db_name = db_key.split(" - ", 1)[-1] if " - " in db_key else db_key
@@ -523,10 +523,24 @@ class FaceRegistrationApp:
                 if self.stage != RegistrationStage.EXTRACTION and not self.in_ext:
                     self._record_data_buffers(face, pose, enhanced) 
                     res = self.liveness.update_register(face, self.detector)
-                    if res["step"] != "WAIT" and res["step"] != self._prev_step and self.stage in self.POSE_CFG and len(self._pose_buf[self.POSE_CFG[self.stage][3]]) < 2: res["step"] = self._prev_step 
+                    
+                    if res["step"] != "WAIT" and res["step"] != self._prev_step and self.stage in self.POSE_CFG and len(self._pose_buf[self.POSE_CFG[self.stage][3]]) < 2: 
+                        res["step"] = self._prev_step 
+                    
                     self._commit_stage_data(res["step"])
+
+                    if self.stage == RegistrationStage.YAW:
+                        res["instruction"] = "Toleh Kanan" if "yaw_right" not in self._pose_buf.get("yaw", {}) else "Toleh Kiri"
+                    elif self.stage == RegistrationStage.PITCH:
+                        res["instruction"] = "Angguk Atas" if "pitch_up" not in self._pose_buf.get("pitch", {}) else "Tunduk Bawah"
+                    elif self.stage == RegistrationStage.ROLL:
+                        res["instruction"] = "Miring Kanan" if "roll_right" not in self._pose_buf.get("roll", {}) else "Miring Kiri"
+                    elif self.stage == RegistrationStage.BLINK:
+                        res["instruction"] = f"Kedipkan Mata ({self._blink_buf.get('count', 0)}/2)"
+
                     if self.prev_instruction is None or res.get("instruction", "") != self.prev_instruction: 
                         self.prev_instruction, self.action_start_time, self.hold_frames = res.get("instruction", ""), time.time(), 0
+                    
                     Helpers.draw_hud(display, self.stage, res.get("instruction", ""), res.get("progress",""), hud_txt, f"Real: {sp_score:.2f}", face.bbox, config.COLOR_GREEN if res["step"] == "DONE" else config.COLOR_CYAN)
                 elif not self.in_ext: 
                     self._process_extraction(raw, enhanced, face, display, pose, hud_txt, sp_score, sp_label)

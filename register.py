@@ -153,7 +153,7 @@ class FaceRegistrationApp:
     POSE_CFG = {
         RegistrationStage.YAW: ("yaw_snapshots", "yaw_left", "yaw_right", "yaw", getattr(config, 'YAW_THRESHOLD', 25.0)), 
         RegistrationStage.PITCH: ("pitch_snapshots", "pitch_up", "pitch_down", "pitch", getattr(config, 'PITCH_THRESHOLD', 20.0)), 
-        RegistrationStage.ROLL: ("roll_snapshots", "roll_right", "roll_left", "roll", getattr(config, 'ROLL_THRESHOLD', 25.0))
+        RegistrationStage.ROLL: ("roll_snapshots", "roll_left", "roll_right", "roll", getattr(config, 'ROLL_THRESHOLD', 25.0))
     }
     
     def __init__(self, name):
@@ -370,7 +370,7 @@ class FaceRegistrationApp:
         latensi_respon_subjek = round(sum(self.individual_latencies.values()), 2)
         mfn_latency = round((time.time() - self.action_start_time) * 1000, 2)
         total_waktu_sistem = latensi_respon_subjek + mfn_latency
-        
+
         is_duplicate = False
         duplicate_name = ""
         anti_dup_thr = getattr(config, 'ANTI_DUPLICATE_THRESHOLD', 0.52) 
@@ -399,7 +399,6 @@ class FaceRegistrationApp:
                             q_vec = q_vec / (np.linalg.norm(q_vec) + 1e-6)
                             
                             for db_emb in emb_list:
-                                # PERBAIKAN: Gunakan ukuran vektor dinamis (q_len) bukan 512
                                 if len(db_emb) != q_len: continue 
                                 
                                 db_vec = np.array(db_emb, dtype=np.float32)

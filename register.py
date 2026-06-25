@@ -286,7 +286,7 @@ class FaceRegistrationApp:
         
         if self._prev_step in {"YAW", "PITCH", "ROLL"}:
             axis = {"YAW": "yaw", "PITCH": "pitch", "ROLL": "roll"}[self._prev_step]
-            if len(self._pose_buf[axis]) < 2: self.liveness._register_step -= 1; return 
+            if len(self._pose_buf[axis]) < 1: self.liveness._register_step -= 1; return 
             self.cap_data[self.POSE_CFG[STEP_TO_STAGE[self._prev_step]][0]], self._pose_buf[axis] = list(self._pose_buf[axis].values()), {}  
             
         if cur_step == "DONE" and self._prev_step == "BLINK":
@@ -299,7 +299,7 @@ class FaceRegistrationApp:
             self.hold_frames = 0
 
     def _process_extraction(self, raw_frame, frame, face, display, pose, score_txt, sp_score, sp_label):
-        missing = [k for k, v in [("FaceMesh", self.cap_data["facemesh_vector"] is not None), ("Yaw", len(self.cap_data["yaw_snapshots"])>1), ("Pitch", len(self.cap_data["pitch_snapshots"])>1), ("Roll", len(self.cap_data["roll_snapshots"])>1), ("Blink", self.cap_data["blink_closed"] is not None)] if not v]
+        missing = [k for k, v in [("FaceMesh", self.cap_data["facemesh_vector"] is not None)] if not v]
         if missing: 
             self._reset_registration(display, "❌ GAGAL EKTRAKSI!", f"Data Kurang: {','.join(missing)}")
             return

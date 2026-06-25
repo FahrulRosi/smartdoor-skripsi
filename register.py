@@ -373,21 +373,24 @@ class FaceRegistrationApp:
         
         is_duplicate = False
         duplicate_name = ""
-        anti_dup_thr = getattr(config, 'ANTI_DUPLICATE_THRESHOLD', 0.60)
+        anti_dup_thr = getattr(config, 'ANTI_DUPLICATE_THRESHOLD', 0.52) 
         best_sim_score = 0.0
         
         all_faces_raw = self.db.load_all_faces()
         existing_user_id = self.user_id
         single_master_emb = final_emb_vectors
 
+        q_len = len(vec_norm) 
+
         if all_faces_raw:
             for db_key, data in all_faces_raw.items():
                 if isinstance(data, dict) and 'embedding' in data:
                     emb_list = data['embedding']
                     if isinstance(emb_list, list) and len(emb_list) > 0:
+
                         if not isinstance(emb_list[0], (list, np.ndarray)): 
-                            if len(emb_list) == 1536:
-                                emb_list = [emb_list[0:512], emb_list[512:1024], emb_list[1024:1536]]
+                            if len(emb_list) == q_len * 3:
+                                emb_list = [emb_list[0:q_len], emb_list[q_len:q_len*2], emb_list[q_len*2:q_len*3]]
                             else:
                                 emb_list = [emb_list]
 
@@ -396,7 +399,9 @@ class FaceRegistrationApp:
                             q_vec = q_vec / (np.linalg.norm(q_vec) + 1e-6)
                             
                             for db_emb in emb_list:
-                                if len(db_emb) != 512: continue
+                                # PERBAIKAN: Gunakan ukuran vektor dinamis (q_len) bukan 512
+                                if len(db_emb) != q_len: continue 
+                                
                                 db_vec = np.array(db_emb, dtype=np.float32)
                                 db_vec = db_vec / (np.linalg.norm(db_vec) + 1e-6)
                                 
@@ -417,8 +422,7 @@ class FaceRegistrationApp:
             time.sleep(4.0)
             self.stage = RegistrationStage.COMPLETE
             return
-            
-        # 3. JIKA WAJAH BARU (TIDAK DUPLIKAT), BARU KITA CEK APAKAH NAMA SAMA 
+
         if all_faces_raw:
             for db_key, data in all_faces_raw.items():
                 db_name = db_key.split(" - ", 1)[-1] if " - " in db_key else db_key
@@ -428,13 +432,12 @@ class FaceRegistrationApp:
                         emb_val = data['embedding']
                         if isinstance(emb_val, list) and len(emb_val) > 0 and isinstance(emb_val[0], list):
                             existing_embeddings = emb_val
-                        elif isinstance(emb_val, list) and len(emb_val) == 1536:
-                            existing_embeddings = [emb_val[0:512], emb_val[512:1024], emb_val[1024:1536]]
+                        elif isinstance(emb_val, list) and len(emb_val) == q_len * 3:
+                            existing_embeddings = [emb_val[0:q_len], emb_val[q_len:q_len*2], emb_val[q_len*2:q_len*3]]
                         else:
                             existing_embeddings = [emb_val] if emb_val else []
                         single_master_emb = existing_embeddings + final_emb_vectors
                     break
-        # ====================================================================================
 
         self.cap_data["reg_latency_ms"] = total_waktu_sistem
         self.cap_data["individual_latencies"] = self.individual_latencies

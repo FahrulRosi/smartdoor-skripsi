@@ -3,7 +3,7 @@ from enum import Enum
 from datetime import datetime
 import config
 from camera.camera_stream       import CameraStream
-from facemesh.facemesh_detector import FaceMeshDetector
+from facemesh.facemesh_detector import FaceResult, FaceMeshDetector
 from liveness.liveness_manager  import LivenessManager
 from recognition.mobilefacenet  import MobileFaceNet
 from recognition.face_matcher   import FaceMatcher
@@ -104,7 +104,6 @@ class Helpers:
         h, w = f.shape[:2]
         if bbox:
             bx, by, bw, bh = bbox
-            bx = w - bx - bw
             cv2.rectangle(f, (bx, by), (bx+bw, by+bh), col, 2)
             lbl_h = 20
             lbl_y = max(lbl_h, by)
@@ -150,8 +149,8 @@ class Helpers:
             y_offset += 22
 
 class FaceRegistrationApp:
-    # PERBAIKAN: Menukar tag right & left pada YAW dan ROLL karena posisi wajah diekstrak 
-    # dari frame asli yang belum dicerminkan, sehingga Kanan secara fisik adalah nilai Negatif.
+    # PERBAIKAN: Dikembalikan ke logika asli untuk frame non-mirror 
+    # (Toleh/Miring Kanan secara fisik = Nilai Negatif, Kiri fisik = Positif)
     POSE_CFG = {
         RegistrationStage.YAW: ("yaw_snapshots", "yaw_right", "yaw_left", "yaw", getattr(config, 'YAW_THRESHOLD', 25.0)), 
         RegistrationStage.PITCH: ("pitch_snapshots", "pitch_up", "pitch_down", "pitch", getattr(config, 'PITCH_THRESHOLD', 20.0)), 
@@ -251,6 +250,7 @@ class FaceRegistrationApp:
                         lat_ms = round((time.time() - self.action_start_time) * 1000, 2)
                         buf[tag] = {k: float(pose.get(k, 0.0)) for k in ("yaw", "pitch", "roll")}
                         buf[tag]["tag"], buf[tag]["latency_ms"] = tag, lat_ms 
+                        # PERBAIKAN: Tukar label agar Kanan = Negatif, Kiri = Positif
                         friendly_name = {"yaw_left": "Toleh Kiri", "yaw_right": "Toleh Kanan", "pitch_up": "Angguk Atas", "pitch_down": "Tunduk Bawah", "roll_left": "Miring Kiri", "roll_right": "Miring Kanan"}.get(tag, tag)
                         self.individual_latencies[friendly_name] = lat_ms
                         _log(f"⏱️ Selesai Tahap Pose ({friendly_name}) | Latensi: {lat_ms:.2f} ms", "METRIK")
@@ -472,18 +472,18 @@ class FaceRegistrationApp:
                     continue
                     
                 raw = frame.copy()
-                display = raw.copy()
+                display = raw # PERBAIKAN: Gunakan frame asli tanpa pencerminan
                 faces = self.detector.detect(raw)
                 
                 if not faces: 
                     self.missed_frames += 1
                     if self.missed_frames >= 15: 
                         bbox_memory = None
-                        display = cv2.flip(display, 1)
+                        # PERBAIKAN: Hapus pencerminan
                         Helpers.draw_hud(display, self.stage, "Hadapkan wajah", "", "", "NO FACE", None, config.COLOR_RED)
                         self._timer_started = False
                     elif bbox_memory: 
-                        display = cv2.flip(display, 1)
+                        # PERBAIKAN: Hapus pencerminan
                         Helpers.draw_hud(display, self.stage, "Menganalisa...", "", "", "TRACKING", bbox_memory, config.COLOR_YELLOW)
                     with self.frame_lock: self.display_frame = display
                     continue
@@ -504,7 +504,8 @@ class FaceRegistrationApp:
                 if not self._timer_started: 
                     self.action_start_time, self._timer_started = time.time(), True
                     
-                display = cv2.flip(self.detector.draw(display, face), 1)
+                # PERBAIKAN: Menggambar pada frame asli dan hapus pencerminan
+                display = self.detector.draw(display, face)
                 if face.bbox[3] > int(config.FRAME_HEIGHT * 0.50): 
                     Helpers.draw_hud(display, self.stage, "Wajah Terlalu Dekat!", "Mundur", "", "TOO CLOSE", face.bbox, config.COLOR_YELLOW)
                     with self.frame_lock: self.display_frame = display

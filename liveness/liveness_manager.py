@@ -50,7 +50,7 @@ class LivenessManager:
         # ──── TAHAP 1: TOLEH KANAN (YAW KANAN = NEGATIF) ────
         elif self._register_step == 1:
             if self._pose_state == "WAITING_EXTREME":
-                if yaw < -thr_y: 
+                if yaw < -thr_y: # PERBAIKAN: Logika non-mirror (Kanan = Negatif)
                     self._hold_frames += 1
                     if self._hold_frames >= self._required_frames: self._pose_state = "WAITING_CENTER"; self._hold_frames = 0
                 else: self._hold_frames = 0
@@ -65,7 +65,7 @@ class LivenessManager:
         # ──── TAHAP 2: TOLEH KIRI (YAW KIRI = POSITIF) ────
         elif self._register_step == 2:
             if self._pose_state == "WAITING_EXTREME":
-                if yaw > thr_y: 
+                if yaw > thr_y: # PERBAIKAN: Logika non-mirror (Kiri = Positif)
                     self._hold_frames += 1
                     if self._hold_frames >= self._required_frames: self._pose_state = "WAITING_CENTER"; self._hold_frames = 0
                 else: self._hold_frames = 0
@@ -110,7 +110,7 @@ class LivenessManager:
         # ──── TAHAP 5: MIRING KANAN (ROLL KANAN = NEGATIF) ────
         elif self._register_step == 5:
             if self._pose_state == "WAITING_EXTREME":
-                if roll < -thr_r: 
+                if roll < -thr_r: # PERBAIKAN: Logika non-mirror (Miring Kanan = Negatif)
                     self._hold_frames += 1
                     if self._hold_frames >= self._required_frames: self._pose_state = "WAITING_CENTER"; self._hold_frames = 0
                 else: self._hold_frames = 0
@@ -125,7 +125,7 @@ class LivenessManager:
         # ──── TAHAP 6: MIRING KIRI (ROLL KIRI = POSITIF) ────
         elif self._register_step == 6:
             if self._pose_state == "WAITING_EXTREME":
-                if roll > thr_r: 
+                if roll > thr_r: # PERBAIKAN: Logika non-mirror (Miring Kiri = Positif)
                     self._hold_frames += 1
                     if self._hold_frames >= self._required_frames: self._pose_state = "WAITING_CENTER"; self._hold_frames = 0
                 else: self._hold_frames = 0

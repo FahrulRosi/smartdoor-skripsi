@@ -26,10 +26,13 @@ class UIHelper:
     @staticmethod
     def enhance_adaptive(frame, bbox, l_str="Normal"):
         if not getattr(config, 'ENABLE_CLAHE_ENHANCEMENT', True): return frame
-        img_yuv = cv2.cvtColor(cv2.bilateralFilter(frame, 5, 45, 45), cv2.COLOR_BGR2YUV)
+        denoised = cv2.bilateralFilter(frame, d=3, sigmaColor=30, sigmaSpace=30)
+        img_yuv = cv2.cvtColor(denoised, cv2.COLOR_BGR2YUV)
 
-        clip_limits = {"Normal": 1.3, "Low Light": 1.9, "Backlight": 1.5}
-        img_yuv[:,:,0] = cv2.createCLAHE(clipLimit=clip_limits.get(l_str, 1.3), tileGridSize=(8, 8)).apply(img_yuv[:,:,0])
+        matrix_clip = {"Normal": 1.5, "Low Light": 2.0, "Backlight": 1.8}
+        clip_limit = matrix_clip.get(l_str, 1.5)
+        
+        img_yuv[:,:,0] = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8)).apply(img_yuv[:,:,0])
         return cv2.cvtColor(img_yuv, cv2.COLOR_YUV2BGR)
 
     @staticmethod
@@ -144,7 +147,22 @@ class SmartDoorApp:
         self.detector = FaceMeshDetector(min_detection_confidence=0.35, min_tracking_confidence=0.35)
         
         self.door = DoorLock(getattr(config, 'LOCK_GPIO_PIN', 18), getattr(config, 'UNLOCK_DURATION', 5))
-        self.known_faces_2d = {k: [np.array(e, dtype=np.float32) for e in (v['embedding'] if isinstance(v['embedding'][0], list) else [v['embedding']])] for k, v in (self.db.load_all_faces() or {}).items() if isinstance(v, dict) and v.get('embedding')}
+
+        self.known_faces_2d = {}
+        all_faces = self.db.load_all_faces() or {}
+        for k, v in all_faces.items():
+            if isinstance(v, dict) and v.get('embedding'):
+                emb_data = v['embedding']
+                if isinstance(emb_data, list) and len(emb_data) > 0:
+                    if isinstance(emb_data[0], (list, np.ndarray)):
+                        self.known_faces_2d[k] = [np.array(e, dtype=np.float32) for e in emb_data]
+                    else:
+                        if len(emb_data) % 512 == 0 and len(emb_data) >= 512:
+                            self.known_faces_2d[k] = [np.array(emb_data[i:i+512], dtype=np.float32) for i in range(0, len(emb_data), 512)]
+                        elif len(emb_data) % 112 == 0 and len(emb_data) >= 112:
+                            self.known_faces_2d[k] = [np.array(emb_data[i:i+112], dtype=np.float32) for i in range(0, len(emb_data), 112)]
+                        else:
+                            self.known_faces_2d[k] = [np.array(emb_data, dtype=np.float32)]
         
         if GPIO_AVAILABLE:
             btn = getattr(config, 'BUTTON_PIN', 26)
@@ -205,6 +223,7 @@ class SmartDoorApp:
         return self.pose_hold >= 3, abs(float(val)), thr, salah
 
     def _check_identity(self, raw, enhanced, face, l_str):
+        # Threshold dipertahankan SAMA PERSIS seperti awal permintaan
         d_thr = {"Normal": 0.70, "Backlight": 0.65, "Low Light": 0.67}.get(l_str, 0.70)
         if not self.known_faces_2d: return "TIDAK DIKENAL", 0.0, d_thr, 0.0, False
         

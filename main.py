@@ -144,24 +144,7 @@ class SmartDoorApp:
         self.detector = FaceMeshDetector(min_detection_confidence=0.35, min_tracking_confidence=0.35)
         
         self.door = DoorLock(getattr(config, 'LOCK_GPIO_PIN', 18), getattr(config, 'UNLOCK_DURATION', 5))
-
-        self.known_faces_2d = {}
-        raw_db = self.db.load_all_faces() or {}
-        for k, v in raw_db.items():
-            if isinstance(v, dict):
-                emb_val = v.get('embedding', v.get('mobilefacenet_embedding'))
-                if emb_val and len(emb_val) > 0:
-                    if not isinstance(emb_val[0], (list, np.ndarray)):
-                        if len(emb_val) == 384:
-                            parsed = [emb_val[0:128], emb_val[128:256], emb_val[256:384]]
-                        else:
-                            parsed = [emb_val]
-                    else:
-                        parsed = emb_val
-
-                    valid_embs = [np.array(e, dtype=np.float32) for e in parsed if len(e) == 128]
-                    if valid_embs:
-                        self.known_faces_2d[k] = valid_embs
+        self.known_faces_2d = {k: [np.array(e, dtype=np.float32) for e in (v['embedding'] if isinstance(v['embedding'][0], list) else [v['embedding']])] for k, v in (self.db.load_all_faces() or {}).items() if isinstance(v, dict) and v.get('embedding')}
         
         if GPIO_AVAILABLE:
             btn = getattr(config, 'BUTTON_PIN', 26)

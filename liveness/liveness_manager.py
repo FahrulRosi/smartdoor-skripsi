@@ -14,8 +14,8 @@ class LivenessManager:
         self._hold_frames = 0         
         self._required_frames = 3     
         
-        # Variabel khusus Deteksi Kedip Langsung (Blink 2x) Tanpa Kalibrasi
-        self._blink_state = 0 
+        # Variabel khusus Kedipan Mata (Tanpa Kalibrasi)
+        self._blink_state = 0         
         self._ear_history = []
         self._blink_count = 0
 
@@ -127,18 +127,22 @@ class LivenessManager:
             elif self._pose_state == "WAITING_CENTER":
                 if is_center:
                     self._hold_frames += 1
-                    if self._hold_frames >= self._required_frames: self._register_step = 7; self._blink_state = 0; self._hold_frames = 0; self._blink_count = 0
+                    if self._hold_frames >= self._required_frames: 
+                        self._register_step = 7
+                        self._blink_state = 0
+                        self._hold_frames = 0
+                        self._blink_count = 0
                 else: self._hold_frames = 0
                 return {"status": "pending", "step": "ROLL", "instruction": "Tahan LURUS ke Depan", "progress": "Tunggu wajah lurus..."}
 
-        # ──── TAHAP 7: BLINK (LANGSUNG HITUNG KEDIPAN 2X TANPA KALIBRASI) ────
+        # ──── TAHAP 7: BLINK (TANPA KALIBRASI MATA) ────
         elif self._register_step == 7:
             ear_val = 1.0
             if face.landmarks and len(face.landmarks) >= 400:
                 p = np.array([[face.landmarks[i].x, face.landmarks[i].y] for i in [33,160,158,133,153,144,362,385,387,263,373,380]])
                 ear_val = ((np.linalg.norm(p[1]-p[5])+np.linalg.norm(p[2]-p[4]))/(2.0*np.linalg.norm(p[0]-p[3])+1e-6) + (np.linalg.norm(p[7]-p[11])+np.linalg.norm(p[8]-p[10]))/(2.0*np.linalg.norm(p[6]-p[9])+1e-6))/2.0
             
-            # Smoothing filter (Rata-rata 5 frame agar stabil dari noise getaran kamera)
+            # Smoothing filter agar tidak terlalu goyang (noise)
             self._ear_history.append(ear_val)
             if len(self._ear_history) > 5: self._ear_history.pop(0)
             smooth_ear = sum(self._ear_history) / len(self._ear_history)
@@ -146,19 +150,19 @@ class LivenessManager:
             total_blinks = getattr(config, 'REGISTER_BLINK_COUNT', 2)
             blink_thr = getattr(config, 'BLINK_EAR_THRESHOLD', 0.21)
 
-            # State 0: Menunggu Mata Tertutup (Melewati batas threshold bawah)
+            # State 0: Menunggu Mata Tertutup (Target < blink_thr)
             if self._blink_state == 0:
                 if smooth_ear <= blink_thr:
                     self._hold_frames += 1
-                    if self._hold_frames >= 2: # Tahan 2 frame untuk validasi kedipan murni
+                    if self._hold_frames >= 1: 
                         self._blink_state = 1
                         self._hold_frames = 0
                 else: self._hold_frames = 0
                 
                 needed = total_blinks - self._blink_count
-                return {"status": "pending", "step": "BLINK", "instruction": f"5. Kedipkan Mata ({needed}x)", "progress": f"EAR: {smooth_ear:.2f} | Target Tutup: <= {blink_thr:.2f}"}
+                return {"status": "pending", "step": "BLINK", "instruction": f"5. Kedipkan Mata ({needed}x)", "progress": f"Tutup Mata (Target: < {blink_thr:.2f})"}
             
-            # State 1: Menunggu Mata Terbuka Kembali (Satu siklus kedip selesai dihitung)
+            # State 1: Menunggu Mata Terbuka Kembali (Satu siklus kedipan dihitung)
             elif self._blink_state == 1:
                 target_open = blink_thr + 0.02
                 if smooth_ear >= target_open:
@@ -169,14 +173,14 @@ class LivenessManager:
                         self._hold_frames = 0
                         return {"status": "pending", "step": "BLINK", "instruction": f"✅ {total_blinks}x Kedipan Terekam", "progress": "Validasi Selesai..."}
                     else:
-                        self._blink_state = 0 # Kembali siap mendeteksi kedipan berikutnya
+                        self._blink_state = 0 # Kembali tunggu tutup mata untuk kedipan selanjutnya
                         self._hold_frames = 0
                         
                 needed = total_blinks - self._blink_count
-                return {"status": "pending", "step": "BLINK", "instruction": "BUKA Mata Kembali", "progress": f"EAR: {smooth_ear:.2f} | Target Buka: > {target_open:.2f}"}
+                return {"status": "pending", "step": "BLINK", "instruction": "BUKA Mata Kembali", "progress": f"Target EAR: > {target_open:.2f}"}
 
-        # ──── TAHAP 8: SELESAI LAMBUNG KE MOBILEFACENET ────
+        # ──── TAHAP 8: SELESAI ────
         elif self._register_step == 8:
-            return {"status": "complete", "step": "DONE", "instruction": "Semua Liveness Berhasil!", "progress": "Mengekstrak MobileFaceNet..."}
+            return {"status": "complete", "step": "DONE", "instruction": "Semua Liveness Berhasil!", "progress": "Mengekstrak..."}
 
         return {"status": "pending", "step": "WAIT", "instruction": "Menunggu...", "progress": "WAIT"}

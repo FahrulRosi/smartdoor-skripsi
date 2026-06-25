@@ -104,11 +104,10 @@ class FaceDatabase:
             try:
                 self.client: Client = create_client(self.url, self.key)
                 self.is_connected = True
-                print("✅ [Supabase] Kredensial URL dan Key valid.")
+                print("[Supabase] Terhubung ke Cloud Database PostgreSQL.")
             except Exception as e: 
-                print(f"❌ [Supabase WARNING] Gagal inisialisasi awal: {e}")
+                print(f"[Supabase WARNING] Gagal inisialisasi awal: {e}")
 
-        # Mengaktifkan thread sync backup
         threading.Thread(target=self._https_sync_worker, daemon=True).start()
 
     def _get_connection(self):
@@ -150,6 +149,13 @@ class FaceDatabase:
                 c.execute(f'''CREATE TRIGGER IF NOT EXISTS trg_del_{tbl} AFTER DELETE ON {tbl} FOR EACH ROW BEGIN INSERT INTO sync_deletes (table_name, record_id) VALUES ('{tbl}', OLD.{col}); END;''')
             conn.commit()
 
+    def _is_online(self):
+        try:
+            requests.head("https://1.1.1.1", timeout=3)
+            return True
+        except requests.exceptions.RequestException:
+            return False
+
     def check_user_exists(self, user_id):
         with self.db_lock, closing(self._get_connection()) as conn:
             c = conn.cursor()
@@ -166,56 +172,28 @@ class FaceDatabase:
             
             log_id = str(uuid.uuid4())
 
-            is_synced = 0
-            
-            # 1. COBA LANGSUNG KIRIM KE CLOUD SUPABASE (DIRECT INSERT)
-            if self.is_connected:
-                print(f"Mengirim data {pure_name} ke Supabase Cloud...")
-                try:
-                    payload_face = {
-                        "id": user_id, "name": pure_name, "embedding": p["embedding"],
-                        "liveness_config": p.get("liveness_config", {}), "reg_latency_ms": reg_lat, "created_at": created_at
-                    }
-                    payload_log = {
-                        "id": log_id, "name": pure_name, "user_id": user_id, "status": "SUCCESS",
-                        "yaw_data": p["yaw_data"], "pitch_data": p["pitch_data"], "roll_data": p["roll_data"],
-                        "blink_data": p["blink_data"], "light_condition": lc, "reg_latency_ms": reg_lat, "created_at": created_at
-                    }
-                    # Masukkan secara berurutan agar Foregin Key aman
-                    self.client.table("registered_faces").insert(payload_face).execute()
-                    self.client.table("register_logs").insert(payload_log).execute()
-                    
-                    print("✅ [Supabase] Data SUKSES tersimpan di Cloud Database!")
-                    is_synced = 1
-                except Exception as e:
-                    print(f"\n❌❌ [SUPABASE FATAL ERROR] Gagal mengirim data ke Cloud!")
-                    print(f"DETAIL ERROR: {e}\n(Data hanya akan tersimpan di SQLite lokal)\n")
-                    is_synced = 0
-
-            # 2. SIMPAN KE SQLITE LOKAL
             with self.db_lock, closing(self._get_connection()) as conn:
                 c = conn.cursor()
+                
                 c.execute("""INSERT INTO registered_faces 
                     (id, name, embedding, liveness_config, reg_latency_ms, created_at, is_synced)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, 0)
                     ON CONFLICT(id) DO UPDATE SET 
                     name=excluded.name, embedding=excluded.embedding, liveness_config=excluded.liveness_config,
-                    reg_latency_ms=excluded.reg_latency_ms, created_at=excluded.created_at, is_synced=?""",
+                    reg_latency_ms=excluded.reg_latency_ms, created_at=excluded.created_at, is_synced=0""",
                     (user_id, pure_name, json.dumps(p["embedding"]), json.dumps(p.get("liveness_config", {})), 
-                     reg_lat, created_at, is_synced, is_synced))
+                     reg_lat, created_at))
                 
                 c.execute("""INSERT INTO register_logs (id, name, user_id, status, yaw_data, pitch_data, roll_data, blink_data, light_condition, reg_latency_ms, created_at, is_synced)
-                             VALUES (?, ?, ?, 'SUCCESS', ?, ?, ?, ?, ?, ?, ?, ?)""",
-                             (log_id, pure_name, user_id, p["yaw_data"], p["pitch_data"], p["roll_data"], p["blink_data"], lc, reg_lat, created_at, is_synced))
+                             VALUES (?, ?, ?, 'SUCCESS', ?, ?, ?, ?, ?, ?, ?, 0)""",
+                             (log_id, pure_name, user_id, p["yaw_data"], p["pitch_data"], p["roll_data"], p["blink_data"], lc, reg_lat, created_at))
                 conn.commit()
             
-            # Jika belum tersinkron, baru trigger background worker
-            if is_synced == 0:
-                self.sync_trigger.set() 
-                
+            print(f"\n[Database] ✅ Master Wajah '{pure_name} ({user_id})' berhasil disimpan. Memulai sinkronisasi Cloud...")
+            self.sync_trigger.set() 
             return True
         except Exception as e: 
-            print(f"❌ [Database Error] Gagal save_face lokal: {e}")
+            print(f"❌ [Database Error] Gagal save_face ke SQLite lokal: {e}")
             return False
 
     def load_all_faces(self, silent=False):
@@ -342,7 +320,7 @@ class FaceDatabase:
             self.sync_trigger.wait(timeout=3.0) 
             self.sync_trigger.clear() 
             
-            if not self.is_connected: continue 
+            if not self.is_connected or not self._is_online(): continue 
             
             try:
                 with self.db_lock, closing(self._get_connection()) as conn:
@@ -358,6 +336,8 @@ class FaceDatabase:
                             except Exception: pass
                     except Exception: pass
                     
+                    # --- MULAI UKUR LATENSI CLOUD SINKRONISASI ---
+                    start_sync_time = time.time()
                     synced_count = 0
 
                     # 1. Sync Registered Faces
@@ -370,10 +350,18 @@ class FaceDatabase:
                                 c.execute("UPDATE registered_faces SET is_synced = 1 WHERE id = ?", (r[0],))
                                 synced_count += 1
                             except Exception as e:
-                                pass # Error sudah diprint di tahap direct insert
-                    except Exception: pass
+                                err = str(e).lower()
+                                print(f"❌ [Sync Error] PUSH registered_faces ({r[0]}): {e}")
+                                if "could not find" in err or "column" in err:
+                                    payload.pop("reg_latency_ms", None)
+                                    try: 
+                                        self.client.table("registered_faces").upsert(payload, on_conflict="id").execute()
+                                        c.execute("UPDATE registered_faces SET is_synced = 1 WHERE id = ?", (r[0],))
+                                        synced_count += 1
+                                    except Exception: pass
+                    except Exception as err_db: print(f"❌ Query Error (registered_faces): {err_db}")
                     
-                    # 2. Sync Register Logs 
+                    # 2. Sync Register Logs (UPDATED to UPSERT)
                     try:
                         c.execute("SELECT id, name, user_id, status, yaw_data, pitch_data, roll_data, blink_data, light_condition, reg_latency_ms, created_at FROM register_logs WHERE is_synced = 0")
                         for r in c.fetchall():
@@ -382,10 +370,23 @@ class FaceDatabase:
                                 self.client.table("register_logs").upsert(payload, on_conflict="id").execute()
                                 c.execute("UPDATE register_logs SET is_synced = 1 WHERE id = ?", (r[0],))
                                 synced_count += 1
-                            except Exception as e: pass 
-                    except Exception: pass
+                            except Exception as e:
+                                err = str(e).lower()
+                                print(f"❌ [Sync Error] PUSH register_logs (ID {r[0]}): {e}")
+                                if "could not find" in err or "column" in err:
+                                    payload.pop("light_condition", None)
+                                    payload.pop("reg_latency_ms", None)
+                                    try:
+                                        self.client.table("register_logs").upsert(payload, on_conflict="id").execute()
+                                        c.execute("UPDATE register_logs SET is_synced = 1 WHERE id = ?", (r[0],))
+                                        synced_count += 1
+                                    except Exception: 
+                                        c.execute("UPDATE register_logs SET is_synced = 1 WHERE id = ?", (r[0],))
+                                elif "foreign key" in err or "23503" in err:
+                                    c.execute("UPDATE register_logs SET is_synced = 1 WHERE id = ?", (r[0],)) 
+                    except Exception as err_db: print(f"❌ Query Error (register_logs): {err_db}")
                         
-                    # 3. Sync Access Logs
+                    # 3. Sync Access Logs (UPDATED to UPSERT)
                     try:
                         c.execute("SELECT id, name, user_id, status, face_val_latency_ms, headpose_data, blink_data, accuracy, light_condition, auth_latency_ms, created_at FROM access_logs WHERE is_synced = 0")
                         for r in c.fetchall():
@@ -394,10 +395,24 @@ class FaceDatabase:
                                 self.client.table("access_logs").upsert(payload, on_conflict="id").execute()
                                 c.execute("UPDATE access_logs SET is_synced = 1 WHERE id = ?", (r[0],))
                                 synced_count += 1
-                            except Exception: pass
-                    except Exception: pass
+                            except Exception as e:
+                                err = str(e).lower()
+                                print(f"❌ [Sync Error] PUSH access_logs (ID {r[0]}): {e}")
+                                if "could not find" in err or "column" in err:
+                                    payload.pop("light_condition", None)
+                                    payload.pop("auth_latency_ms", None)
+                                    payload.pop("face_val_latency_ms", None)
+                                    try:
+                                        self.client.table("access_logs").upsert(payload, on_conflict="id").execute()
+                                        c.execute("UPDATE access_logs SET is_synced = 1 WHERE id = ?", (r[0],))
+                                        synced_count += 1
+                                    except Exception: 
+                                        c.execute("UPDATE access_logs SET is_synced = 1 WHERE id = ?", (r[0],))
+                                elif "foreign key" in err or "23503" in err:
+                                    c.execute("UPDATE access_logs SET is_synced = 1 WHERE id = ?", (r[0],))
+                    except Exception as err_db: print(f"❌ Query Error (access_logs): {err_db}")
                         
-                    # 4. Sync Spoofing Logs
+                    # 4. Sync Spoofing Logs (UPDATED to UPSERT)
                     try:
                         c.execute("SELECT id, spoof_score, spoof_type, spoof_latency_ms, created_at FROM spoofing_logs WHERE is_synced = 0")
                         for r in c.fetchall():
@@ -406,8 +421,23 @@ class FaceDatabase:
                                 self.client.table("spoofing_logs").upsert(payload, on_conflict="id").execute()
                                 c.execute("UPDATE spoofing_logs SET is_synced = 1 WHERE id = ?", (r[0],))
                                 synced_count += 1
-                            except Exception: pass
-                    except Exception: pass
+                            except Exception as e:
+                                err = str(e).lower()
+                                print(f"❌ [Sync Error] PUSH spoofing_logs (ID {r[0]}): {e}")
+                                if "could not find" in err or "column" in err:
+                                    payload.pop("spoof_latency_ms", None)
+                                    try:
+                                        self.client.table("spoofing_logs").upsert(payload, on_conflict="id").execute()
+                                        c.execute("UPDATE spoofing_logs SET is_synced = 1 WHERE id = ?", (r[0],))
+                                        synced_count += 1
+                                    except Exception:
+                                        c.execute("UPDATE spoofing_logs SET is_synced = 1 WHERE id = ?", (r[0],))
+                    except Exception as err_db: print(f"❌ Query Error (spoofing_logs): {err_db}")
+                    
+                    # --- CETAK LATENSI UNGGAL REALTIME KE CLOUD ---
+                    if synced_count > 0: 
+                        latency_cloud_ms = (time.time() - start_sync_time) * 1000
+                        print(f"\n[Background Sync] ☁️ Berhasil UPLOAD {synced_count} baris data ke Supabase! | Latensi Cloud: {latency_cloud_ms:.0f} ms")
 
                     # --- PULL DARI CLOUD ---
                     try:
@@ -443,4 +473,4 @@ class FaceDatabase:
                         
                     conn.commit()
             except Exception as e: 
-                pass
+                print(f"❌ [Fatal Sync Error] Koneksi ke database terganggu: {e}")

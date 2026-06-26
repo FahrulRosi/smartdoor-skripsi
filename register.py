@@ -166,8 +166,26 @@ class FaceRegistrationApp:
         
         self.extraction_embeddings = []
         self.last_extraction_time = 0
+        self._checked_duplicate_start = False
         
         self.db = FaceDatabase()
+        
+        # Cek apakah nama sudah terdaftar di database sebelum inisialisasi kamera & model
+        self.name_exists = False
+        try:
+            raw = self.db.load_all_faces()
+            if raw:
+                for db_key in raw.keys():
+                    db_name = db_key.split(" - ", 1)[-1] if " - " in db_key else db_key
+                    if db_name.lower() == self.name.lower():
+                        self.name_exists = True
+                        break
+        except Exception as e: pass
+        
+        if self.name_exists:
+            _log(f"❌ GAGAL: User dengan nama '{self.name}' sudah terdaftar!", "SYSTEM")
+            return
+            
         self.cam = CameraStream(config.CAMERA_INDEX, config.FRAME_WIDTH, config.FRAME_HEIGHT).start()
         self.detector = FaceMeshDetector(min_detection_confidence=0.35, min_tracking_confidence=0.35)
         self.liveness, self.model = LivenessManager(), MobileFaceNet()
@@ -177,7 +195,6 @@ class FaceRegistrationApp:
         self.matcher = FaceMatcher(0.35) 
         
         try:
-            raw = self.db.load_all_faces()
             if raw:
                 faces = {k: v.get('embedding') for k, v in raw.items() if isinstance(v, dict) and v.get('embedding') is not None}
                 self.matcher.load_faces(faces) if hasattr(self.matcher, 'load_faces') else setattr(self.matcher, 'known_faces', faces)
@@ -237,7 +254,7 @@ class FaceRegistrationApp:
                     self.hold_frames = 0
                     self.prev_tag = tag
                 self.hold_frames += 1
-                if self.hold_frames >= 6:
+                if self.hold_frames >= 3:
                     if tag not in buf:
                         lat_ms = round((time.time() - self.action_start_time) * 1000, 2)
                         buf[tag] = {k: float(pose.get(k, 0.0)) for k in ("yaw", "pitch", "roll")}
@@ -283,18 +300,21 @@ class FaceRegistrationApp:
         }.get(stg, f"Tahan Lurus | {light_cond}")
         return hud_txt, f"{hud_txt} | Spf: {sp_score:.2f}"
 
-    def _commit_stage_data(self, cur_step):
-        if cur_step in ("WAIT", self._prev_step): return
+    def _commit_stage_data(self, cur_step, display):
+        if cur_step in ("WAIT", self._prev_step): return False
         if self._prev_step in {"YAW", "PITCH", "ROLL"}:
             axis = {"YAW": "yaw", "PITCH": "pitch", "ROLL": "roll"}[self._prev_step]
-            if len(self._pose_buf[axis]) < 2: self.liveness._register_step -= 1; return 
+            if len(self._pose_buf[axis]) < 2:
+                stage_name = {"YAW": "Toleh Kiri/Kanan", "PITCH": "Angguk Atas/Bawah", "ROLL": "Miring Kiri/Kanan"}[self._prev_step]
+                self._reset_registration(display, f"❌ GAGAL {self._prev_step}!", f"Deteksi {stage_name} Kurang/Terlalu Cepat")
+                return True
             self.cap_data[self.POSE_CFG[STEP_TO_STAGE[self._prev_step]][0]], self._pose_buf[axis] = list(self._pose_buf[axis].values()), {}  
             
         if cur_step == "DONE" and self._prev_step == "BLINK":
             bc, bo = self._blink_buf["closed"], self._blink_buf["open"]
             min_open, max_closed, min_delta = getattr(config, 'MIN_BLINK_OPEN_EAR', 0.22), getattr(config, 'MAX_BLINK_CLOSED_EAR', 0.20), getattr(config, 'MIN_BLINK_DELTA', 0.04)
             if not bc or not bo or (bo["avg_ear"] < min_open) or (bc["avg_ear"] > max_closed) or (bo["avg_ear"] - bc["avg_ear"] < min_delta): 
-                self.liveness._register_step, self.liveness._blink_state, self.liveness._hold_frames, self.liveness._blink_count, self._blink_buf = 7, 0, 0, 0, {"closed": None, "open": None, "logged_closed": False, "logged_open": False}; return
+                self.liveness._register_step, self.liveness._blink_state, self.liveness._hold_frames, self.liveness._blink_count, self._blink_buf = 7, 0, 0, 0, {"closed": None, "open": None, "logged_closed": False, "logged_open": False}; return False
             self.cap_data.update({"blink_closed": bc, "blink_open": bo})
         
         self._prev_step, self.stage = cur_step, STEP_TO_STAGE.get(cur_step, self.stage)
@@ -489,6 +509,66 @@ class FaceRegistrationApp:
                     self.action_start_time, self._timer_started = time.time(), True
                     
                 display = cv2.flip(self.detector.draw(display, face), 1)
+                
+                # Cek duplikasi wajah di awal gerakan liveness agar tidak melakukan gerakan liveness jika wajah sudah terdaftar
+                if self.stage == RegistrationStage.FACEMESH and not getattr(self, '_checked_duplicate_start', False):
+                    self._checked_duplicate_start = True
+                    best_crop = Helpers.get_aligned_crop(enhanced, face, target_size=(112, 112))
+                    if best_crop is not None and best_crop.size > 0:
+                        emb = self.model.get_embedding(best_crop)
+                        if emb is not None:
+                            q_vec = np.array(emb, dtype=np.float32).flatten()
+                            q_vec = q_vec / (np.linalg.norm(q_vec) + 1e-6)
+                            
+                            is_duplicate = False
+                            duplicate_name = ""
+                            best_sim_score = 0.0
+                            anti_dup_thr = getattr(config, 'ANTI_DUPLICATE_THRESHOLD', 0.48)
+                            emb_dim = getattr(self.model, 'embedding_size', 128)
+                            
+                            all_faces_raw = self.db.load_all_faces()
+                            if all_faces_raw:
+                                for name, data in all_faces_raw.items():
+                                    db_name = name.split(" - ", 1)[-1] if " - " in name else name
+                                    
+                                    if db_name.lower() == self.name.lower():
+                                        is_duplicate = True
+                                        duplicate_name = db_name
+                                        best_sim_score = 1.0
+                                        break
+                                        
+                                    if isinstance(data, dict) and 'embedding' in data:
+                                        emb_list = data['embedding']
+                                        if isinstance(emb_list, list) and len(emb_list) > 0:
+                                            if not isinstance(emb_list[0], (list, np.ndarray)):
+                                                if len(emb_list) == (emb_dim * 3):
+                                                    emb_list = [emb_list[0:emb_dim], emb_list[emb_dim:emb_dim*2], emb_list[emb_dim*2:emb_dim*3]]
+                                                else:
+                                                    emb_list = [emb_list]
+                                            
+                                            for db_emb in emb_list:
+                                                if len(db_emb) != emb_dim: continue
+                                                db_vec = np.array(db_emb, dtype=np.float32)
+                                                db_vec = db_vec / (np.linalg.norm(db_vec) + 1e-6)
+                                                sim = np.dot(q_vec, db_vec)
+                                                if sim > best_sim_score:
+                                                    best_sim_score = sim
+                                                    duplicate_name = db_name
+                                                if sim >= anti_dup_thr:
+                                                    is_duplicate = True
+                                                    break
+                                    if is_duplicate:
+                                        break
+                                        
+                            if is_duplicate and os.getenv("ALLOW_DUPLICATE", "false").lower() != "true":
+                                sim_percent = best_sim_score * 100
+                                Helpers.show_msg(display, "❌ WAJAH SUDAH TERDAFTAR!", f"Mirip {sim_percent:.1f}% dgn {duplicate_name}", config.COLOR_RED)
+                                with self.frame_lock: self.display_frame = display.copy()
+                                time.sleep(4.0)
+                                self.stage = RegistrationStage.COMPLETE
+                                self.is_running = False
+                                return
+
                 if face.bbox[3] > int(config.FRAME_HEIGHT * 0.50): 
                     Helpers.draw_hud(display, self.stage, "Wajah Terlalu Dekat!", "Mundur", "", "TOO CLOSE", face.bbox, config.COLOR_YELLOW)
                     with self.frame_lock: self.display_frame = display
@@ -515,8 +595,8 @@ class FaceRegistrationApp:
                 if self.stage != RegistrationStage.EXTRACTION and not self.in_ext:
                     self._record_data_buffers(face, pose, enhanced) 
                     res = self.liveness.update_register(face, self.detector)
-                    if res["step"] != "WAIT" and res["step"] != self._prev_step and self.stage in self.POSE_CFG and len(self._pose_buf[self.POSE_CFG[self.stage][3]]) < 2: res["step"] = self._prev_step 
-                    self._commit_stage_data(res["step"])
+                    if self._commit_stage_data(res["step"], display):
+                        continue
                     if self.prev_instruction is None or res.get("instruction", "") != self.prev_instruction: 
                         self.prev_instruction, self.action_start_time, self.hold_frames = res.get("instruction", ""), time.time(), 0
                     Helpers.draw_hud(display, self.stage, res.get("instruction", ""), res.get("progress",""), hud_txt, f"Real: {sp_score:.2f}", face.bbox, config.COLOR_GREEN if res["step"] == "DONE" else config.COLOR_CYAN)
@@ -528,6 +608,9 @@ class FaceRegistrationApp:
             self.is_running = False
             
     def run(self):
+        if getattr(self, 'name_exists', False):
+            print(f"\n❌ GAGAL: User dengan nama '{self.name}' sudah terdaftar dalam database!")
+            return
         if self.stage == RegistrationStage.COMPLETE: return
         threading.Thread(target=self._process_thread, daemon=True).start()
         try:
@@ -536,7 +619,12 @@ class FaceRegistrationApp:
                 with self.frame_lock: frame = self.display_frame.copy() if self.display_frame is not None else None
                 if frame is not None: cv2.imshow("Register", frame)
                 if cv2.waitKey(1) & 0xFF == ord("q"): self.is_running = False; break
-        finally: self.is_running = False; time.sleep(0.5); self.cam.stop(); self.detector.close(); cv2.destroyAllWindows()
+        finally: 
+            self.is_running = False
+            time.sleep(0.5)
+            if hasattr(self, 'cam'): self.cam.stop()
+            if hasattr(self, 'detector'): self.detector.close()
+            cv2.destroyAllWindows()
 
 if __name__ == "__main__":
     print(f"\n{'='*45}\n   SISTEM REGISTRASI WAJAH (MULTI-FRAME V2)\n{'='*45}")

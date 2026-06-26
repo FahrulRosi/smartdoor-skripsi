@@ -372,7 +372,7 @@ class FaceRegistrationApp:
         
         is_duplicate = False
         duplicate_name = ""
-        anti_dup_thr = getattr(config, 'ANTI_DUPLICATE_THRESHOLD', 0.48)
+        anti_dup_thr = getattr(config, 'ANTI_DUPLICATE_THRESHOLD', getattr(config, 'MATCH_THRESHOLD', 0.65))
         best_sim_score = 0.0
         
         all_faces_raw = self.db.load_all_faces()

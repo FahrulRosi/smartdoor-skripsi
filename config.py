@@ -44,6 +44,7 @@ MIN_BLINK_DELTA      = 0.025
 ANTI_SPOOFING_MODEL     = "liveness/antispoofing.onnx"
 ANTI_SPOOFING_THRESHOLD = 0.80
 MATCH_THRESHOLD         = 0.70
+ANTI_DUPLICATE_THRESHOLD = 0.65
 MOBILEFACENET_PATH      = "recognition/mobilefacenet.onnx"
 MAX_SPOOF_FRAMES        = 8
 

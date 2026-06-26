@@ -166,26 +166,8 @@ class FaceRegistrationApp:
         
         self.extraction_embeddings = []
         self.last_extraction_time = 0
-        self._checked_duplicate_start = False
         
         self.db = FaceDatabase()
-        
-        # Cek apakah nama sudah terdaftar di database sebelum inisialisasi kamera & model
-        self.name_exists = False
-        try:
-            raw = self.db.load_all_faces()
-            if raw:
-                for db_key in raw.keys():
-                    db_name = db_key.split(" - ", 1)[-1] if " - " in db_key else db_key
-                    if db_name.lower() == self.name.lower():
-                        self.name_exists = True
-                        break
-        except Exception as e: pass
-        
-        if self.name_exists:
-            _log(f"❌ GAGAL: User dengan nama '{self.name}' sudah terdaftar!", "SYSTEM")
-            return
-            
         self.cam = CameraStream(config.CAMERA_INDEX, config.FRAME_WIDTH, config.FRAME_HEIGHT).start()
         self.detector = FaceMeshDetector(min_detection_confidence=0.35, min_tracking_confidence=0.35)
         self.liveness, self.model = LivenessManager(), MobileFaceNet()
@@ -195,6 +177,7 @@ class FaceRegistrationApp:
         self.matcher = FaceMatcher(0.35) 
         
         try:
+            raw = self.db.load_all_faces()
             if raw:
                 faces = {k: v.get('embedding') for k, v in raw.items() if isinstance(v, dict) and v.get('embedding') is not None}
                 self.matcher.load_faces(faces) if hasattr(self.matcher, 'load_faces') else setattr(self.matcher, 'known_faces', faces)
@@ -402,18 +385,14 @@ class FaceRegistrationApp:
                 db_name = db_key.split(" - ", 1)[-1] if " - " in db_key else db_key
                 if db_name.lower() == self.name.lower():
                     user_exists = True
-                    if 'user_id' in data: existing_user_id = data['user_id']
-                    if 'embedding' in data:
-                        emb_val = data['embedding']
-                        emb_dim = getattr(self.model, 'embedding_size', 128)
-                        if isinstance(emb_val, list) and len(emb_val) > 0 and isinstance(emb_val[0], list):
-                            existing_embeddings = emb_val
-                        elif isinstance(emb_val, list) and len(emb_val) == (emb_dim * 3):
-                            existing_embeddings = [emb_val[0:emb_dim], emb_val[emb_dim:emb_dim*2], emb_val[emb_dim*2:emb_dim*3]]
-                        else:
-                            existing_embeddings = [emb_val] if emb_val else []
-                        single_master_emb = existing_embeddings + final_emb_vectors
                     break
+
+            if user_exists and os.getenv("ALLOW_DUPLICATE", "false").lower() != "true":
+                Helpers.show_msg(display, "❌ NAMA SUDAH TERDAFTAR!", f"Nama '{self.name}' sudah digunakan", config.COLOR_RED)
+                with self.frame_lock: self.display_frame = display.copy()
+                time.sleep(4.0)
+                self.stage = RegistrationStage.COMPLETE
+                return
 
             if not user_exists:
                 emb_dim = getattr(self.model, 'embedding_size', 128)
@@ -509,66 +488,6 @@ class FaceRegistrationApp:
                     self.action_start_time, self._timer_started = time.time(), True
                     
                 display = cv2.flip(self.detector.draw(display, face), 1)
-                
-                # Cek duplikasi wajah di awal gerakan liveness agar tidak melakukan gerakan liveness jika wajah sudah terdaftar
-                if self.stage == RegistrationStage.FACEMESH and not getattr(self, '_checked_duplicate_start', False):
-                    self._checked_duplicate_start = True
-                    best_crop = Helpers.get_aligned_crop(enhanced, face, target_size=(112, 112))
-                    if best_crop is not None and best_crop.size > 0:
-                        emb = self.model.get_embedding(best_crop)
-                        if emb is not None:
-                            q_vec = np.array(emb, dtype=np.float32).flatten()
-                            q_vec = q_vec / (np.linalg.norm(q_vec) + 1e-6)
-                            
-                            is_duplicate = False
-                            duplicate_name = ""
-                            best_sim_score = 0.0
-                            anti_dup_thr = getattr(config, 'ANTI_DUPLICATE_THRESHOLD', 0.48)
-                            emb_dim = getattr(self.model, 'embedding_size', 128)
-                            
-                            all_faces_raw = self.db.load_all_faces()
-                            if all_faces_raw:
-                                for name, data in all_faces_raw.items():
-                                    db_name = name.split(" - ", 1)[-1] if " - " in name else name
-                                    
-                                    if db_name.lower() == self.name.lower():
-                                        is_duplicate = True
-                                        duplicate_name = db_name
-                                        best_sim_score = 1.0
-                                        break
-                                        
-                                    if isinstance(data, dict) and 'embedding' in data:
-                                        emb_list = data['embedding']
-                                        if isinstance(emb_list, list) and len(emb_list) > 0:
-                                            if not isinstance(emb_list[0], (list, np.ndarray)):
-                                                if len(emb_list) == (emb_dim * 3):
-                                                    emb_list = [emb_list[0:emb_dim], emb_list[emb_dim:emb_dim*2], emb_list[emb_dim*2:emb_dim*3]]
-                                                else:
-                                                    emb_list = [emb_list]
-                                            
-                                            for db_emb in emb_list:
-                                                if len(db_emb) != emb_dim: continue
-                                                db_vec = np.array(db_emb, dtype=np.float32)
-                                                db_vec = db_vec / (np.linalg.norm(db_vec) + 1e-6)
-                                                sim = np.dot(q_vec, db_vec)
-                                                if sim > best_sim_score:
-                                                    best_sim_score = sim
-                                                    duplicate_name = db_name
-                                                if sim >= anti_dup_thr:
-                                                    is_duplicate = True
-                                                    break
-                                    if is_duplicate:
-                                        break
-                                        
-                            if is_duplicate and os.getenv("ALLOW_DUPLICATE", "false").lower() != "true":
-                                sim_percent = best_sim_score * 100
-                                Helpers.show_msg(display, "❌ WAJAH SUDAH TERDAFTAR!", f"Mirip {sim_percent:.1f}% dgn {duplicate_name}", config.COLOR_RED)
-                                with self.frame_lock: self.display_frame = display.copy()
-                                time.sleep(4.0)
-                                self.stage = RegistrationStage.COMPLETE
-                                self.is_running = False
-                                return
-
                 if face.bbox[3] > int(config.FRAME_HEIGHT * 0.50): 
                     Helpers.draw_hud(display, self.stage, "Wajah Terlalu Dekat!", "Mundur", "", "TOO CLOSE", face.bbox, config.COLOR_YELLOW)
                     with self.frame_lock: self.display_frame = display
@@ -608,9 +527,6 @@ class FaceRegistrationApp:
             self.is_running = False
             
     def run(self):
-        if getattr(self, 'name_exists', False):
-            print(f"\n❌ GAGAL: User dengan nama '{self.name}' sudah terdaftar dalam database!")
-            return
         if self.stage == RegistrationStage.COMPLETE: return
         threading.Thread(target=self._process_thread, daemon=True).start()
         try:
@@ -619,12 +535,7 @@ class FaceRegistrationApp:
                 with self.frame_lock: frame = self.display_frame.copy() if self.display_frame is not None else None
                 if frame is not None: cv2.imshow("Register", frame)
                 if cv2.waitKey(1) & 0xFF == ord("q"): self.is_running = False; break
-        finally: 
-            self.is_running = False
-            time.sleep(0.5)
-            if hasattr(self, 'cam'): self.cam.stop()
-            if hasattr(self, 'detector'): self.detector.close()
-            cv2.destroyAllWindows()
+        finally: self.is_running = False; time.sleep(0.5); self.cam.stop(); self.detector.close(); cv2.destroyAllWindows()
 
 if __name__ == "__main__":
     print(f"\n{'='*45}\n   SISTEM REGISTRASI WAJAH (MULTI-FRAME V2)\n{'='*45}")

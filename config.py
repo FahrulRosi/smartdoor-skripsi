@@ -14,8 +14,8 @@ SUPABASE_URL = "https://gwwxebdmavlmxxcdrlge.supabase.co"
 SUPABASE_KEY = "sb_publishable_tUsmI6J1BubOlRf9YhtNPQ_F9dWIyOv"
 
 # ── FaceMesh ─────────────────────────────────────────────────────────────────
-MIN_DETECTION_CONFIDENCE = 0.75
-MIN_TRACKING_CONFIDENCE  = 0.7
+MIN_DETECTION_CONFIDENCE = 0.55
+MIN_TRACKING_CONFIDENCE  = 0.55
 
 # ── Register Liveness Thresholds ─────────────────────────────────────────────
 MAX_YAW   = 12.0  
@@ -34,22 +34,23 @@ YAW_THRESHOLD   = CHALLENGE_YAW
 PITCH_THRESHOLD = CHALLENGE_PITCH
 ROLL_THRESHOLD  = CHALLENGE_ROLL
 
-BLINK_EAR_THRESHOLD  = 0.21 
+BLINK_EAR_THRESHOLD  = 0.22
 REGISTER_BLINK_COUNT = 2
 
-# ── Anti-Spoofing & Recognition ──────────────────────────────────────────────
-# Diarahkan ke model INT8 hasil kuantisasi
-ANTI_SPOOFING_MODEL     = "liveness/antispoofing_int8.onnx"
-ANTI_SPOOFING_THRESHOLD = 0.80
+MIN_BLINK_OPEN_EAR   = 0.23  
+MAX_BLINK_CLOSED_EAR = 0.21  
+MIN_BLINK_DELTA      = 0.025  
 
+ANTI_SPOOFING_MODEL     = "liveness/antispoofing.onnx"
+ANTI_SPOOFING_THRESHOLD = 0.80
 MATCH_THRESHOLD         = 0.70
-# Diarahkan ke model INT8 hasil kuantisasi
-MOBILEFACENET_PATH      = "recognition/mobilefacenet_int8.onnx"
+MOBILEFACENET_PATH      = "recognition/mobilefacenet.onnx"
+MAX_SPOOF_FRAMES        = 8
 
 # ── Door Lock & UI ───────────────────────────────────────────────────────────
 LOCK_GPIO_PIN   = 18
 BUTTON_PIN      = 26  
-UNLOCK_DURATION = 5   
+UNLOCK_DURATION = 5  
 
 # Definisi Warna BGR untuk OpenCV
 COLOR_GREEN  = (0,   220,   0)

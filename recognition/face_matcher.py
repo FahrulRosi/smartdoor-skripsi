@@ -49,7 +49,10 @@ class FaceMatcher:
 
         for name, db_embedding in self.known_faces.items():
             # PENYESUAIAN SOLUSI A: Cek apakah data di DB berupa Matriks 2D (Multi-Vector) atau 1D (Lama)
-            if isinstance(db_embedding, list) and len(db_embedding) > 0 and isinstance(db_embedding[0], list):
+            if isinstance(db_embedding, np.ndarray) and db_embedding.ndim > 1:
+                # Jika NumPy array 2D
+                db_embs = [e for e in db_embedding]
+            elif isinstance(db_embedding, list) and len(db_embedding) > 0 and isinstance(db_embedding[0], list):
                 # Jika Matriks 2D (Data baru dari register kloning)
                 db_embs = [np.array(e, dtype=np.float32) for e in db_embedding]
             else:

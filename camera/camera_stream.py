@@ -20,12 +20,21 @@ class CameraStream:
             # Gunakan default backend untuk Windows/Mac
             self.cap = cv2.VideoCapture(self.src)
 
+        # Fallback ke camera index 0 jika camera index saat ini gagal dibuka
+        if (not self.cap or not self.cap.isOpened()) and self.src != 0:
+            print(f"[CameraStream] Gagal membuka kamera index {self.src}. Mencoba fallback ke index 0...")
+            self.src = 0
+            if platform.system() == "Linux":
+                self.cap = cv2.VideoCapture(self.src, cv2.CAP_V4L2)
+            else:
+                self.cap = cv2.VideoCapture(self.src)
+
+        if not self.cap or not self.cap.isOpened():
+            raise RuntimeError(f"Cannot open camera source: {self.src}")
+
         # Set resolusi kamera
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-
-        if not self.cap.isOpened():
-            raise RuntimeError(f"Cannot open camera source: {self.src}")
 
         self.running = True
         # Jalankan pembacaan kamera di thread terpisah agar tidak membuat lag program utama

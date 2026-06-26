@@ -20,6 +20,7 @@ class MobileFaceNet:
         self._session = None
         self._input_name: str = ""
         self._stub = False
+        self.embedding_size = 128  # Default embedding size
 
         if os.path.isfile(_MODEL_PATH):
             try:
@@ -40,7 +41,9 @@ class MobileFaceNet:
                     providers=providers,
                 )
                 self._input_name = self._session.get_inputs()[0].name
-                print(f"[MobileFaceNet] Loaded ONNX model with optimization: {_MODEL_PATH}")
+                # Mengambil output shape dimensi embedding secara dinamis dari model ONNX
+                self.embedding_size = self._session.get_outputs()[0].shape[1]
+                print(f"[MobileFaceNet] Loaded ONNX model with optimization: {_MODEL_PATH} (Embedding Size: {self.embedding_size})")
             except Exception as exc:
                 print(f"[MobileFaceNet] ONNX load failed ({exc}). Using stub.")
                 self._stub = True

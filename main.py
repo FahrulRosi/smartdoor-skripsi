@@ -21,18 +21,13 @@ class UIHelper:
     def log(msg, lvl="INFO"): print(f"[{datetime.now().strftime('%H:%M:%S')}] [{lvl}] {msg}")
 
     @staticmethod
-    def print_inline(msg): sys.stdout.write(f"\r ⏳ {msg}".ljust(120)); sys.stdout.flush()
+    def print_inline(msg): sys.stdout.write(f"\r ⏳ {msg}\033[K"); sys.stdout.flush()
 
     @staticmethod
     def enhance_adaptive(frame, bbox, l_str="Normal"):
         if not getattr(config, 'ENABLE_CLAHE_ENHANCEMENT', True): return frame
-        denoised = cv2.bilateralFilter(frame, d=3, sigmaColor=30, sigmaSpace=30)
-        img_yuv = cv2.cvtColor(denoised, cv2.COLOR_BGR2YUV)
-
-        matrix_clip = {"Normal": 1.5, "Low Light": 2.0, "Backlight": 1.8}
-        clip_limit = matrix_clip.get(l_str, 1.5)
-        
-        img_yuv[:,:,0] = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8)).apply(img_yuv[:,:,0])
+        img_yuv = cv2.cvtColor(cv2.bilateralFilter(frame, 3, 30, 30), cv2.COLOR_BGR2YUV)
+        img_yuv[:,:,0] = cv2.createCLAHE(clipLimit={"Normal":1.5, "Low Light":2.0, "Backlight":1.8}.get(l_str, 1.5), tileGridSize=(8, 8)).apply(img_yuv[:,:,0])
         return cv2.cvtColor(img_yuv, cv2.COLOR_YUV2BGR)
 
     @staticmethod
@@ -145,24 +140,23 @@ class SmartDoorApp:
         self.anti_spoof = SilentAntiSpoofing(getattr(config, 'ANTI_SPOOFING_MODEL', "liveness/antispoofing_int8.onnx"), getattr(config, 'ANTI_SPOOFING_THRESHOLD', 0.85))
         
         self.detector = FaceMeshDetector(min_detection_confidence=0.35, min_tracking_confidence=0.35)
-        
         self.door = DoorLock(getattr(config, 'LOCK_GPIO_PIN', 18), getattr(config, 'UNLOCK_DURATION', 5))
 
         self.known_faces_2d = {}
-        all_faces = self.db.load_all_faces() or {}
-        for k, v in all_faces.items():
+        emb_dim = getattr(self.model, 'embedding_size', 128)
+        for k, v in (self.db.load_all_faces() or {}).items():
             if isinstance(v, dict) and v.get('embedding'):
-                emb_data = v['embedding']
-                if isinstance(emb_data, list) and len(emb_data) > 0:
-                    if isinstance(emb_data[0], (list, np.ndarray)):
-                        self.known_faces_2d[k] = [np.array(e, dtype=np.float32) for e in emb_data]
-                    else:
-                        if len(emb_data) % 512 == 0 and len(emb_data) >= 512:
-                            self.known_faces_2d[k] = [np.array(emb_data[i:i+512], dtype=np.float32) for i in range(0, len(emb_data), 512)]
-                        elif len(emb_data) % 112 == 0 and len(emb_data) >= 112:
-                            self.known_faces_2d[k] = [np.array(emb_data[i:i+112], dtype=np.float32) for i in range(0, len(emb_data), 112)]
-                        else:
-                            self.known_faces_2d[k] = [np.array(emb_data, dtype=np.float32)]
+                emb_val = v['embedding']
+                if isinstance(emb_val, list) and len(emb_val) == (emb_dim * 3):
+                    sub_embs = [emb_val[0:emb_dim], emb_val[emb_dim:emb_dim*2], emb_val[emb_dim*2:emb_dim*3]]
+                elif isinstance(emb_val, list) and len(emb_val) > 0 and isinstance(emb_val[0], list):
+                    sub_embs = emb_val
+                else:
+                    sub_embs = [emb_val]
+
+                valid_embs = [np.array(e, dtype=np.float32) for e in sub_embs if len(e) == emb_dim]
+                if valid_embs:
+                    self.known_faces_2d[k] = valid_embs
         
         if GPIO_AVAILABLE:
             btn = getattr(config, 'BUTTON_PIN', 26)
@@ -197,6 +191,7 @@ class SmartDoorApp:
         self.challenge_start_time, self.face_val_latency, self.final_display_acc = 0.0, 0.0, 0.0
         self.wait_center, self.blink_passed, self.blink_hold, self.ear_hist, self.print_counter, self.access_details = False, False, 0, [], 0, []
         self.fake_frames = self.recog_frames = self.spoof_start_time = 0; self.locked_light_cond = "Normal"; self.spoof_hist = []
+        self.last_failed_cosine, self.last_failed_threshold, self.last_failed_l_str = 0.0, 0.0, "Normal"
 
     def _fail(self, status, color=config.COLOR_RED, instr="", wait=False):
         self._reset_state(); self.ui.update({"wait": wait, "bbox": None if wait else self.ui.get("bbox"), "status": status, "color": color, "instr": instr})
@@ -223,47 +218,33 @@ class SmartDoorApp:
         return self.pose_hold >= 3, abs(float(val)), thr, salah
 
     def _check_identity(self, raw, enhanced, face, l_str):
-        # Threshold dipertahankan SAMA PERSIS seperti awal permintaan
         d_thr = {"Normal": 0.70, "Backlight": 0.65, "Low Light": 0.67}.get(l_str, 0.70)
         if not self.known_faces_2d: return "TIDAK DIKENAL", 0.0, d_thr, 0.0, False
         
-        cropped_enh = UIHelper.get_aligned_crop(enhanced, face, target_size=(112, 112))
-        cropped_raw = UIHelper.get_aligned_crop(raw, face, target_size=(112, 112))
+        cropped = UIHelper.get_aligned_crop(enhanced, face, target_size=(112, 112))
         
-        current_embeddings = []
-        if cropped_enh is not None and cropped_enh.size > 0:
-            if (emb_e := self.model.get_embedding(cropped_enh)) is not None:
-                q_e = np.array(emb_e, dtype=np.float32).flatten()
-                q_e /= (np.linalg.norm(q_e) + 1e-6)
-                current_embeddings.append(q_e)
-                
-        if cropped_raw is not None and cropped_raw.size > 0:
-            if (emb_r := self.model.get_embedding(cropped_raw)) is not None:
-                q_r = np.array(emb_r, dtype=np.float32).flatten()
-                q_r /= (np.linalg.norm(q_r) + 1e-6)
-                current_embeddings.append(q_r)
-                
-        if not current_embeddings: 
+        if cropped is None or cropped.size == 0 or (raw_emb := self.model.get_embedding(cropped)) is None: 
             return "TIDAK DIKENAL", 0.0, d_thr, 0.0, False
 
-        b_name, b_score = "TIDAK DIKENAL", 0.0
-        for name, el in self.known_faces_2d.items():
-            for e in el:
-                for q_emb in current_embeddings:
-                    score = np.dot(q_emb, e)
-                    if score > b_score:
-                        b_score = score
-                        b_name = name
+        q_emb = np.array(raw_emb, dtype=np.float32).flatten(); q_emb /= (np.linalg.norm(q_emb) + 1e-6)
+        b_name, b_score = max(((n, np.max([np.dot(q_emb, e) for e in el])) for n, el in self.known_faces_2d.items() if el), key=lambda x: x[1], default=("", 0.0))
         
-        if b_score < d_thr: 
-            self.recog_frames = 0
+        if b_score < d_thr:
+            self.recog_frames = max(0, getattr(self, 'recog_frames', 0) - 1)
             return "TIDAK DIKENAL", b_score, d_thr, 0.0, False
         
         req_frames = getattr(config, 'REQUIRED_STABLE_FRAMES', 6)
         self.recog_frames += 1
         return b_name, b_score, d_thr, float(b_score * 100.0), (self.recog_frames >= req_frames)
 
+    def _async_process_face(self, raw, enhanced, face, l_str):
+        try:
+            self._process_face(raw, enhanced, face, l_str)
+        finally:
+            self.is_processing = False
+
     def _ai_worker(self):
+        self.is_processing = False
         while self.running:
             with self.lock: frame = self.shared_frame.copy() if self.shared_frame is not None else None
             if frame is None or time.time() < getattr(self, 'pause_until', 0): time.sleep(0.02); continue
@@ -284,7 +265,14 @@ class SmartDoorApp:
                 
                 l_str = self.locked_light_cond
                 self.ui.update({"wait": False, "bbox": face.bbox, "light_cond": l_str}) 
-                self._process_face(frame.copy(), UIHelper.enhance_adaptive(frame.copy(), face.bbox, l_str), face, l_str)
+
+                if not getattr(self, 'is_processing', False):
+                    self.is_processing = True
+                    threading.Thread(
+                        target=self._async_process_face,
+                        args=(frame.copy(), UIHelper.enhance_adaptive(frame.copy(), face.bbox, l_str), face, l_str),
+                        daemon=True
+                    ).start()
             time.sleep(0.01)
 
     def _process_face(self, raw, enhanced, face, l_str):
@@ -297,8 +285,11 @@ class SmartDoorApp:
         if self.state == ValidationState.IDLE: self.state, self.auth_start = ValidationState.RECOGNIZING, time.time(); return
 
         liveness_info = self.anti_spoof.is_real(raw.copy(), face.bbox)
-        m_conf, is_m_real = float(liveness_info.get("score", 0.0)), liveness_info.get("real", True)
-        as_thr = {"Normal": 0.88, "Backlight": 0.85, "Low Light": 0.85}.get(l_str, 0.85)
+
+        m_conf = float(liveness_info.get("score_real", liveness_info.get("score", 0.0)))
+        is_m_real = liveness_info.get("real", True)
+        
+        as_thr = {"Normal": 0.82, "Backlight": 0.80, "Low Light": 0.80}.get(l_str, 0.80)
         
         is_actually_real = True if self.state == ValidationState.CHALLENGE else (is_m_real and m_conf >= as_thr)
         if self.state == ValidationState.CHALLENGE: self.fake_frames = 0
@@ -308,7 +299,8 @@ class SmartDoorApp:
             self.fake_frames += 1; self.spoof_hist.append(m_conf)
             avg_score = sum(self.spoof_hist) / len(self.spoof_hist)
 
-            if self.fake_frames >= 2: 
+            max_spoof_thr = getattr(config, 'MAX_SPOOF_FRAMES', 8)
+            if self.fake_frames >= max_spoof_thr: 
                 lat_ms = (time.time() - self.spoof_start_time) * 1000
                 sp_type = "TIDAK YAKIN (SKOR RENDAH)" if is_m_real else UIHelper.analyze_spoof_type(raw, face.bbox)
                 
@@ -319,7 +311,7 @@ class SmartDoorApp:
                 
                 return self._fail(f"SPOOF: {sp_type}", config.COLOR_RED, "Akses Ditolak", wait=False)
                 
-            self.ui.update({"wait": False, "bbox": face.bbox, "status": "MEMINDAI LIVENESS...", "color": config.COLOR_YELLOW, "instr": f"Tahan Posisi ({self.fake_frames}/2)..."}); return
+            self.ui.update({"wait": False, "bbox": face.bbox, "status": "MEMINDAI LIVENESS...", "color": config.COLOR_YELLOW, "instr": f"Tahan Posisi ({self.fake_frames}/{max_spoof_thr})..."}); return
         else:
             self.fake_frames, self.spoof_hist = 0, []
 
@@ -329,9 +321,15 @@ class SmartDoorApp:
             disp_name = b_name.split(" - ", 1)[-1] if (b_name != "TIDAK DIKENAL") else "TIDAK DIKENAL"
 
             if b_name == "TIDAK DIKENAL":
+                self.last_failed_cosine = sm_score
+                self.last_failed_threshold = d_thr
+                self.last_failed_l_str = l_str
                 UIHelper.print_inline(f"Ditolak... Cosine: {sm_score:.3f} < Target Thr:{d_thr:.2f} ({l_str})")
                 self.ui.update({"status": "TIDAK DIKENAL", "color": config.COLOR_RED, "instr": f"Akses Ditolak (Wajah Belum Terdaftar)"})
-                if time.time() - self.auth_start > 5.0: return self._fail("TIDAK DIKENAL", config.COLOR_RED, "Mulai Ulang", wait=True)
+                if time.time() - self.auth_start > 8.0:
+                    sys.stdout.write("\n")
+                    sys.stdout.flush()
+                    return self._fail("TIDAK DIKENAL", config.COLOR_RED, "Mulai Ulang", wait=True)
                 return
 
             if not is_recog: 

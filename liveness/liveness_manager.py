@@ -158,11 +158,11 @@ class LivenessManager:
             
             # State 1: Menunggu Mata Tertutup
             elif self._blink_state == 1:
-                target_close = self._base_open_ear - 0.05 # Target kedipan dinamis
+                target_close = self._base_open_ear - 0.05 
                 
                 if smooth_ear <= target_close:
                     self._hold_frames += 1
-                    if self._hold_frames >= 2: # Tahan sebentar untuk memastikan ini bukan noise getaran
+                    if self._hold_frames >= 2: 
                         self._blink_state = 2
                         self._hold_frames = 0
                 else: self._hold_frames = 0

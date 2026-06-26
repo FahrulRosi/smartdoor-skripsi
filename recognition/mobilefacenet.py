@@ -10,9 +10,9 @@ def _preprocess(face_img: np.ndarray, size: int = 112) -> np.ndarray:
     img = cv2.resize(face_img, (size, size))
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     img = img.astype(np.float32)
-    img = (img - 127.5) / 128.0           # MobileFaceNet normalisation
-    img = img.transpose(2, 0, 1)          # HWC → CHW
-    img = np.expand_dims(img, 0)          # add batch dim
+    img = (img - 127.5) / 128.0           
+    img = img.transpose(2, 0, 1)          
+    img = np.expand_dims(img, 0)          
     return img
 
 class MobileFaceNet:
@@ -20,7 +20,7 @@ class MobileFaceNet:
         self._session = None
         self._input_name: str = ""
         self._stub = False
-        self.embedding_size = 128  # Default embedding size
+        self.embedding_size = 128  
 
         if os.path.isfile(_MODEL_PATH):
             try:
@@ -33,15 +33,12 @@ class MobileFaceNet:
                 sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
                 
                 providers = ["XnnpackExecutionProvider", "CPUExecutionProvider"]
-                # -----------------------------
-
                 self._session   = ort.InferenceSession(
                     _MODEL_PATH,
                     sess_options=sess_options,
                     providers=providers,
                 )
                 self._input_name = self._session.get_inputs()[0].name
-                # Mengambil output shape dimensi embedding secara dinamis dari model ONNX
                 self.embedding_size = self._session.get_outputs()[0].shape[1]
                 print(f"[MobileFaceNet] Loaded ONNX model with optimization: {_MODEL_PATH} (Embedding Size: {self.embedding_size})")
             except Exception as exc:

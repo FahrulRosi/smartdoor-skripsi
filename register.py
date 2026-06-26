@@ -497,7 +497,7 @@ class FaceRegistrationApp:
                 pose, ear_val = self.liveness.pose_estimator.estimate(face, self.detector), (Helpers.capture_blink(face) or {}).get("avg_ear", 0.0)
                 
                 if self.stage in (RegistrationStage.FACEMESH, RegistrationStage.EXTRACTION):
-                    sp = self.anti_spoof.is_real(enhanced, face.bbox)
+                    sp = self.anti_spoof.is_real(raw, face.bbox)
                     sp_score, sp_real, sp_label = float(sp.get("score_real", sp.get("score", 1.0))), sp.get("real", True), sp.get("label_name", "FOTO").upper()
                 else:
                     sp_score, sp_real, sp_label = 1.0, True, "REAL"

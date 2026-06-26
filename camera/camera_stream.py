@@ -47,6 +47,8 @@ class CameraStream:
         while self.running:
             ret, frame = self.cap.read()
             if ret:
+                if frame.shape[1] != self.width or frame.shape[0] != self.height:
+                    frame = cv2.resize(frame, (self.width, self.height))
                 # Gunakan lock agar frame tidak rusak/bertumpuk saat diakses oleh thread utama
                 with self.lock:
                     self.frame = frame

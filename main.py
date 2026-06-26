@@ -284,7 +284,7 @@ class SmartDoorApp:
         if face.bbox[3] > int(config.FRAME_HEIGHT * 0.70): return self._fail("TERLALU DEKAT", config.COLOR_YELLOW, "Mundur")
         if self.state == ValidationState.IDLE: self.state, self.auth_start = ValidationState.RECOGNIZING, time.time(); return
 
-        liveness_info = self.anti_spoof.is_real(enhanced.copy(), face.bbox)
+        liveness_info = self.anti_spoof.is_real(raw.copy(), face.bbox)
 
         m_conf = float(liveness_info.get("score_real", liveness_info.get("score", 0.0)))
         is_m_real = liveness_info.get("real", True)

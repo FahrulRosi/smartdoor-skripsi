@@ -2,7 +2,6 @@ import cv2, random, time, threading, sys, numpy as np
 from datetime import datetime
 from enum import Enum
 import config
-
 from camera.camera_stream import CameraStream
 from facemesh.facemesh_detector import FaceMeshDetector
 from recognition.mobilefacenet import MobileFaceNet
@@ -140,7 +139,7 @@ class SmartDoorApp:
         self.anti_spoof = SilentAntiSpoofing(getattr(config, 'ANTI_SPOOFING_MODEL', "liveness/antispoofing_int8.onnx"), getattr(config, 'ANTI_SPOOFING_THRESHOLD', 0.85))
         
         self.detector = FaceMeshDetector(min_detection_confidence=0.35, min_tracking_confidence=0.35)
-        self.door = DoorLock(getattr(config, 'LOCK_GPIO_PIN', 18), getattr(config, 'UNLOCK_DURATION', 5), active_high=getattr(config, 'RELAY_ACTIVE_HIGH', False))
+        self.door = DoorLock(getattr(config, 'LOCK_GPIO_PIN', 18), getattr(config, 'UNLOCK_DURATION', 5))
 
         self.known_faces_2d = {}
         emb_dim = getattr(self.model, 'embedding_size', 128)

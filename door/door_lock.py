@@ -14,18 +14,21 @@ UNLOCK_DURATION = 5    # seconds the door stays unlocked
 
 
 class DoorLock:
-    def __init__(self, pin: int = LOCK_PIN, unlock_duration: int = UNLOCK_DURATION):
+    def __init__(self, pin: int = LOCK_PIN, unlock_duration: int = UNLOCK_DURATION, active_high: bool = False):
         self.pin = pin
         self.unlock_duration = unlock_duration
+        self.active_high = active_high
         self.locked = True
         self._timer: threading.Timer | None = None
 
         if GPIO_AVAILABLE:
             GPIO.setmode(GPIO.BCM)
             GPIO.setup(self.pin, GPIO.OUT)
-            # 🚨 PERBAIKAN: Set ke LOW agar selenoid TETAP TERKUNCI saat program baru dinyalakan
-            GPIO.output(self.pin, GPIO.LOW)   
-            print(f"[DoorLock] GPIO ready on pin {self.pin}. Status awal: TERKUNCI (LOW).")
+            # Menyesuaikan status awal terkunci berdasarkan tipe relay (Active High/Low)
+            initial_state = GPIO.LOW if self.active_high else GPIO.HIGH
+            GPIO.output(self.pin, initial_state)   
+            state_str = "LOW" if initial_state == GPIO.LOW else "HIGH"
+            print(f"[DoorLock] GPIO ready on pin {self.pin}. Status awal: TERKUNCI ({state_str}).")
 
     # ------------------------------------------------------------------ #
     def unlock(self):
@@ -45,8 +48,13 @@ class DoorLock:
     def _set_lock(self, locked: bool):
         self.locked = locked
         if GPIO_AVAILABLE:
-            # 🚨 PERBAIKAN: Jika locked (Terkunci) = LOW. Jika tidak locked (Terbuka) = HIGH.
-            GPIO.output(self.pin, GPIO.LOW if locked else GPIO.HIGH)
+            # Jika locked=True (terkunci): Active High butuh LOW, Active Low butuh HIGH
+            # Jika locked=False (terbuka): Active High butuh HIGH, Active Low butuh LOW
+            if self.active_high:
+                output_val = GPIO.LOW if locked else GPIO.HIGH
+            else:
+                output_val = GPIO.HIGH if locked else GPIO.LOW
+            GPIO.output(self.pin, output_val)
 
     def status(self) -> str:
         return "LOCKED" if self.locked else "UNLOCKED"

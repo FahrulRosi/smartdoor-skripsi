@@ -52,6 +52,8 @@ MAX_SPOOF_FRAMES        = 8
 LOCK_GPIO_PIN   = 18
 BUTTON_PIN      = 26  
 UNLOCK_DURATION = 5  
+RELAY_ACTIVE_HIGH = False  # Set False jika menggunakan relay Active Low (default modul Arduino/Raspberry Pi)
+
 
 # Definisi Warna BGR untuk OpenCV
 COLOR_GREEN  = (0,   220,   0)

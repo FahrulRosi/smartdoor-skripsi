@@ -26,7 +26,13 @@ class UIHelper:
     def enhance_adaptive(frame, bbox, l_str="Normal"):
         if not getattr(config, 'ENABLE_CLAHE_ENHANCEMENT', True): return frame
         d, sig_color, sig_space = {"Normal": (3, 30, 30), "Low Light": (5, 60, 60), "Backlight": (5, 45, 45)}.get(l_str, (3, 30, 30))
-        yuv = cv2.cvtColor(cv2.bilateralFilter(frame, d, sig_color, sig_space), cv2.COLOR_BGR2YUV)
+        filtered = cv2.bilateralFilter(frame, d, sig_color, sig_space)
+        gamma = {"Normal": 1.0, "Low Light": 0.6, "Backlight": 0.5}.get(l_str, 1.0)
+        if gamma != 1.0:
+            invGamma = 1.0 / gamma
+            table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
+            filtered = cv2.LUT(filtered, table)
+        yuv = cv2.cvtColor(filtered, cv2.COLOR_BGR2YUV)
         yuv[:,:,0] = cv2.createCLAHE(clipLimit={"Normal":1.5, "Low Light":2.0, "Backlight":1.8}.get(l_str, 1.5), tileGridSize=(8, 8)).apply(yuv[:,:,0])
         return cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR)
 
@@ -197,6 +203,14 @@ class SmartDoorApp:
             with self.lock: frame = self.shared_frame.copy() if self.shared_frame is not None else None
             if frame is None or time.time() < getattr(self, 'pause_until', 0): time.sleep(0.02); continue
             faces = self.detector.detect(frame)
+            if not faces and self.state != ValidationState.UNLOCKED:
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                if np.mean(gray) < 130:
+                    invGamma = 1.0 / 0.5
+                    table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
+                    brightened = cv2.LUT(frame, table)
+                    faces = self.detector.detect(brightened)
+
             if self.state == ValidationState.UNLOCKED:
                 if getattr(self.door, 'locked', True): self._reset_state(); self.ui.update({"wait": True, "bbox": None, "status": "", "color": config.COLOR_WHITE, "instr": "", "light_cond": None})
                 else: self.ui.update({"wait": False, "bbox": max(faces, key=lambda f: f.bbox[2]*f.bbox[3]).bbox if faces else None})

@@ -380,12 +380,24 @@ class SmartDoorApp:
 
     def run(self):
         try:
-            cv2.namedWindow("Smart Door Lock", cv2.WINDOW_AUTOSIZE)
+            if getattr(config, 'USE_FULLSCREEN', False):
+                cv2.namedWindow("Smart Door Lock", cv2.WND_PROP_FULLSCREEN)
+                cv2.setWindowProperty("Smart Door Lock", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+            else:
+                cv2.namedWindow("Smart Door Lock", cv2.WINDOW_AUTOSIZE)
             while self.running:
                 ret, frame = self.cam.read()
                 if ret:
                     with self.lock: self.shared_frame = frame.copy()
-                    display = cv2.flip(frame, 1); UIHelper.draw_ui(display, self.ui, getattr(self.door, 'locked', True)); cv2.imshow("Smart Door Lock", display)
+                    display = cv2.flip(frame, 1)
+                    UIHelper.draw_ui(display, self.ui, getattr(self.door, 'locked', True))
+                    
+                    if not getattr(config, 'USE_FULLSCREEN', False) and getattr(config, 'DISPLAY_SCALE', 1.0) != 1.0:
+                        scale = config.DISPLAY_SCALE
+                        h, w = display.shape[:2]
+                        display = cv2.resize(display, (int(w * scale), int(h * scale)))
+                        
+                    cv2.imshow("Smart Door Lock", display)
                 if cv2.waitKey(10) & 0xFF == ord("q"): self.running = False
         finally: self.running = False; self.cam.stop(); cv2.destroyAllWindows(); GPIO.cleanup() if GPIO_AVAILABLE else None
 

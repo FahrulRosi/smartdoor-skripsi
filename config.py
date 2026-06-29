@@ -59,3 +59,7 @@ COLOR_RED    = (0,     0, 220)
 COLOR_YELLOW = (0,   210, 255)
 COLOR_WHITE  = (255, 255, 255)
 COLOR_CYAN   = (255, 220,   0)
+
+# ── Display Settings (Untuk LCD 3.5" Raspberry Pi) ───────────────────────────
+USE_FULLSCREEN  = True  # Set True untuk mode layar penuh tanpa border/taskbar (rekomendasi LCD 3.5")
+DISPLAY_SCALE   = 1.0   # Skala tampilan jika tidak fullscreen (misal 0.8 untuk memperkecil agar muat)

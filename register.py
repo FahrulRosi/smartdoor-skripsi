@@ -530,10 +530,19 @@ class FaceRegistrationApp:
         if self.stage == RegistrationStage.COMPLETE: return
         threading.Thread(target=self._process_thread, daemon=True).start()
         try:
-            cv2.namedWindow("Register", cv2.WINDOW_AUTOSIZE)
+            if getattr(config, 'USE_FULLSCREEN', False):
+                cv2.namedWindow("Register", cv2.WND_PROP_FULLSCREEN)
+                cv2.setWindowProperty("Register", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+            else:
+                cv2.namedWindow("Register", cv2.WINDOW_AUTOSIZE)
             while self.is_running and self.stage != RegistrationStage.COMPLETE:
                 with self.frame_lock: frame = self.display_frame.copy() if self.display_frame is not None else None
-                if frame is not None: cv2.imshow("Register", frame)
+                if frame is not None:
+                    if not getattr(config, 'USE_FULLSCREEN', False) and getattr(config, 'DISPLAY_SCALE', 1.0) != 1.0:
+                        scale = config.DISPLAY_SCALE
+                        h, w = frame.shape[:2]
+                        frame = cv2.resize(frame, (int(w * scale), int(h * scale)))
+                    cv2.imshow("Register", frame)
                 if cv2.waitKey(1) & 0xFF == ord("q"): self.is_running = False; break
         finally: self.is_running = False; time.sleep(0.5); self.cam.stop(); self.detector.close(); cv2.destroyAllWindows()
 

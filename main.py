@@ -263,6 +263,14 @@ class SmartDoorApp:
 
         if self.state == ValidationState.RECOGNIZING:
             t_val = time.time()
+            gray_face = cv2.cvtColor(enhanced, cv2.COLOR_BGR2GRAY)
+            x, y, w, h = face.bbox
+            face_roi = gray_face[max(0, y):min(gray_face.shape[0], y+h), max(0, x):min(gray_face.shape[1], x+w)]
+            if face_roi.size > 0:
+                blur_val = cv2.Laplacian(face_roi, cv2.CV_64F).var()
+                if blur_val < 35:
+                    self.ui.update({"status": "MEMINDAI...", "color": config.COLOR_YELLOW, "instr": "Harap tenang, memfokuskan..."})
+                    return
             b_name, sm_score, d_thr, f_acc, is_recog = self._check_identity(raw, enhanced, face, l_str)
             disp_name = b_name.split(" - ", 1)[-1] if (b_name != "TIDAK DIKENAL") else "TIDAK DIKENAL"
             if b_name == "TIDAK DIKENAL":

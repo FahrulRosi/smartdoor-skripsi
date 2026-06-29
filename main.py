@@ -25,7 +25,8 @@ class UIHelper:
     @staticmethod
     def enhance_adaptive(frame, bbox, l_str="Normal"):
         if not getattr(config, 'ENABLE_CLAHE_ENHANCEMENT', True): return frame
-        yuv = cv2.cvtColor(cv2.bilateralFilter(frame, 3, 30, 30), cv2.COLOR_BGR2YUV)
+        d, sig_color, sig_space = {"Normal": (3, 30, 30), "Low Light": (5, 60, 60), "Backlight": (5, 45, 45)}.get(l_str, (3, 30, 30))
+        yuv = cv2.cvtColor(cv2.bilateralFilter(frame, d, sig_color, sig_space), cv2.COLOR_BGR2YUV)
         yuv[:,:,0] = cv2.createCLAHE(clipLimit={"Normal":1.5, "Low Light":2.0, "Backlight":1.8}.get(l_str, 1.5), tileGridSize=(8, 8)).apply(yuv[:,:,0])
         return cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR)
 

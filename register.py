@@ -25,36 +25,43 @@ class Helpers:
     @staticmethod
     def enhance_adaptive(frame, bbox=None, l_str="Normal"):
         if not getattr(config, 'ENABLE_CLAHE_ENHANCEMENT', True): return frame
-        yuv = cv2.cvtColor(cv2.bilateralFilter(frame, 3, 30, 30), cv2.COLOR_BGR2YUV)
+        d, sig_color, sig_space = {"Normal": (3, 30, 30), "Low Light": (5, 60, 60), "Backlight": (5, 45, 45)}.get(l_str, (3, 30, 30))
+        yuv = cv2.cvtColor(cv2.bilateralFilter(frame, d, sig_color, sig_space), cv2.COLOR_BGR2YUV)
         yuv[:,:,0] = cv2.createCLAHE(clipLimit={"Normal":1.5, "Low Light":2.0, "Backlight":1.8}.get(l_str, 1.5), tileGridSize=(8, 8)).apply(yuv[:,:,0])
         return cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR)
 
     @staticmethod
-    def simulate_lowlight_raw(crop):
-        # 1. Darken the raw crop (low contrast & low brightness)
-        dark = cv2.convertScaleAbs(crop, alpha=0.35, beta=10)
-        # 2. Add realistic sensor noise (Gaussian noise)
+    def simulate_lowlight_raw(crop, level="medium"):
+        if level == "medium":
+            dark = cv2.convertScaleAbs(crop, alpha=0.45, beta=15)
+            sigma = 8
+        else:
+            dark = cv2.convertScaleAbs(crop, alpha=0.25, beta=5)
+            sigma = 15
         row, col, ch = dark.shape
         mean = 0
-        sigma = 12
         gauss = np.random.normal(mean, sigma, (row, col, ch)).astype(np.int16)
         noisy = np.clip(dark.astype(np.int16) + gauss, 0, 255).astype(np.uint8)
         return noisy
 
     @staticmethod
-    def simulate_backlight_raw(crop):
-        # Reduksi kontras dan kecerahan lebih ekstrem pada wajah
-        dark = cv2.convertScaleAbs(crop, alpha=0.28, beta=8)
-        # Beri sedikit efek wash-out (mengurangi kontras warna / desaturasi sebesar 35%)
+    def simulate_backlight_raw(crop, level="medium"):
+        if level == "medium":
+            dark = cv2.convertScaleAbs(crop, alpha=0.35, beta=10)
+            sat_factor = 0.75
+        else:
+            dark = cv2.convertScaleAbs(crop, alpha=0.20, beta=5)
+            sat_factor = 0.55
         hsv = cv2.cvtColor(dark, cv2.COLOR_BGR2HSV).astype(np.float32)
-        hsv[:, :, 1] *= 0.65
+        hsv[:, :, 1] *= sat_factor
         hsv = np.clip(hsv, 0, 255).astype(np.uint8)
         return cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
 
     @staticmethod
     def enhance_crop(crop, l_str="Normal"):
         if not getattr(config, 'ENABLE_CLAHE_ENHANCEMENT', True): return crop
-        filtered = cv2.bilateralFilter(crop, 3, 30, 30)
+        d, sig_color, sig_space = {"Normal": (3, 30, 30), "Low Light": (5, 60, 60), "Backlight": (5, 45, 45)}.get(l_str, (3, 30, 30))
+        filtered = cv2.bilateralFilter(crop, d, sig_color, sig_space)
         yuv = cv2.cvtColor(filtered, cv2.COLOR_BGR2YUV)
         clip_limit = {"Normal": 1.5, "Low Light": 2.0, "Backlight": 1.8}.get(l_str, 1.5)
         clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8))
@@ -284,19 +291,29 @@ class FaceRegistrationApp:
             crop_normal = Helpers.enhance_crop(raw_crop, "Normal")
             emb_normal = self.model.get_embedding(crop_normal)
 
-            raw_lowlight = Helpers.simulate_lowlight_raw(raw_crop)
-            crop_lowlight = Helpers.enhance_crop(raw_lowlight, "Low Light")
-            emb_lowlight = self.model.get_embedding(crop_lowlight)
+            raw_low_med = Helpers.simulate_lowlight_raw(raw_crop, "medium")
+            crop_low_med = Helpers.enhance_crop(raw_low_med, "Low Light")
+            emb_low_med = self.model.get_embedding(crop_low_med)
 
-            raw_backlight = Helpers.simulate_backlight_raw(raw_crop)
-            crop_backlight = Helpers.enhance_crop(raw_backlight, "Backlight")
-            emb_backlight = self.model.get_embedding(crop_backlight)
+            raw_low_ext = Helpers.simulate_lowlight_raw(raw_crop, "extreme")
+            crop_low_ext = Helpers.enhance_crop(raw_low_ext, "Low Light")
+            emb_low_ext = self.model.get_embedding(crop_low_ext)
 
-            if emb_normal is not None and emb_lowlight is not None and emb_backlight is not None:
+            raw_back_med = Helpers.simulate_backlight_raw(raw_crop, "medium")
+            crop_back_med = Helpers.enhance_crop(raw_back_med, "Backlight")
+            emb_back_med = self.model.get_embedding(crop_back_med)
+
+            raw_back_str = Helpers.simulate_backlight_raw(raw_crop, "strong")
+            crop_back_str = Helpers.enhance_crop(raw_back_str, "Backlight")
+            emb_back_str = self.model.get_embedding(crop_back_str)
+
+            if all(v is not None for v in (emb_normal, emb_low_med, emb_low_ext, emb_back_med, emb_back_str)):
                 self.extraction_embeddings.append({
                     "normal": np.array(emb_normal).flatten(),
-                    "lowlight": np.array(emb_lowlight).flatten(),
-                    "backlight": np.array(emb_backlight).flatten()
+                    "low_med": np.array(emb_low_med).flatten(),
+                    "low_ext": np.array(emb_low_ext).flatten(),
+                    "back_med": np.array(emb_back_med).flatten(),
+                    "back_str": np.array(emb_back_str).flatten()
                 })
 
         total_frames_needed = 5
@@ -307,14 +324,24 @@ class FaceRegistrationApp:
             return
 
         norm_list = [e["normal"] for e in self.extraction_embeddings]
-        low_list = [e["lowlight"] for e in self.extraction_embeddings]
-        back_list = [e["backlight"] for e in self.extraction_embeddings]
-        avg_norm, avg_low, avg_back = np.mean(norm_list, axis=0), np.mean(low_list, axis=0), np.mean(back_list, axis=0)
-        vec_norm = (avg_norm / (np.linalg.norm(avg_norm) + 1e-6)).tolist()
-        vec_low = (avg_low / (np.linalg.norm(avg_low) + 1e-6)).tolist()
-        vec_back = (avg_back / (np.linalg.norm(avg_back) + 1e-6)).tolist()
+        low_med_list = [e["low_med"] for e in self.extraction_embeddings]
+        low_ext_list = [e["low_ext"] for e in self.extraction_embeddings]
+        back_med_list = [e["back_med"] for e in self.extraction_embeddings]
+        back_str_list = [e["back_str"] for e in self.extraction_embeddings]
 
-        final_emb_vectors = [vec_norm, vec_low, vec_back]
+        avg_norm = np.mean(norm_list, axis=0)
+        avg_low_med = np.mean(low_med_list, axis=0)
+        avg_low_ext = np.mean(low_ext_list, axis=0)
+        avg_back_med = np.mean(back_med_list, axis=0)
+        avg_back_str = np.mean(back_str_list, axis=0)
+
+        vec_norm = (avg_norm / (np.linalg.norm(avg_norm) + 1e-6)).tolist()
+        vec_low_med = (avg_low_med / (np.linalg.norm(avg_low_med) + 1e-6)).tolist()
+        vec_low_ext = (avg_low_ext / (np.linalg.norm(avg_low_ext) + 1e-6)).tolist()
+        vec_back_med = (avg_back_med / (np.linalg.norm(avg_back_med) + 1e-6)).tolist()
+        vec_back_str = (avg_back_str / (np.linalg.norm(avg_back_str) + 1e-6)).tolist()
+
+        final_emb_vectors = [vec_norm, vec_low_med, vec_low_ext, vec_back_med, vec_back_str]
         light_cond = getattr(self, 'locked_light_cond', "Normal")
         latensi_respon_subjek = round(sum(self.individual_latencies.values()), 2)
         mfn_latency = round((time.time() - self.action_start_time) * 1000, 2)

@@ -24,16 +24,17 @@ class UIHelper:
 
     @staticmethod
     def enhance_adaptive(frame, bbox, l_str="Normal"):
+        if l_str == "Normal": return frame
         if not getattr(config, 'ENABLE_CLAHE_ENHANCEMENT', True): return frame
-        d, sig_color, sig_space = {"Normal": (5, 40, 40), "Low Light": (5, 60, 60), "Backlight": (5, 45, 45)}.get(l_str, (5, 40, 40))
+        d, sig_color, sig_space = {"Low Light": (5, 60, 60), "Backlight": (5, 45, 45)}.get(l_str, (5, 40, 40))
         filtered = cv2.bilateralFilter(frame, d, sig_color, sig_space)
-        gamma = {"Normal": 1.0, "Low Light": 0.6, "Backlight": 0.5}.get(l_str, 1.0)
+        gamma = {"Low Light": 0.6, "Backlight": 0.5}.get(l_str, 1.0)
         if gamma != 1.0:
             invGamma = 1.0 / gamma
             table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
             filtered = cv2.LUT(filtered, table)
         yuv = cv2.cvtColor(filtered, cv2.COLOR_BGR2YUV)
-        yuv[:,:,0] = cv2.createCLAHE(clipLimit={"Normal":1.5, "Low Light":2.0, "Backlight":1.8}.get(l_str, 1.5), tileGridSize=(8, 8)).apply(yuv[:,:,0])
+        yuv[:,:,0] = cv2.createCLAHE(clipLimit={"Low Light":2.0, "Backlight":1.8}.get(l_str, 1.5), tileGridSize=(8, 8)).apply(yuv[:,:,0])
         return cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR)
 
     @staticmethod

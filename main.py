@@ -25,7 +25,7 @@ class UIHelper:
     @staticmethod
     def enhance_adaptive(frame, bbox, l_str="Normal"):
         if not getattr(config, 'ENABLE_CLAHE_ENHANCEMENT', True): return frame
-        d, sig_color, sig_space = {"Normal": (3, 30, 30), "Low Light": (5, 60, 60), "Backlight": (5, 45, 45)}.get(l_str, (3, 30, 30))
+        d, sig_color, sig_space = {"Normal": (5, 40, 40), "Low Light": (5, 60, 60), "Backlight": (5, 45, 45)}.get(l_str, (5, 40, 40))
         filtered = cv2.bilateralFilter(frame, d, sig_color, sig_space)
         gamma = {"Normal": 1.0, "Low Light": 0.6, "Backlight": 0.5}.get(l_str, 1.0)
         if gamma != 1.0:
@@ -40,16 +40,33 @@ class UIHelper:
     def get_aligned_crop(frame, face, target_size=(112, 112)):
         lm = getattr(face, 'landmarks', [])
         fh, fw = frame.shape[:2]
-        if not lm or len(lm) < 363: 
+        if not lm or len(lm) < 300: 
             bx, by, bw, bh = face.bbox
             return frame[max(0, by):min(fh, by+bh), max(0, bx):min(fw, bx+bw)]
+        
         le = np.array([(lm[33].x + lm[133].x) * fw / 2, (lm[33].y + lm[133].y) * fh / 2])
         re = np.array([(lm[263].x + lm[362].x) * fw / 2, (lm[263].y + lm[362].y) * fh / 2])
-        angle = np.degrees(np.arctan2(re[1] - le[1], re[0] - le[0]))
-        scale = 0.3 * target_size[0] / (np.linalg.norm(re - le) + 1e-6)
-        M = cv2.getRotationMatrix2D(((le[0] + re[0]) / 2, (le[1] + re[1]) / 2), angle, scale)
-        M[0, 2] += (target_size[0] * 0.5 - ((le[0] + re[0]) / 2))
-        M[1, 2] += (target_size[1] * 0.40 - ((le[1] + re[1]) / 2))
+        nose = np.array([lm[4].x * fw, lm[4].y * fh])
+        lmouth = np.array([lm[61].x * fw, lm[61].y * fh])
+        rmouth = np.array([lm[291].x * fw, lm[291].y * fh])
+        
+        src_pts = np.array([le, re, nose, lmouth, rmouth], dtype=np.float32)
+        dst_pts = np.array([
+            [38.2946, 51.6963],
+            [73.5318, 51.5014],
+            [56.0252, 71.7366],
+            [41.5493, 92.3655],
+            [70.7299, 92.2041]
+        ], dtype=np.float32)
+        
+        M, _ = cv2.estimateAffinePartial2D(src_pts, dst_pts)
+        if M is None:
+            angle = np.degrees(np.arctan2(re[1] - le[1], re[0] - le[0]))
+            scale = 0.3 * target_size[0] / (np.linalg.norm(re - le) + 1e-6)
+            M = cv2.getRotationMatrix2D(((le[0] + re[0]) / 2, (le[1] + re[1]) / 2), angle, scale)
+            M[0, 2] += (target_size[0] * 0.5 - ((le[0] + re[0]) / 2))
+            M[1, 2] += (target_size[1] * 0.40 - ((le[1] + re[1]) / 2))
+            
         return cv2.warpAffine(frame, M, target_size, flags=cv2.INTER_CUBIC)
 
     @staticmethod
@@ -162,6 +179,7 @@ class SmartDoorApp:
         self.wait_center, self.blink_passed, self.blink_hold, self.ear_hist, self.print_counter, self.access_details = False, False, 0, [], 0, []
         self.fake_frames = self.recog_frames = self.spoof_start_time = 0; self.locked_light_cond = "Normal"; self.spoof_hist = []
         self.last_failed_cosine, self.last_failed_threshold, self.last_failed_l_str = 0.0, 0.0, "Normal"
+        self.recog_embeddings = []
 
     def _fail(self, status, color=config.COLOR_RED, instr="", wait=False):
         self._reset_state(); self.ui.update({"wait": wait, "bbox": None if wait else self.ui.get("bbox"), "status": status, "color": color, "instr": instr})
@@ -181,11 +199,10 @@ class SmartDoorApp:
         self.pose_hold = self.pose_hold + 1 if passed else 0
         return self.pose_hold >= 3, abs(float(val)), thr, (val < -thr) if sign == 1 else (val > thr)
 
-    def _check_identity(self, raw, enhanced, face, l_str):
+    def _check_identity(self, q_emb, l_str):
         d_thr = {"Normal": 0.70, "Backlight": 0.65, "Low Light": 0.67}.get(l_str, 0.70)
-        if not self.known_faces_2d or (cropped := UIHelper.get_aligned_crop(enhanced, face, target_size=(112, 112))) is None or cropped.size == 0 or (raw_emb := self.model.get_embedding(cropped)) is None: 
+        if not self.known_faces_2d or q_emb is None: 
             return "TIDAK DIKENAL", 0.0, d_thr, 0.0, False
-        q_emb = np.array(raw_emb, dtype=np.float32).flatten(); q_emb /= (np.linalg.norm(q_emb) + 1e-6)
         b_name, b_score = max(((n, np.max([np.dot(q_emb, e) for e in el])) for n, el in self.known_faces_2d.items() if el), key=lambda x: x[1], default=("", 0.0))
         if b_score < d_thr:
             self.recog_frames = max(0, getattr(self, 'recog_frames', 0) - 1)
@@ -271,7 +288,19 @@ class SmartDoorApp:
                 if blur_val < 35:
                     self.ui.update({"status": "MEMINDAI...", "color": config.COLOR_YELLOW, "instr": "Harap tenang, memfokuskan..."})
                     return
-            b_name, sm_score, d_thr, f_acc, is_recog = self._check_identity(raw, enhanced, face, l_str)
+
+            avg_emb = None
+            if (cropped := UIHelper.get_aligned_crop(enhanced, face, target_size=(112, 112))) is not None and cropped.size > 0:
+                raw_emb = self.model.get_embedding(cropped)
+                if raw_emb is not None:
+                    q_emb = np.array(raw_emb, dtype=np.float32).flatten()
+                    q_emb /= (np.linalg.norm(q_emb) + 1e-6)
+                    self.recog_embeddings.append(q_emb)
+                    self.recog_embeddings = self.recog_embeddings[-3:]
+                    avg_emb = np.mean(self.recog_embeddings, axis=0)
+                    avg_emb /= (np.linalg.norm(avg_emb) + 1e-6)
+
+            b_name, sm_score, d_thr, f_acc, is_recog = self._check_identity(avg_emb, l_str)
             disp_name = b_name.split(" - ", 1)[-1] if (b_name != "TIDAK DIKENAL") else "TIDAK DIKENAL"
             if b_name == "TIDAK DIKENAL":
                 self.last_failed_cosine, self.last_failed_threshold, self.last_failed_l_str = sm_score, d_thr, l_str

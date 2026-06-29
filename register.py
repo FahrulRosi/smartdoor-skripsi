@@ -25,7 +25,7 @@ class Helpers:
     @staticmethod
     def enhance_adaptive(frame, bbox=None, l_str="Normal"):
         if not getattr(config, 'ENABLE_CLAHE_ENHANCEMENT', True): return frame
-        d, sig_color, sig_space = {"Normal": (3, 30, 30), "Low Light": (5, 60, 60), "Backlight": (5, 45, 45)}.get(l_str, (3, 30, 30))
+        d, sig_color, sig_space = {"Normal": (5, 40, 40), "Low Light": (5, 60, 60), "Backlight": (5, 45, 45)}.get(l_str, (5, 40, 40))
         filtered = cv2.bilateralFilter(frame, d, sig_color, sig_space)
         gamma = {"Normal": 1.0, "Low Light": 0.6, "Backlight": 0.5}.get(l_str, 1.0)
         if gamma != 1.0:
@@ -66,7 +66,7 @@ class Helpers:
     @staticmethod
     def enhance_crop(crop, l_str="Normal"):
         if not getattr(config, 'ENABLE_CLAHE_ENHANCEMENT', True): return crop
-        d, sig_color, sig_space = {"Normal": (3, 30, 30), "Low Light": (5, 60, 60), "Backlight": (5, 45, 45)}.get(l_str, (3, 30, 30))
+        d, sig_color, sig_space = {"Normal": (5, 40, 40), "Low Light": (5, 60, 60), "Backlight": (5, 45, 45)}.get(l_str, (5, 40, 40))
         filtered = cv2.bilateralFilter(crop, d, sig_color, sig_space)
         gamma = {"Normal": 1.0, "Low Light": 0.6, "Backlight": 0.5}.get(l_str, 1.0)
         if gamma != 1.0:
@@ -83,16 +83,33 @@ class Helpers:
     def get_aligned_crop(frame, face, target_size=(112, 112)):
         lm = getattr(face, 'landmarks', [])
         fh, fw = frame.shape[:2]
-        if not lm or len(lm) < 363: 
+        if not lm or len(lm) < 300: 
             bx, by, bw, bh = face.bbox
             return frame[max(0, by):min(fh, by+bh), max(0, bx):min(fw, bx+bw)]
+        
         le = np.array([(lm[33].x + lm[133].x) * fw / 2, (lm[33].y + lm[133].y) * fh / 2])
         re = np.array([(lm[263].x + lm[362].x) * fw / 2, (lm[263].y + lm[362].y) * fh / 2])
-        angle = np.degrees(np.arctan2(re[1] - le[1], re[0] - le[0]))
-        scale = 0.3 * target_size[0] / (np.linalg.norm(re - le) + 1e-6)
-        M = cv2.getRotationMatrix2D(((le[0] + re[0]) / 2, (le[1] + re[1]) / 2), angle, scale)
-        M[0, 2] += (target_size[0] * 0.5 - ((le[0] + re[0]) / 2))
-        M[1, 2] += (target_size[1] * 0.40 - ((le[1] + re[1]) / 2))
+        nose = np.array([lm[4].x * fw, lm[4].y * fh])
+        lmouth = np.array([lm[61].x * fw, lm[61].y * fh])
+        rmouth = np.array([lm[291].x * fw, lm[291].y * fh])
+        
+        src_pts = np.array([le, re, nose, lmouth, rmouth], dtype=np.float32)
+        dst_pts = np.array([
+            [38.2946, 51.6963],
+            [73.5318, 51.5014],
+            [56.0252, 71.7366],
+            [41.5493, 92.3655],
+            [70.7299, 92.2041]
+        ], dtype=np.float32)
+        
+        M, _ = cv2.estimateAffinePartial2D(src_pts, dst_pts)
+        if M is None:
+            angle = np.degrees(np.arctan2(re[1] - le[1], re[0] - le[0]))
+            scale = 0.3 * target_size[0] / (np.linalg.norm(re - le) + 1e-6)
+            M = cv2.getRotationMatrix2D(((le[0] + re[0]) / 2, (le[1] + re[1]) / 2), angle, scale)
+            M[0, 2] += (target_size[0] * 0.5 - ((le[0] + re[0]) / 2))
+            M[1, 2] += (target_size[1] * 0.40 - ((le[1] + re[1]) / 2))
+            
         return cv2.warpAffine(frame, M, target_size, flags=cv2.INTER_CUBIC)
 
     @staticmethod

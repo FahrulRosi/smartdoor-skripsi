@@ -30,6 +30,38 @@ class Helpers:
         return cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR)
 
     @staticmethod
+    def simulate_lowlight_raw(crop):
+        # 1. Darken the raw crop (low contrast & low brightness)
+        dark = cv2.convertScaleAbs(crop, alpha=0.35, beta=10)
+        # 2. Add realistic sensor noise (Gaussian noise)
+        row, col, ch = dark.shape
+        mean = 0
+        sigma = 12
+        gauss = np.random.normal(mean, sigma, (row, col, ch)).astype(np.int16)
+        noisy = np.clip(dark.astype(np.int16) + gauss, 0, 255).astype(np.uint8)
+        return noisy
+
+    @staticmethod
+    def simulate_backlight_raw(crop):
+        # Reduksi kontras dan kecerahan lebih ekstrem pada wajah
+        dark = cv2.convertScaleAbs(crop, alpha=0.28, beta=8)
+        # Beri sedikit efek wash-out (mengurangi kontras warna / desaturasi sebesar 35%)
+        hsv = cv2.cvtColor(dark, cv2.COLOR_BGR2HSV).astype(np.float32)
+        hsv[:, :, 1] *= 0.65
+        hsv = np.clip(hsv, 0, 255).astype(np.uint8)
+        return cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+
+    @staticmethod
+    def enhance_crop(crop, l_str="Normal"):
+        if not getattr(config, 'ENABLE_CLAHE_ENHANCEMENT', True): return crop
+        filtered = cv2.bilateralFilter(crop, 3, 30, 30)
+        yuv = cv2.cvtColor(filtered, cv2.COLOR_BGR2YUV)
+        clip_limit = {"Normal": 1.5, "Low Light": 2.0, "Backlight": 1.8}.get(l_str, 1.5)
+        clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8))
+        yuv[:, :, 0] = clahe.apply(yuv[:, :, 0])
+        return cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR)
+
+    @staticmethod
     def get_aligned_crop(frame, face, target_size=(112, 112)):
         lm = getattr(face, 'landmarks', [])
         fh, fw = frame.shape[:2]
@@ -248,12 +280,24 @@ class FaceRegistrationApp:
             return
         self.last_extraction_time = current_time
 
-        if (best_crop := Helpers.get_aligned_crop(frame, face, target_size=(112, 112))) is not None and best_crop.size > 0:
-            emb_normal = self.model.get_embedding(best_crop)
-            emb_lowlight = self.model.get_embedding(cv2.convertScaleAbs(best_crop, alpha=0.8, beta=-50))
-            emb_backlight = self.model.get_embedding(cv2.convertScaleAbs(best_crop, alpha=0.5, beta=-90))
+        if (raw_crop := Helpers.get_aligned_crop(raw_frame, face, target_size=(112, 112))) is not None and raw_crop.size > 0:
+            crop_normal = Helpers.enhance_crop(raw_crop, "Normal")
+            emb_normal = self.model.get_embedding(crop_normal)
+
+            raw_lowlight = Helpers.simulate_lowlight_raw(raw_crop)
+            crop_lowlight = Helpers.enhance_crop(raw_lowlight, "Low Light")
+            emb_lowlight = self.model.get_embedding(crop_lowlight)
+
+            raw_backlight = Helpers.simulate_backlight_raw(raw_crop)
+            crop_backlight = Helpers.enhance_crop(raw_backlight, "Backlight")
+            emb_backlight = self.model.get_embedding(crop_backlight)
+
             if emb_normal is not None and emb_lowlight is not None and emb_backlight is not None:
-                self.extraction_embeddings.append({"normal": np.array(emb_normal).flatten(), "lowlight": np.array(emb_lowlight).flatten(), "backlight": np.array(emb_backlight).flatten()})
+                self.extraction_embeddings.append({
+                    "normal": np.array(emb_normal).flatten(),
+                    "lowlight": np.array(emb_lowlight).flatten(),
+                    "backlight": np.array(emb_backlight).flatten()
+                })
 
         total_frames_needed = 5
         collected = len(self.extraction_embeddings)

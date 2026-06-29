@@ -97,7 +97,8 @@ class UIHelper:
         avg_s = np.mean(hsv[:, :, 1])
         avg_v = np.mean(hsv[:, :, 2])
         
-        if avg_v > 135 and avg_s < 110: 
+        # Layar LCD/OLED memancarkan cahaya (Value tinggi) dan cenderung memiliki saturasi warna lebih pudar (Saturation rendah)
+        if avg_v > 160 and avg_s < 90: 
             return "LAYAR VIDEO"
         return "FOTO CETAK"
 
@@ -301,7 +302,16 @@ class SmartDoorApp:
             max_spoof_thr = getattr(config, 'MAX_SPOOF_FRAMES', 8)
             if self.fake_frames >= max_spoof_thr: 
                 lat_ms = (time.time() - self.spoof_start_time) * 1000
-                sp_type = "TIDAK YAKIN (SKOR RENDAH)" if is_m_real else UIHelper.analyze_spoof_type(raw, face.bbox)
+                if is_m_real:
+                    sp_type = "TIDAK YAKIN (SKOR RENDAH)"
+                else:
+                    m_lbl = liveness_info.get("label_name", "").upper()
+                    if "FOTO" in m_lbl or "PRINT" in m_lbl:
+                        sp_type = "FOTO CETAK"
+                    elif "LAYAR" in m_lbl or "VIDEO" in m_lbl or "SCREEN" in m_lbl:
+                        sp_type = "LAYAR VIDEO"
+                    else:
+                        sp_type = UIHelper.analyze_spoof_type(raw, face.bbox)
                 
                 if time.time() - self.last_spoof_log_time > 4.0:
                     self.last_spoof_log_time = time.time()

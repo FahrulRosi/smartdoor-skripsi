@@ -168,8 +168,24 @@ class SmartDoorApp:
 
     def _manual_unlock(self, channel):
         if not getattr(self, '_is_ready', False): return 
+        
+        # 1. Abaikan jika pintu sudah terbuka (mencegah trigger akibat noise listrik saat relay aktif)
+        if not self.door.locked:
+            return
+
+        # 2. Software debounce: memastikan tombol benar-benar ditekan (LOW) selama 50ms untuk memfilter noise/spikes
+        if GPIO_AVAILABLE:
+            if GPIO.input(channel) != GPIO.LOW:
+                return
+            for _ in range(5):
+                time.sleep(0.01)
+                if GPIO.input(channel) != GPIO.LOW:
+                    return
+
         print(f"\n{'='*60}"); UIHelper.log("🔓 PINTU DIBUKA MANUAL VIA TOMBOL", "SUCCESS"); print(f"{'='*60}\n")
-        self._reset_state(); self.ui.update({"wait": False, "bbox": None, "status": "DIBUKA MANUAL", "color": config.COLOR_GREEN, "instr": "Tombol Ditekan", "light_cond": None})
+        self._reset_state()
+        self.state = ValidationState.UNLOCKED  # Set state ke UNLOCKED agar _ai_worker mereset UI secara otomatis saat pintu mengunci kembali
+        self.ui.update({"wait": False, "bbox": None, "status": "DIBUKA MANUAL", "color": config.COLOR_GREEN, "instr": "Tombol Ditekan", "light_cond": None})
         threading.Thread(target=self.door.unlock, daemon=True).start()
 
     def _reset_state(self):

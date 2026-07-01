@@ -259,7 +259,7 @@ class SmartDoorApp:
         m_conf = float(liveness_info.get("score_real", liveness_info.get("score", 0.0)))
         is_m_real, as_thr = liveness_info.get("real", True), {"Normal": 0.82, "Backlight": 0.80, "Low Light": 0.80}.get(l_str, 0.80)
         if getattr(self, 'wearing_glasses', False): as_thr -= 0.08
-        is_actually_real = True if self.state == ValidationState.CHALLENGE else (is_m_real and m_conf >= as_thr)
+        is_actually_real = True if self.state == ValidationState.CHALLENGE else (m_conf >= as_thr)
         if self.state == ValidationState.CHALLENGE: self.fake_frames = 0
         if not is_actually_real:
             if self.fake_frames == 0: self.spoof_start_time, self.spoof_hist = time.time(), []

@@ -113,7 +113,7 @@ class SilentAntiSpoofing:
                 label_name = "Spoofing (Foto/Video)"
                 score_display = 1.0 - score_real
 
-        return {"real": is_valid, "score": round(score_display, 4), "label_name": label_name, "latency_ms": round(latency_ms, 2)}
+        return {"real": is_valid, "score": round(score_display, 4), "score_real": round(score_real, 4), "label_name": label_name, "latency_ms": round(latency_ms, 2)}
 
 class ActiveChallengeManager:
     def __init__(self):

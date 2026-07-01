@@ -116,6 +116,23 @@ class Helpers:
         return (min_b < brightness < max_b) and (blur_score > min_blur), brightness, blur_score 
 
     @staticmethod
+    def detect_glasses(frame, face):
+        if not getattr(face, 'landmarks_px', None) is not None or len(face.landmarks_px) < 400: return False
+        try:
+            lm = face.landmarks_px
+            p_left, p_right, p_bridge = lm[133], lm[362], lm[168]
+            eye_dist = np.linalg.norm(p_right - p_left)
+            if eye_dist < 10: return False
+            w_roi, h_roi = int(eye_dist * 0.6), int(eye_dist * 0.3)
+            x1, y1 = max(0, int(p_bridge[0] - w_roi // 2)), max(0, int(p_bridge[1] - h_roi // 2))
+            x2, y2 = min(frame.shape[1], x1 + w_roi), min(frame.shape[0], y1 + h_roi)
+            if (x2 - x1) < 5 or (y2 - y1) < 5: return False
+            gray = cv2.cvtColor(frame[y1:y2, x1:x2], cv2.COLOR_BGR2GRAY)
+            edges = cv2.Canny(cv2.bilateralFilter(gray, 5, 50, 50), 20, 80)
+            return np.mean(edges > 0) > 0.030
+        except: return False
+
+    @staticmethod
     def draw_hud(f, stg, instr, prog, score_txt, status, bbox, col):
         h, w = f.shape[:2]
         if bbox:
@@ -403,7 +420,10 @@ class FaceRegistrationApp:
                 pose, ear_val = self.liveness.pose_estimator.estimate(face, self.detector), (Helpers.capture_blink(face) or {}).get("avg_ear", 0.0)
                 if self.stage in (RegistrationStage.FACEMESH, RegistrationStage.EXTRACTION):
                     sp = self.anti_spoof.is_real(raw, face.bbox)
-                    sp_score, sp_real, sp_label = float(sp.get("score_real", sp.get("score", 1.0))), sp.get("real", True), sp.get("label_name", "FOTO").upper()
+                    sp_score = float(sp.get("score_real", sp.get("score", 1.0)))
+                    as_thr = 0.72 if Helpers.detect_glasses(raw, face) else 0.80
+                    sp_real = sp_score >= as_thr
+                    sp_label = sp.get("label_name", "FOTO").upper() if not sp_real else "REAL"
                 else: sp_score, sp_real, sp_label = 1.0, True, "REAL"
                 hud_txt, term_txt = self._generate_metric_text(pose, ear_val, sp_score, light_cond)
                 if not sp_real:

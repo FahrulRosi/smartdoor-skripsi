@@ -2,13 +2,13 @@ import cv2, random, time, threading, sys, numpy as np
 from datetime import datetime
 from enum import Enum
 import config
-from camera.camera_stream import CameraStream
+from camera.camera_stream       import CameraStream
 from facemesh.facemesh_detector import FaceMeshDetector
-from recognition.mobilefacenet import MobileFaceNet
-from door.door_lock import DoorLock
-from liveness.head_pose import HeadPoseEstimator
-from liveness.anti_spoofing import SilentAntiSpoofing  
-from database.face_db import FaceDatabase
+from recognition.mobilefacenet  import MobileFaceNet
+from door.door_lock             import DoorLock
+from liveness.head_pose         import HeadPoseEstimator
+from liveness.anti_spoofing     import SilentAntiSpoofing  
+from database.face_db           import FaceDatabase
 
 try: import RPi.GPIO as GPIO; GPIO_AVAILABLE = True
 except ImportError: GPIO_AVAILABLE = False
@@ -24,14 +24,12 @@ class UIHelper:
 
     @staticmethod
     def enhance_adaptive(frame, bbox, l_str="Normal"):
-        if l_str == "Normal": return frame
-        if not getattr(config, 'ENABLE_CLAHE_ENHANCEMENT', True): return frame
+        if l_str == "Normal" or not getattr(config, 'ENABLE_CLAHE_ENHANCEMENT', True): return frame
         d, sig_color, sig_space = {"Low Light": (5, 60, 60), "Backlight": (5, 45, 45)}.get(l_str, (5, 40, 40))
         filtered = cv2.bilateralFilter(frame, d, sig_color, sig_space)
         gamma = {"Low Light": 0.6, "Backlight": 0.5}.get(l_str, 1.0)
         if gamma != 1.0:
-            invGamma = 1.0 / gamma
-            table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
+            table = np.array([((i / 255.0) ** gamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
             filtered = cv2.LUT(filtered, table)
         yuv = cv2.cvtColor(filtered, cv2.COLOR_BGR2YUV)
         yuv[:,:,0] = cv2.createCLAHE(clipLimit={"Low Light":2.0, "Backlight":1.8}.get(l_str, 1.5), tileGridSize=(8, 8)).apply(yuv[:,:,0])
@@ -39,27 +37,16 @@ class UIHelper:
 
     @staticmethod
     def get_aligned_crop(frame, face, target_size=(112, 112)):
-        lm = getattr(face, 'landmarks', [])
-        fh, fw = frame.shape[:2]
+        lm, (fh, fw) = getattr(face, 'landmarks', []), frame.shape[:2]
         if not lm or len(lm) < 300: 
             bx, by, bw, bh = face.bbox
             return frame[max(0, by):min(fh, by+bh), max(0, bx):min(fw, bx+bw)]
-        
         le = np.array([(lm[33].x + lm[133].x) * fw / 2, (lm[33].y + lm[133].y) * fh / 2])
         re = np.array([(lm[263].x + lm[362].x) * fw / 2, (lm[263].y + lm[362].y) * fh / 2])
         nose = np.array([lm[4].x * fw, lm[4].y * fh])
-        lmouth = np.array([lm[61].x * fw, lm[61].y * fh])
-        rmouth = np.array([lm[291].x * fw, lm[291].y * fh])
-        
+        lmouth, rmouth = np.array([lm[61].x * fw, lm[61].y * fh]), np.array([lm[291].x * fw, lm[291].y * fh])
         src_pts = np.array([le, re, nose, lmouth, rmouth], dtype=np.float32)
-        dst_pts = np.array([
-            [38.2946, 51.6963],
-            [73.5318, 51.5014],
-            [56.0252, 71.7366],
-            [41.5493, 92.3655],
-            [70.7299, 92.2041]
-        ], dtype=np.float32)
-        
+        dst_pts = np.array([[38.2946, 51.6963], [73.5318, 51.5014], [56.0252, 71.7366], [41.5493, 92.3655], [70.7299, 92.2041]], dtype=np.float32)
         M, _ = cv2.estimateAffinePartial2D(src_pts, dst_pts)
         if M is None:
             angle = np.degrees(np.arctan2(re[1] - le[1], re[0] - le[0]))
@@ -67,7 +54,6 @@ class UIHelper:
             M = cv2.getRotationMatrix2D(((le[0] + re[0]) / 2, (le[1] + re[1]) / 2), angle, scale)
             M[0, 2] += (target_size[0] * 0.5 - ((le[0] + re[0]) / 2))
             M[1, 2] += (target_size[1] * 0.40 - ((le[1] + re[1]) / 2))
-            
         return cv2.warpAffine(frame, M, target_size, flags=cv2.INTER_CUBIC)
 
     @staticmethod
@@ -84,8 +70,7 @@ class UIHelper:
             bx, by, bw, bh = bbox; x1, y1, x2, y2 = max(0, bx), max(0, by), min(fw, bx+bw), min(fh, by+bh)
             face_bright = np.mean(gray[y1:y2, x1:x2]) if gray[y1:y2, x1:x2].size > 0 else ambient
             bg_top = gray[max(0, by-80):max(0, by-5), max(0, bx-30):min(fw, bx+bw+30)]
-            if (bg_bright := np.mean(bg_top) if bg_top.size > 0 else ambient) > 150 and (bg_bright - face_bright) > 45 and face_bright < 120: 
-                return "Backlight"
+            if (bg_bright := np.mean(bg_top) if bg_top.size > 0 else ambient) > 150 and (bg_bright - face_bright) > 45 and face_bright < 120: return "Backlight"
         return "Low Light" if ambient < 65 else "Normal"
 
     @staticmethod
@@ -98,6 +83,23 @@ class UIHelper:
         if crop.size == 0: return "MEDIA PALSU"
         hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
         return "LAYAR VIDEO" if np.mean(hsv[:, :, 2]) > 160 and np.mean(hsv[:, :, 1]) < 90 else "FOTO CETAK"
+
+    @staticmethod
+    def detect_glasses(frame, face):
+        if not getattr(face, 'landmarks_px', None) is not None or len(face.landmarks_px) < 400: return False
+        try:
+            lm = face.landmarks_px
+            p_left, p_right, p_bridge = lm[133], lm[362], lm[168]
+            eye_dist = np.linalg.norm(p_right - p_left)
+            if eye_dist < 10: return False
+            w_roi, h_roi = int(eye_dist * 0.6), int(eye_dist * 0.3)
+            x1, y1 = max(0, int(p_bridge[0] - w_roi // 2)), max(0, int(p_bridge[1] - h_roi // 2))
+            x2, y2 = min(frame.shape[1], x1 + w_roi), min(frame.shape[0], y1 + h_roi)
+            if (x2 - x1) < 5 or (y2 - y1) < 5: return False
+            gray = cv2.cvtColor(frame[y1:y2, x1:x2], cv2.COLOR_BGR2GRAY)
+            edges = cv2.Canny(cv2.bilateralFilter(gray, 5, 50, 50), 20, 80)
+            return np.mean(edges > 0) > 0.030
+        except: return False
 
     @staticmethod
     def draw_ui(d, ui, locked):
@@ -134,17 +136,14 @@ class SmartDoorApp:
 
     def _init_heavy_models(self):
         self.db, self.model, self.pose_estimator = FaceDatabase(), MobileFaceNet(), HeadPoseEstimator()
-        self.anti_spoof = SilentAntiSpoofing(getattr(config, 'ANTI_SPOOFING_MODEL', "liveness/antispoofing_int8.onnx"), getattr(config, 'ANTI_SPOOFING_THRESHOLD', 0.85))
+        self.anti_spoof = SilentAntiSpoofing(getattr(config, 'ANTI_SPOOFING_MODEL', "liveness/antispoofing.onnx"), getattr(config, 'ANTI_SPOOFING_THRESHOLD', 0.80))
         self.detector = FaceMeshDetector(min_detection_confidence=0.35, min_tracking_confidence=0.35)
         self.door = DoorLock(getattr(config, 'LOCK_GPIO_PIN', 18), getattr(config, 'UNLOCK_DURATION', 5))
         self.known_faces_2d = {}
         emb_dim = getattr(self.model, 'embedding_size', 128)
         for k, v in (self.db.load_all_faces() or {}).items():
             if isinstance(v, dict) and (emb_val := v.get('embedding')):
-                if isinstance(emb_val, list) and len(emb_val) == (emb_dim * 3):
-                    sub_embs = [emb_val[0:emb_dim], emb_val[emb_dim:emb_dim*2], emb_val[emb_dim*2:emb_dim*3]]
-                else:
-                    sub_embs = emb_val if isinstance(emb_val, list) and len(emb_val) > 0 and isinstance(emb_val[0], list) else [emb_val]
+                sub_embs = emb_val if isinstance(emb_val, list) and len(emb_val) > 0 and isinstance(emb_val[0], list) else ([emb_val[0:emb_dim], emb_val[emb_dim:emb_dim*2], emb_val[emb_dim*2:emb_dim*3]] if isinstance(emb_val, list) and len(emb_val) == (emb_dim * 3) else [emb_val])
                 valid_embs = [np.array(e, dtype=np.float32) for e in sub_embs if len(e) == emb_dim]
                 if valid_embs: self.known_faces_2d[k] = valid_embs
         if GPIO_AVAILABLE:
@@ -180,7 +179,7 @@ class SmartDoorApp:
         self.wait_center, self.blink_passed, self.blink_hold, self.ear_hist, self.print_counter, self.access_details = False, False, 0, [], 0, []
         self.fake_frames = self.recog_frames = self.spoof_start_time = 0; self.locked_light_cond = "Normal"; self.spoof_hist = []
         self.last_failed_cosine, self.last_failed_threshold, self.last_failed_l_str = 0.0, 0.0, "Normal"
-        self.recog_embeddings = []
+        self.recog_embeddings, self.ear_history_open, self.wearing_glasses = [], [], False
 
     def _fail(self, status, color=config.COLOR_RED, instr="", wait=False):
         self._reset_state(); self.ui.update({"wait": wait, "bbox": None if wait else self.ui.get("bbox"), "status": status, "color": color, "instr": instr})
@@ -189,7 +188,9 @@ class SmartDoorApp:
     def _check_action(self, action, face):
         if action == "BLINK": 
             self.ear_hist = (self.ear_hist + [UIHelper.get_ear(face)])[-3:]
-            if min(self.ear_hist) <= getattr(config, 'BLINK_EAR_THRESHOLD', 0.21): self.blink_hold += 1
+            base_open = np.mean(self.ear_history_open) if getattr(self, 'ear_history_open', None) else 0.30
+            adaptive_thr = max(0.20, min(0.24, base_open * 0.72))
+            if min(self.ear_hist) <= adaptive_thr: self.blink_hold += 1
             else: self.blink_passed, self.blink_hold = self.blink_hold >= 1, 0
             return self.blink_passed, 1.0, 1.0, False  
         est = self.pose_estimator.estimate(face, self.detector)
@@ -202,8 +203,8 @@ class SmartDoorApp:
 
     def _check_identity(self, q_emb, l_str):
         d_thr = {"Normal": 0.70, "Backlight": 0.65, "Low Light": 0.67}.get(l_str, 0.70)
-        if not self.known_faces_2d or q_emb is None: 
-            return "TIDAK DIKENAL", 0.0, d_thr, 0.0, False
+        if getattr(self, 'wearing_glasses', False): d_thr -= 0.04
+        if not self.known_faces_2d or q_emb is None: return "TIDAK DIKENAL", 0.0, d_thr, 0.0, False
         b_name, b_score = max(((n, np.max([np.dot(q_emb, e) for e in el])) for n, el in self.known_faces_2d.items() if el), key=lambda x: x[1], default=("", 0.0))
         if b_score < d_thr:
             self.recog_frames = max(0, getattr(self, 'recog_frames', 0) - 1)
@@ -224,11 +225,9 @@ class SmartDoorApp:
             if not faces and self.state != ValidationState.UNLOCKED:
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 if np.mean(gray) < 130:
-                    invGamma = 1.0 / 0.5
-                    table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
-                    brightened = cv2.LUT(frame, table)
-                    faces = self.detector.detect(brightened)
-
+                    gamma = 0.5
+                    table = np.array([((i / 255.0) ** gamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
+                    faces = self.detector.detect(cv2.LUT(frame, table))
             if self.state == ValidationState.UNLOCKED:
                 if getattr(self.door, 'locked', True): self._reset_state(); self.ui.update({"wait": True, "bbox": None, "status": "", "color": config.COLOR_WHITE, "instr": "", "light_cond": None})
                 else: self.ui.update({"wait": False, "bbox": max(faces, key=lambda f: f.bbox[2]*f.bbox[3]).bbox if faces else None})
@@ -239,7 +238,9 @@ class SmartDoorApp:
             else: 
                 self.missed_frames = 0
                 face = max(faces, key=lambda f: f.bbox[2] * f.bbox[3])
-                if self.state in (ValidationState.IDLE, ValidationState.RECOGNIZING): self.locked_light_cond = UIHelper.get_light_condition_dynamic(frame, face.bbox)
+                if self.state in (ValidationState.IDLE, ValidationState.RECOGNIZING):
+                    self.locked_light_cond = UIHelper.get_light_condition_dynamic(frame, face.bbox)
+                    self.wearing_glasses = UIHelper.detect_glasses(frame, face)
                 l_str = self.locked_light_cond
                 self.ui.update({"wait": False, "bbox": face.bbox, "light_cond": l_str}) 
                 if not getattr(self, 'is_processing', False):
@@ -256,15 +257,14 @@ class SmartDoorApp:
         if self.state == ValidationState.IDLE: self.state, self.auth_start = ValidationState.RECOGNIZING, time.time(); return
         liveness_info = self.anti_spoof.is_real(raw.copy(), face.bbox)
         m_conf = float(liveness_info.get("score_real", liveness_info.get("score", 0.0)))
-        is_m_real = liveness_info.get("real", True)
-        as_thr = {"Normal": 0.82, "Backlight": 0.80, "Low Light": 0.80}.get(l_str, 0.80)
+        is_m_real, as_thr = liveness_info.get("real", True), {"Normal": 0.82, "Backlight": 0.80, "Low Light": 0.80}.get(l_str, 0.80)
+        if getattr(self, 'wearing_glasses', False): as_thr -= 0.08
         is_actually_real = True if self.state == ValidationState.CHALLENGE else (is_m_real and m_conf >= as_thr)
         if self.state == ValidationState.CHALLENGE: self.fake_frames = 0
         if not is_actually_real:
             if self.fake_frames == 0: self.spoof_start_time, self.spoof_hist = time.time(), []
             self.fake_frames += 1; self.spoof_hist.append(m_conf)
-            avg_score = sum(self.spoof_hist) / len(self.spoof_hist)
-            max_spoof_thr = getattr(config, 'MAX_SPOOF_FRAMES', 8)
+            avg_score, max_spoof_thr = sum(self.spoof_hist) / len(self.spoof_hist), getattr(config, 'MAX_SPOOF_FRAMES', 8)
             if self.fake_frames >= max_spoof_thr: 
                 lat_ms = (time.time() - self.spoof_start_time) * 1000
                 if is_m_real: sp_type = "TIDAK YAKIN (SKOR RENDAH)"
@@ -284,11 +284,8 @@ class SmartDoorApp:
             gray_face = cv2.cvtColor(enhanced, cv2.COLOR_BGR2GRAY)
             x, y, w, h = face.bbox
             face_roi = gray_face[max(0, y):min(gray_face.shape[0], y+h), max(0, x):min(gray_face.shape[1], x+w)]
-            if face_roi.size > 0:
-                blur_val = cv2.Laplacian(face_roi, cv2.CV_64F).var()
-                if blur_val < 35:
-                    self.ui.update({"status": "MEMINDAI...", "color": config.COLOR_YELLOW, "instr": "Harap tenang, memfokuskan..."})
-                    return
+            if face_roi.size > 0 and cv2.Laplacian(face_roi, cv2.CV_64F).var() < 35:
+                self.ui.update({"status": "MEMINDAI...", "color": config.COLOR_YELLOW, "instr": "Harap tenang, memfokuskan..."}); return
 
             avg_emb = None
             if (cropped := UIHelper.get_aligned_crop(enhanced, face, target_size=(112, 112))) is not None and cropped.size > 0:
@@ -300,6 +297,10 @@ class SmartDoorApp:
                     self.recog_embeddings = self.recog_embeddings[-3:]
                     avg_emb = np.mean(self.recog_embeddings, axis=0)
                     avg_emb /= (np.linalg.norm(avg_emb) + 1e-6)
+                    current_ear = UIHelper.get_ear(face)
+                    if current_ear > 0.15:
+                        self.ear_history_open.append(current_ear)
+                        self.ear_history_open = self.ear_history_open[-15:]
 
             b_name, sm_score, d_thr, f_acc, is_recog = self._check_identity(avg_emb, l_str)
             disp_name = b_name.split(" - ", 1)[-1] if (b_name != "TIDAK DIKENAL") else "TIDAK DIKENAL"
@@ -313,8 +314,7 @@ class SmartDoorApp:
                 return
             if not is_recog: 
                 req_f = getattr(config, 'REQUIRED_STABLE_FRAMES', 6)
-                self.ui.update({"status": "VERIFIKASI...", "color": config.COLOR_YELLOW, "instr": f"Tahan Posisi Berdiri ({self.recog_frames}/{req_f})..."})
-                return
+                self.ui.update({"status": "VERIFIKASI...", "color": config.COLOR_YELLOW, "instr": f"Tahan Posisi Berdiri ({self.recog_frames}/{req_f})..."}); return
             self.print_counter += 1
             if self.print_counter % 2 == 0: UIHelper.print_inline(f"Memproses {disp_name}... Cosine: {sm_score:.3f}")
             self.face_val_latency = (time.time() - t_val) * 1000 
@@ -343,11 +343,8 @@ class SmartDoorApp:
 
     def run(self):
         try:
-            if getattr(config, 'USE_FULLSCREEN', False):
-                cv2.namedWindow("Smart Door Lock", cv2.WND_PROP_FULLSCREEN)
-                cv2.setWindowProperty("Smart Door Lock", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
-            else:
-                cv2.namedWindow("Smart Door Lock", cv2.WINDOW_AUTOSIZE)
+            cv2.namedWindow("Smart Door Lock", cv2.WND_PROP_FULLSCREEN if getattr(config, 'USE_FULLSCREEN', False) else cv2.WINDOW_AUTOSIZE)
+            if getattr(config, 'USE_FULLSCREEN', False): cv2.setWindowProperty("Smart Door Lock", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
             while self.running:
                 ret, frame = self.cam.read()
                 if ret:

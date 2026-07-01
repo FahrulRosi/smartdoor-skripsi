@@ -24,14 +24,12 @@ def _log(msg, level="INFO"):
 class Helpers:
     @staticmethod
     def enhance_adaptive(frame, bbox=None, l_str="Normal"):
-        if l_str == "Normal": return frame
-        if not getattr(config, 'ENABLE_CLAHE_ENHANCEMENT', True): return frame
+        if l_str == "Normal" or not getattr(config, 'ENABLE_CLAHE_ENHANCEMENT', True): return frame
         d, sig_color, sig_space = {"Low Light": (5, 60, 60), "Backlight": (5, 45, 45)}.get(l_str, (5, 40, 40))
         filtered = cv2.bilateralFilter(frame, d, sig_color, sig_space)
         gamma = {"Low Light": 0.6, "Backlight": 0.5}.get(l_str, 1.0)
         if gamma != 1.0:
-            invGamma = 1.0 / gamma
-            table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
+            table = np.array([((i / 255.0) ** gamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
             filtered = cv2.LUT(filtered, table)
         yuv = cv2.cvtColor(filtered, cv2.COLOR_BGR2YUV)
         yuv[:,:,0] = cv2.createCLAHE(clipLimit={"Low Light":2.0, "Backlight":1.8}.get(l_str, 1.5), tileGridSize=(8, 8)).apply(yuv[:,:,0])
@@ -39,71 +37,45 @@ class Helpers:
 
     @staticmethod
     def simulate_lowlight_raw(crop, level="medium"):
-        if level == "medium":
-            dark = cv2.convertScaleAbs(crop, alpha=0.45, beta=15)
-            sigma = 8
-        else:
-            dark = cv2.convertScaleAbs(crop, alpha=0.25, beta=5)
-            sigma = 15
-        row, col, ch = dark.shape
-        mean = 0
-        gauss = np.random.normal(mean, sigma, (row, col, ch)).astype(np.int16)
-        noisy = np.clip(dark.astype(np.int16) + gauss, 0, 255).astype(np.uint8)
-        return noisy
+        alpha, beta, sigma = (0.45, 15, 8) if level == "medium" else (0.25, 5, 15)
+        dark = cv2.convertScaleAbs(crop, alpha=alpha, beta=beta)
+        gauss = np.random.normal(0, sigma, dark.shape).astype(np.int16)
+        return np.clip(dark.astype(np.int16) + gauss, 0, 255).astype(np.uint8)
 
     @staticmethod
     def simulate_backlight_raw(crop, level="medium"):
-        if level == "medium":
-            dark = cv2.convertScaleAbs(crop, alpha=0.35, beta=10)
-            sat_factor = 0.75
-        else:
-            dark = cv2.convertScaleAbs(crop, alpha=0.20, beta=5)
-            sat_factor = 0.55
+        alpha, beta, sat = (0.35, 10, 0.75) if level == "medium" else (0.20, 5, 0.55)
+        dark = cv2.convertScaleAbs(crop, alpha=alpha, beta=beta)
         hsv = cv2.cvtColor(dark, cv2.COLOR_BGR2HSV).astype(np.float32)
-        hsv[:, :, 1] *= sat_factor
-        hsv = np.clip(hsv, 0, 255).astype(np.uint8)
-        return cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+        hsv[:, :, 1] *= sat
+        return cv2.cvtColor(np.clip(hsv, 0, 255).astype(np.uint8), cv2.COLOR_HSV2BGR)
 
     @staticmethod
     def enhance_crop(crop, l_str="Normal"):
-        if l_str == "Normal": return crop
-        if not getattr(config, 'ENABLE_CLAHE_ENHANCEMENT', True): return crop
-        d, sig_color, sig_space = {"Low Light": (5, 60, 60), "Backlight": (5, 45, 45)}.get(l_str, (5, 40, 40))
-        filtered = cv2.bilateralFilter(crop, d, sig_color, sig_space)
+        if l_str == "Normal" or not getattr(config, 'ENABLE_CLAHE_ENHANCEMENT', True): return crop
+        d, sig_col, sig_sp = {"Low Light": (5, 60, 60), "Backlight": (5, 45, 45)}.get(l_str, (5, 40, 40))
+        filtered = cv2.bilateralFilter(crop, d, sig_col, sig_sp)
         gamma = {"Low Light": 0.6, "Backlight": 0.5}.get(l_str, 1.0)
         if gamma != 1.0:
-            invGamma = 1.0 / gamma
-            table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
+            table = np.array([((i / 255.0) ** gamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
             filtered = cv2.LUT(filtered, table)
         yuv = cv2.cvtColor(filtered, cv2.COLOR_BGR2YUV)
-        clip_limit = {"Low Light": 2.0, "Backlight": 1.8}.get(l_str, 1.5)
-        clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8))
+        clahe = cv2.createCLAHE(clipLimit={"Low Light": 2.0, "Backlight": 1.8}.get(l_str, 1.5), tileGridSize=(8, 8))
         yuv[:, :, 0] = clahe.apply(yuv[:, :, 0])
         return cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR)
 
     @staticmethod
     def get_aligned_crop(frame, face, target_size=(112, 112)):
-        lm = getattr(face, 'landmarks', [])
-        fh, fw = frame.shape[:2]
+        lm, (fh, fw) = getattr(face, 'landmarks', []), frame.shape[:2]
         if not lm or len(lm) < 300: 
             bx, by, bw, bh = face.bbox
             return frame[max(0, by):min(fh, by+bh), max(0, bx):min(fw, bx+bw)]
-        
         le = np.array([(lm[33].x + lm[133].x) * fw / 2, (lm[33].y + lm[133].y) * fh / 2])
         re = np.array([(lm[263].x + lm[362].x) * fw / 2, (lm[263].y + lm[362].y) * fh / 2])
         nose = np.array([lm[4].x * fw, lm[4].y * fh])
-        lmouth = np.array([lm[61].x * fw, lm[61].y * fh])
-        rmouth = np.array([lm[291].x * fw, lm[291].y * fh])
-        
+        lmouth, rmouth = np.array([lm[61].x * fw, lm[61].y * fh]), np.array([lm[291].x * fw, lm[291].y * fh])
         src_pts = np.array([le, re, nose, lmouth, rmouth], dtype=np.float32)
-        dst_pts = np.array([
-            [38.2946, 51.6963],
-            [73.5318, 51.5014],
-            [56.0252, 71.7366],
-            [41.5493, 92.3655],
-            [70.7299, 92.2041]
-        ], dtype=np.float32)
-        
+        dst_pts = np.array([[38.2946, 51.6963], [73.5318, 51.5014], [56.0252, 71.7366], [41.5493, 92.3655], [70.7299, 92.2041]], dtype=np.float32)
         M, _ = cv2.estimateAffinePartial2D(src_pts, dst_pts)
         if M is None:
             angle = np.degrees(np.arctan2(re[1] - le[1], re[0] - le[0]))
@@ -111,7 +83,6 @@ class Helpers:
             M = cv2.getRotationMatrix2D(((le[0] + re[0]) / 2, (le[1] + re[1]) / 2), angle, scale)
             M[0, 2] += (target_size[0] * 0.5 - ((le[0] + re[0]) / 2))
             M[1, 2] += (target_size[1] * 0.40 - ((le[1] + re[1]) / 2))
-            
         return cv2.warpAffine(frame, M, target_size, flags=cv2.INTER_CUBIC)
 
     @staticmethod
@@ -138,8 +109,11 @@ class Helpers:
         face_roi = frame[y1:y2, x1:x2]
         if face_roi.size == 0: return False, 0.0, 0.0
         gray = cv2.cvtColor(face_roi, cv2.COLOR_BGR2GRAY)
-        brightness = np.mean(gray); blur_score = cv2.Laplacian(gray, cv2.CV_64F).var()
-        return (40 < brightness < 210) and (blur_score > 60), brightness, blur_score 
+        brightness, blur_score = np.mean(gray), cv2.Laplacian(gray, cv2.CV_64F).var()
+        min_b = getattr(config, 'REG_MIN_BRIGHTNESS', 15.0)
+        max_b = getattr(config, 'REG_MAX_BRIGHTNESS', 245.0)
+        min_blur = getattr(config, 'REG_MIN_BLUR_SCORE', 35.0)
+        return (min_b < brightness < max_b) and (blur_score > min_blur), brightness, blur_score 
 
     @staticmethod
     def draw_hud(f, stg, instr, prog, score_txt, status, bbox, col):
@@ -183,24 +157,20 @@ class FaceRegistrationApp:
         self.fake_frames = 0
         self.is_running, self.display_frame, self.frame_lock = True, None, threading.Lock()
         self.locked_light_cond = None 
-        
         self.cap_data = {"facemesh_vector": None, "yaw_snapshots": [], "pitch_snapshots": [], "roll_snapshots": [], "blink_closed": None, "blink_open": None, "headpose_vector": None}
         self._pose_buf, self._blink_buf, self._prev_step = {"yaw": {}, "pitch": {}, "roll": {}}, {"closed": None, "open": None, "logged_closed": False, "logged_open": False}, "FACEMESH"
         self.extraction_embeddings, self.last_extraction_time = [], 0
-        
         self.db = FaceDatabase()
         self.cam = CameraStream(config.CAMERA_INDEX, config.FRAME_WIDTH, config.FRAME_HEIGHT).start()
         self.detector = FaceMeshDetector(min_detection_confidence=0.35, min_tracking_confidence=0.35)
         self.liveness, self.model = LivenessManager(), MobileFaceNet()
         self.anti_spoof = SilentAntiSpoofing(getattr(config, 'ANTI_SPOOFING_MODEL', "liveness/antispoofing.onnx"), min(getattr(config, 'ANTI_SPOOFING_THRESHOLD', 0.80), 0.80))
         self.matcher = FaceMatcher(0.35) 
-        
         try:
             if (raw := self.db.load_all_faces()):
                 faces = {k: v.get('embedding') for k, v in raw.items() if isinstance(v, dict) and v.get('embedding') is not None}
                 self.matcher.load_faces(faces) if hasattr(self.matcher, 'load_faces') else setattr(self.matcher, 'known_faces', faces)
         except: pass
-        
         self.liveness.start_register()
         self.action_start_time, self._timer_started, self.app_start_time = None, False, time.time()
         self.prev_instruction, self.prev_tag, self.individual_latencies = None, None, {}
@@ -238,8 +208,7 @@ class FaceRegistrationApp:
             val, buf = pose.get(axis, 0.0), self._pose_buf[axis]
             if val < -thr or val > thr:
                 tag = t_neg if val < -thr else t_pos
-                if getattr(self, 'prev_tag', None) != tag:
-                    self.hold_frames = 0; self.prev_tag = tag
+                if getattr(self, 'prev_tag', None) != tag: self.hold_frames, self.prev_tag = 0, tag
                 self.hold_frames += 1
                 if self.hold_frames >= 3:
                     if tag not in buf:
@@ -252,25 +221,24 @@ class FaceRegistrationApp:
                         self.action_start_time, self.hold_frames = time.time(), 0
             else: self.hold_frames, self.prev_tag = 0, None
 
-        if self.stage == RegistrationStage.BLINK:
-            if (bv := Helpers.capture_blink(face)):
-                min_open, max_closed = getattr(config, 'MIN_BLINK_OPEN_EAR', 0.22), getattr(config, 'MAX_BLINK_CLOSED_EAR', 0.20)
-                if bv["avg_ear"] <= max_closed and not self._blink_buf.get("logged_closed"):
-                    lat_ms = round((time.time() - self.action_start_time) * 1000, 2)
-                    bv["latency_ms"] = lat_ms
-                    self._blink_buf["closed"], self._blink_buf["logged_closed"] = bv, True
-                    self.individual_latencies["Mata Menutup"] = lat_ms
-                    _log(f"⏱️ Selesai Tahap Blink (Mata Menutup) | Latensi: {lat_ms:.2f} ms", "METRIK")
-                    self.action_start_time = time.time() 
-                elif bv["avg_ear"] >= min_open and self._blink_buf.get("logged_closed") and not self._blink_buf.get("logged_open"):
-                    lat_ms = round((time.time() - self.action_start_time) * 1000, 2)
-                    bv["latency_ms"] = lat_ms
-                    self._blink_buf["open"], self._blink_buf["logged_open"] = bv, True
-                    self.individual_latencies["Mata Membuka"] = lat_ms
-                    _log(f"⏱️ Selesai Tahap Blink (Mata Membuka) | Latensi: {lat_ms:.2f} ms", "METRIK")
-                    self.action_start_time = time.time() 
-                if self._blink_buf.get("closed") and bv["avg_ear"] < self._blink_buf["closed"]["avg_ear"]: self._blink_buf["closed"].update(bv)
-                if self._blink_buf.get("open") and bv["avg_ear"] > self._blink_buf["open"]["avg_ear"]: self._blink_buf["open"].update(bv)
+        if self.stage == RegistrationStage.BLINK and (bv := Helpers.capture_blink(face)):
+            min_open, max_closed = getattr(config, 'MIN_BLINK_OPEN_EAR', 0.22), getattr(config, 'MAX_BLINK_CLOSED_EAR', 0.20)
+            if bv["avg_ear"] <= max_closed and not self._blink_buf.get("logged_closed"):
+                lat_ms = round((time.time() - self.action_start_time) * 1000, 2)
+                bv["latency_ms"] = lat_ms
+                self._blink_buf["closed"], self._blink_buf["logged_closed"] = bv, True
+                self.individual_latencies["Mata Menutup"] = lat_ms
+                _log(f"⏱️ Selesai Tahap Blink (Mata Menutup) | Latensi: {lat_ms:.2f} ms", "METRIK")
+                self.action_start_time = time.time() 
+            elif bv["avg_ear"] >= min_open and self._blink_buf.get("logged_closed") and not self._blink_buf.get("logged_open"):
+                lat_ms = round((time.time() - self.action_start_time) * 1000, 2)
+                bv["latency_ms"] = lat_ms
+                self._blink_buf["open"], self._blink_buf["logged_open"] = bv, True
+                self.individual_latencies["Mata Membuka"] = lat_ms
+                _log(f"⏱️ Selesai Tahap Blink (Mata Membuka) | Latensi: {lat_ms:.2f} ms", "METRIK")
+                self.action_start_time = time.time() 
+            if self._blink_buf.get("closed") and bv["avg_ear"] < self._blink_buf["closed"]["avg_ear"]: self._blink_buf["closed"].update(bv)
+            if self._blink_buf.get("open") and bv["avg_ear"] > self._blink_buf["open"]["avg_ear"]: self._blink_buf["open"].update(bv)
 
     def _generate_metric_text(self, pose, ear_val, sp_score, light_cond):
         stg = self.stage
@@ -293,10 +261,8 @@ class FaceRegistrationApp:
             if not bc or not bo or (bo["avg_ear"] < min_open) or (bc["avg_ear"] > max_closed) or (bo["avg_ear"] - bc["avg_ear"] < min_delta): 
                 self.liveness._register_step, self.liveness._blink_state, self.liveness._hold_frames, self.liveness._blink_count, self._blink_buf = 7, 0, 0, 0, {"closed": None, "open": None, "logged_closed": False, "logged_open": False}; return False
             self.cap_data.update({"blink_closed": bc, "blink_open": bo})
-        
         self._prev_step, self.stage = cur_step, STEP_TO_STAGE.get(cur_step, self.stage)
-        if self.stage != RegistrationStage.COMPLETE:
-            self.action_start_time, self.hold_frames = time.time(), 0
+        if self.stage != RegistrationStage.COMPLETE: self.action_start_time, self.hold_frames = time.time(), 0
 
     def _process_extraction(self, raw_frame, frame, face, display, pose, score_txt, sp_score, sp_label):
         missing = [k for k, v in [("FaceMesh", self.cap_data["facemesh_vector"] is not None), ("Yaw", len(self.cap_data["yaw_snapshots"])>1), ("Pitch", len(self.cap_data["pitch_snapshots"])>1), ("Roll", len(self.cap_data["roll_snapshots"])>1), ("Blink", self.cap_data["blink_closed"] is not None)] if not v]
@@ -305,7 +271,7 @@ class FaceRegistrationApp:
             return
         quality_ok, brightness, blur_score = Helpers.is_image_quality_good(raw_frame, face.bbox)
         if not quality_ok:
-            reason = "Cahaya Buruk" if not (40 < brightness < 210) else "Kamera Blur"
+            reason = "Cahaya Buruk" if not (15 < brightness < 245) else "Kamera Blur"
             Helpers.draw_hud(display, self.stage, f"⚠️ {reason}!", "Mohon tetap diam...", score_txt, f"Real: {sp_score:.2f}", face.bbox, config.COLOR_YELLOW)
             with self.frame_lock: self.display_frame = display.copy()
             return
@@ -318,33 +284,21 @@ class FaceRegistrationApp:
         self.last_extraction_time = current_time
 
         if (raw_crop := Helpers.get_aligned_crop(raw_frame, face, target_size=(112, 112))) is not None and raw_crop.size > 0:
-            crop_normal = Helpers.enhance_crop(raw_crop, "Normal")
-            emb_normal = self.model.get_embedding(crop_normal)
-
-            raw_low_med = Helpers.simulate_lowlight_raw(raw_crop, "medium")
-            crop_low_med = Helpers.enhance_crop(raw_low_med, "Low Light")
-            emb_low_med = self.model.get_embedding(crop_low_med)
-
-            raw_low_ext = Helpers.simulate_lowlight_raw(raw_crop, "extreme")
-            crop_low_ext = Helpers.enhance_crop(raw_low_ext, "Low Light")
-            emb_low_ext = self.model.get_embedding(crop_low_ext)
-
-            raw_back_med = Helpers.simulate_backlight_raw(raw_crop, "medium")
-            crop_back_med = Helpers.enhance_crop(raw_back_med, "Backlight")
-            emb_back_med = self.model.get_embedding(crop_back_med)
-
-            raw_back_str = Helpers.simulate_backlight_raw(raw_crop, "strong")
-            crop_back_str = Helpers.enhance_crop(raw_back_str, "Backlight")
-            emb_back_str = self.model.get_embedding(crop_back_str)
-
-            if all(v is not None for v in (emb_normal, emb_low_med, emb_low_ext, emb_back_med, emb_back_str)):
-                self.extraction_embeddings.append({
-                    "normal": np.array(emb_normal).flatten(),
-                    "low_med": np.array(emb_low_med).flatten(),
-                    "low_ext": np.array(emb_low_ext).flatten(),
-                    "back_med": np.array(emb_back_med).flatten(),
-                    "back_str": np.array(emb_back_str).flatten()
-                })
+            embs = {}
+            for key, cond, sim_args in [
+                ("normal", "Normal", None),
+                ("low_med", "Low Light", ("low", "medium")),
+                ("low_ext", "Low Light", ("low", "extreme")),
+                ("back_med", "Backlight", ("back", "medium")),
+                ("back_str", "Backlight", ("back", "strong"))
+            ]:
+                if not sim_args: c = raw_crop
+                elif sim_args[0] == "low": c = Helpers.simulate_lowlight_raw(raw_crop, sim_args[1])
+                else: c = Helpers.simulate_backlight_raw(raw_crop, sim_args[1])
+                enhanced_c = Helpers.enhance_crop(c, cond)
+                emb = self.model.get_embedding(enhanced_c)
+                if emb is not None: embs[key] = np.array(emb).flatten()
+            if len(embs) == 5: self.extraction_embeddings.append(embs)
 
         total_frames_needed = 5
         collected = len(self.extraction_embeddings)
@@ -353,37 +307,18 @@ class FaceRegistrationApp:
             with self.frame_lock: self.display_frame = display.copy()
             return
 
-        norm_list = [e["normal"] for e in self.extraction_embeddings]
-        low_med_list = [e["low_med"] for e in self.extraction_embeddings]
-        low_ext_list = [e["low_ext"] for e in self.extraction_embeddings]
-        back_med_list = [e["back_med"] for e in self.extraction_embeddings]
-        back_str_list = [e["back_str"] for e in self.extraction_embeddings]
-
-        avg_norm = np.mean(norm_list, axis=0)
-        avg_low_med = np.mean(low_med_list, axis=0)
-        avg_low_ext = np.mean(low_ext_list, axis=0)
-        avg_back_med = np.mean(back_med_list, axis=0)
-        avg_back_str = np.mean(back_str_list, axis=0)
-
-        vec_norm = (avg_norm / (np.linalg.norm(avg_norm) + 1e-6)).tolist()
-        vec_low_med = (avg_low_med / (np.linalg.norm(avg_low_med) + 1e-6)).tolist()
-        vec_low_ext = (avg_low_ext / (np.linalg.norm(avg_low_ext) + 1e-6)).tolist()
-        vec_back_med = (avg_back_med / (np.linalg.norm(avg_back_med) + 1e-6)).tolist()
-        vec_back_str = (avg_back_str / (np.linalg.norm(avg_back_str) + 1e-6)).tolist()
-
-        final_emb_vectors = [vec_norm, vec_low_med, vec_low_ext, vec_back_med, vec_back_str]
+        avg_embs = {k: np.mean([e[k] for e in self.extraction_embeddings], axis=0) for k in ["normal", "low_med", "low_ext", "back_med", "back_str"]}
+        final_emb_vectors = [(v / (np.linalg.norm(v) + 1e-6)).tolist() for v in avg_embs.values()]
         light_cond = getattr(self, 'locked_light_cond', "Normal")
         latensi_respon_subjek = round(sum(self.individual_latencies.values()), 2)
         mfn_latency = round((time.time() - self.action_start_time) * 1000, 2)
         total_waktu_sistem = latensi_respon_subjek + mfn_latency
         
-        is_duplicate = False
-        duplicate_name = ""
+        is_duplicate, duplicate_name = False, ""
         anti_dup_thr = getattr(config, 'ANTI_DUPLICATE_THRESHOLD', getattr(config, 'MATCH_THRESHOLD', 0.65))
         best_sim_score = 0.0
         all_faces_raw = self.db.load_all_faces()
         existing_user_id = self.user_id
-        single_master_emb = final_emb_vectors
 
         if all_faces_raw:
             user_exists = any(db_key.split(" - ", 1)[-1].lower() == self.name.lower() if " - " in db_key else db_key.lower() == self.name.lower() for db_key in all_faces_raw)
@@ -400,7 +335,7 @@ class FaceRegistrationApp:
                         if isinstance(emb_list, list) and len(emb_list) > 0:
                             if not isinstance(emb_list[0], (list, np.ndarray)): 
                                 emb_list = [emb_list[0:emb_dim], emb_list[emb_dim:emb_dim*2], emb_list[emb_dim*2:emb_dim*3]] if len(emb_list) == (emb_dim * 3) else [emb_list]
-                            for q_emb in [vec_norm]: 
+                            for q_emb in [final_emb_vectors[0]]: 
                                 q_vec = np.array(q_emb, dtype=np.float32); q_vec /= (np.linalg.norm(q_vec) + 1e-6)
                                 for db_emb in emb_list:
                                     if len(db_emb) != emb_dim: continue
@@ -409,7 +344,7 @@ class FaceRegistrationApp:
                                     if sim > best_sim_score: best_sim_score, duplicate_name = sim, name.split(" - ", 1)[-1]
                                     if sim >= anti_dup_thr: is_duplicate = True; break
                                 if is_duplicate: break
-                    if is_duplicate: break
+                            if is_duplicate: break
 
         if is_duplicate and os.getenv("ALLOW_DUPLICATE", "false").lower() != "true": 
             Helpers.show_msg(display, "❌ WAJAH SUDAH TERDAFTAR!", f"Mirip {best_sim_score * 100:.1f}% dgn {duplicate_name}", config.COLOR_RED)
@@ -418,7 +353,7 @@ class FaceRegistrationApp:
         else:
             self.cap_data.update({"reg_latency_ms": total_waktu_sistem, "individual_latencies": self.individual_latencies, "headpose_vector": [float(pose["yaw"]), float(pose["pitch"]), float(pose["roll"])], "registration_accuracy": 100.0, "light_condition": light_cond})
             if "face_crops" in self.cap_data: del self.cap_data["face_crops"]
-            if self.db.save_face(self.name, existing_user_id, single_master_emb, self.cap_data): 
+            if self.db.save_face(self.name, existing_user_id, final_emb_vectors, self.cap_data): 
                 _log(f"⏱️ Ekstraksi AI & Simpan DB Selesai | Latensi AI: {mfn_latency:.2f} ms", "METRIK")
                 _log(f"✅ Total Waktu Seluruh Registrasi | Latensi Sistem Total: {total_waktu_sistem:.2f} ms", "METRIK")
                 Helpers.show_msg(display, "✅ REGISTRASI BERHASIL!", f"User: {self.name} | 3 Vektor Cahaya", config.COLOR_GREEN)
@@ -437,11 +372,9 @@ class FaceRegistrationApp:
                 if not faces:
                     gray = cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY)
                     if np.mean(gray) < 130:
-                        invGamma = 1.0 / 0.5
-                        table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
-                        brightened = cv2.LUT(raw, table)
-                        faces = self.detector.detect(brightened)
-
+                        gamma = 0.5
+                        table = np.array([((i / 255.0) ** gamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
+                        faces = self.detector.detect(cv2.LUT(raw, table))
                 if not faces: 
                     self.missed_frames += 1
                     if self.missed_frames >= 15: 
@@ -471,8 +404,7 @@ class FaceRegistrationApp:
                 if self.stage in (RegistrationStage.FACEMESH, RegistrationStage.EXTRACTION):
                     sp = self.anti_spoof.is_real(raw, face.bbox)
                     sp_score, sp_real, sp_label = float(sp.get("score_real", sp.get("score", 1.0))), sp.get("real", True), sp.get("label_name", "FOTO").upper()
-                else:
-                    sp_score, sp_real, sp_label = 1.0, True, "REAL"
+                else: sp_score, sp_real, sp_label = 1.0, True, "REAL"
                 hud_txt, term_txt = self._generate_metric_text(pose, ear_val, sp_score, light_cond)
                 if not sp_real:
                     self.fake_frames += 1
@@ -497,11 +429,8 @@ class FaceRegistrationApp:
         if self.stage == RegistrationStage.COMPLETE: return
         threading.Thread(target=self._process_thread, daemon=True).start()
         try:
-            if getattr(config, 'USE_FULLSCREEN', False):
-                cv2.namedWindow("Register", cv2.WND_PROP_FULLSCREEN)
-                cv2.setWindowProperty("Register", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
-            else:
-                cv2.namedWindow("Register", cv2.WINDOW_AUTOSIZE)
+            cv2.namedWindow("Register", cv2.WND_PROP_FULLSCREEN if getattr(config, 'USE_FULLSCREEN', False) else cv2.WINDOW_AUTOSIZE)
+            if getattr(config, 'USE_FULLSCREEN', False): cv2.setWindowProperty("Register", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
             while self.is_running and self.stage != RegistrationStage.COMPLETE:
                 with self.frame_lock: frame = self.display_frame.copy() if self.display_frame is not None else None
                 if frame is not None:

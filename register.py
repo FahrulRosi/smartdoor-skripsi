@@ -285,7 +285,7 @@ class FaceRegistrationApp:
         missing = [k for k, v in [("FaceMesh", self.cap_data["facemesh_vector"] is not None), ("Yaw", len(self.cap_data["yaw_snapshots"])>1), ("Pitch", len(self.cap_data["pitch_snapshots"])>1), ("Roll", len(self.cap_data["roll_snapshots"])>1), ("Blink", self.cap_data["blink_closed"] is not None)] if not v]
         if missing: 
             self._reset_registration(display, "❌ GAGAL EKTRAKSI!", f"Data Kurang: {','.join(missing)}")
-            return
+            returna
         quality_ok, brightness, blur_score = Helpers.is_image_quality_good(raw_frame, face.bbox)
         if not quality_ok:
             reason = "Cahaya Buruk" if not (15 < brightness < 245) else "Kamera Blur"

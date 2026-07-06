@@ -13,24 +13,56 @@ class CameraStream:
         self.lock = threading.Lock()
 
     def start(self):
-        # Deteksi OS: Gunakan V4L2 HANYA jika dijalankan di Linux (Raspberry Pi)
-        if platform.system() == "Linux":
-            self.cap = cv2.VideoCapture(self.src, cv2.CAP_V4L2)
-        else:
-            # Gunakan default backend untuk Windows/Mac
-            self.cap = cv2.VideoCapture(self.src)
-
-        # Fallback ke camera index 0 jika camera index saat ini gagal dibuka
-        if (not self.cap or not self.cap.isOpened()) and self.src != 0:
-            print(f"[CameraStream] Gagal membuka kamera index {self.src}. Mencoba fallback ke index 0...")
-            self.src = 0
+        # Helper untuk mencoba membuka camera dengan API backend yang sesuai
+        def try_open(src):
             if platform.system() == "Linux":
-                self.cap = cv2.VideoCapture(self.src, cv2.CAP_V4L2)
+                # Coba dengan CAP_V4L2 terlebih dahulu (Rekomendasi untuk Raspberry Pi)
+                try:
+                    cap = cv2.VideoCapture(src, cv2.CAP_V4L2)
+                    if cap and cap.isOpened():
+                        return cap
+                except Exception as e:
+                    print(f"[CameraStream] Gagal dengan CAP_V4L2 di Linux untuk index {src}: {e}")
+                # Fallback ke default API jika CAP_V4L2 gagal
+                try:
+                    cap = cv2.VideoCapture(src)
+                    if cap and cap.isOpened():
+                        return cap
+                except Exception as e:
+                    print(f"[CameraStream] Gagal dengan default API di Linux untuk index {src}: {e}")
             else:
-                self.cap = cv2.VideoCapture(self.src)
+                # Gunakan default backend untuk Windows/Mac
+                try:
+                    cap = cv2.VideoCapture(src)
+                    if cap and cap.isOpened():
+                        return cap
+                except Exception as e:
+                    print(f"[CameraStream] Gagal membuka kamera index {src}: {e}")
+            return None
+
+        # Coba buka kamera yang dikonfigurasi
+        self.cap = try_open(self.src)
+
+        # Fallback ke index lain jika camera index utama gagal dibuka
+        if not self.cap or not self.cap.isOpened():
+            print(f"[CameraStream] Gagal membuka kamera index {self.src}. Mencari index kamera lain yang aktif...")
+            candidates = [0, 1, 2, 4, 6, 8, 10]
+            if self.src in candidates:
+                candidates.remove(self.src)
+            # Urutkan pencarian: list candidate utama terlebih dahulu, kemudian index 0-10 lainnya
+            all_candidates = candidates + [i for i in range(11) if i not in candidates and i != self.src]
+            
+            for candidate in all_candidates:
+                print(f"[CameraStream] Mencoba membuka kamera index {candidate}...")
+                cap = try_open(candidate)
+                if cap and cap.isOpened():
+                    print(f"[CameraStream] Berhasil menemukan dan membuka kamera pada index {candidate}!")
+                    self.src = candidate
+                    self.cap = cap
+                    break
 
         if not self.cap or not self.cap.isOpened():
-            raise RuntimeError(f"Cannot open camera source: {self.src}")
+            raise RuntimeError(f"Cannot open camera source: {self.src} or any fallback indices.")
 
         # Set resolusi kamera
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)

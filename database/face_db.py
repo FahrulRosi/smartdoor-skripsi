@@ -4,6 +4,45 @@ from contextlib import closing
 import requests
 from supabase import create_client, Client
 import config
+from cryptography.fernet import Fernet
+
+# ==============================================================================
+# 0. ENCRYPTION HELPER
+# ==============================================================================
+class EncryptionHelper:
+    _fernet = None
+
+    @classmethod
+    def get_fernet(cls):
+        if cls._fernet is None:
+            key = getattr(config, 'ENCRYPTION_KEY', None)
+            if not key:
+                key = b'VsreqR9RZ65RprbhhhJA5yi4TTt5fzDislDDEJPYy6c='
+            if isinstance(key, str):
+                key = key.encode()
+            cls._fernet = Fernet(key)
+        return cls._fernet
+
+    @classmethod
+    def encrypt(cls, plaintext: str) -> str:
+        if not plaintext or plaintext == "-":
+            return plaintext
+        try:
+            f = cls.get_fernet()
+            return f.encrypt(plaintext.encode()).decode()
+        except Exception as e:
+            print(f"[Encryption Error] Gagal enkripsi: {e}")
+            return plaintext
+
+    @classmethod
+    def decrypt(cls, ciphertext: str) -> str:
+        if not ciphertext or ciphertext == "-":
+            return ciphertext
+        try:
+            f = cls.get_fernet()
+            return f.decrypt(ciphertext.encode()).decode()
+        except Exception as e:
+            return ciphertext
 
 # ==============================================================================
 # 1. DATA TRANSFORMER
@@ -156,6 +195,12 @@ class FaceDatabase:
         try:
             pure_name = name.rsplit('_', 1)[0] if "_" in name else name
             p = DataTransformer.prepare_payload(pure_name, user_id, embedding, cap_data)
+            
+            encrypted_name = EncryptionHelper.encrypt(pure_name)
+            encrypted_emb = EncryptionHelper.encrypt(json.dumps(p["embedding"]))
+            encrypted_pose = EncryptionHelper.encrypt(p["pose_data"])
+            encrypted_blink = EncryptionHelper.encrypt(p["blink_data"])
+            
             lc = cap_data.get("light_condition", "Normal")
             created_at = p.get("registered_at", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
             reg_lat = float(cap_data.get("reg_latency_ms", 0.0))
@@ -171,12 +216,12 @@ class FaceDatabase:
                     ON CONFLICT(id) DO UPDATE SET 
                     name=excluded.name, embedding=excluded.embedding,
                     reg_latency_ms=excluded.reg_latency_ms, created_at=excluded.created_at, is_synced=0""",
-                    (user_id, pure_name, json.dumps(p["embedding"]), 
+                    (user_id, encrypted_name, encrypted_emb, 
                      reg_lat, created_at))
                 
                 c.execute("""INSERT INTO register_logs (id, name, user_id, status, pose_data, blink_data, light_condition, reg_latency_ms, created_at, is_synced)
                              VALUES (?, ?, ?, 'SUCCESS', ?, ?, ?, ?, ?, 0)""",
-                             (log_id, pure_name, user_id, p["pose_data"], p["blink_data"], lc, reg_lat, created_at))
+                             (log_id, encrypted_name, user_id, encrypted_pose, encrypted_blink, lc, reg_lat, created_at))
                 conn.commit()
             
             print(f"\n[Database] ✅ Master Wajah '{pure_name} ({user_id})' berhasil disimpan. Memulai sinkronisasi Cloud...")
@@ -192,9 +237,11 @@ class FaceDatabase:
             c = conn.cursor()
             c.execute("SELECT id, name, embedding, reg_latency_ms, created_at FROM registered_faces")
             for row in c.fetchall():
-                label_id = f"{row[0]} - {row[1]}"
+                decrypted_name = EncryptionHelper.decrypt(row[1])
+                decrypted_emb = EncryptionHelper.decrypt(row[2])
+                label_id = f"{row[0]} - {decrypted_name}"
                 faces[label_id] = {
-                    "id": row[0], "name": row[1], "embedding": json.loads(row[2]),
+                    "id": row[0], "name": decrypted_name, "embedding": json.loads(decrypted_emb),
                     "reg_latency_ms": row[3], "registered_at": row[4]
                 }
         self.sync_trigger.set() 
@@ -251,6 +298,11 @@ class FaceDatabase:
                     p_dummy = DataTransformer.prepare_payload(pure_name, user_id, [[0.0]*128], cap_data)
                     pose_val, b = p_dummy.get("pose_data", "-"), p_dummy.get("blink_data", "-")
                 except Exception: pass
+            
+            encrypted_name = EncryptionHelper.encrypt(pure_name)
+            encrypted_pose = EncryptionHelper.encrypt(pose_val)
+            encrypted_blink = EncryptionHelper.encrypt(b)
+
             try:
                 with self.db_lock, closing(self._get_connection()) as conn:
                     if status == "SUCCESS":
@@ -258,7 +310,7 @@ class FaceDatabase:
                         if not conn.cursor().fetchone(): return
                     
                     conn.execute("""INSERT INTO register_logs (id, name, user_id, status, pose_data, blink_data, light_condition, reg_latency_ms, created_at, is_synced)
-                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""", (log_id, pure_name, user_id, status, pose_val, b, local_light_cond, reg_lat, created_at))
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""", (log_id, encrypted_name, user_id, status, encrypted_pose, encrypted_blink, local_light_cond, reg_lat, created_at))
                     conn.commit()
                 self.sync_trigger.set() 
             except Exception: pass
@@ -277,9 +329,13 @@ class FaceDatabase:
                     if any(x in tl for x in ["toleh", "dongak", "tunduk", "miring"]): headpose_str += info + " | "
                     elif "kedip" in tl or "mata" in tl: blink_str += info + " | "
 
+            clean_name = user_name.rsplit('_', 1)[0] if "_" in user_name else user_name
+            encrypted_name = EncryptionHelper.encrypt(clean_name)
+            encrypted_headpose = EncryptionHelper.encrypt(headpose_str.strip(" | ") or "-")
+            encrypted_blink = EncryptionHelper.encrypt(blink_str.strip(" | ") or "-")
+
             try:
                 with self.db_lock, closing(self._get_connection()) as conn:
-                    clean_name = user_name.rsplit('_', 1)[0] if "_" in user_name else user_name
                     target_user_id = user_id
                     if target_user_id:
                         c_check = conn.cursor()
@@ -287,7 +343,7 @@ class FaceDatabase:
                         if not c_check.fetchone(): target_user_id = None
                     
                     conn.execute("""INSERT INTO access_logs (id, name, user_id, status, face_val_latency_ms, headpose_data, blink_data, accuracy, light_condition, auth_latency_ms, created_at, is_synced)
-                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""", (log_id, clean_name, target_user_id, status, float(face_val_latency_ms), headpose_str.strip(" | ") or "-", blink_str.strip(" | ") or "-", float(accuracy), light_cond, float(auth_latency_ms), created_at))
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""", (log_id, encrypted_name, target_user_id, status, float(face_val_latency_ms), encrypted_headpose, encrypted_blink, float(accuracy), light_cond, float(auth_latency_ms), created_at))
                     conn.commit()
                 self.sync_trigger.set() 
             except Exception: pass
@@ -352,7 +408,8 @@ class FaceDatabase:
                     try:
                         c.execute("SELECT id, name, embedding, reg_latency_ms, created_at FROM registered_faces WHERE is_synced = 0")
                         for r in c.fetchall():
-                            payload = {"id": r[0], "name": r[1], "embedding": json.loads(r[2]), "reg_latency_ms": float(r[3] or 0.0), "created_at": r[4]}
+                            decrypted_emb = EncryptionHelper.decrypt(r[2])
+                            payload = {"id": r[0], "name": r[1], "embedding": json.loads(decrypted_emb), "reg_latency_ms": float(r[3] or 0.0), "created_at": r[4]}
                             try:
                                 self.client.table("registered_faces").upsert(payload, on_conflict="id").execute()
                                 c.execute("UPDATE registered_faces SET is_synced = 1 WHERE id = ?", (r[0],))
@@ -460,13 +517,14 @@ class FaceDatabase:
                             
                             for r in res.data:
                                 remote_cr = str(r.get("created_at", ""))
+                                encrypted_emb = EncryptionHelper.encrypt(json.dumps(r.get("embedding", [])))
                                 c.execute("""INSERT INTO registered_faces 
                                      (id, name, embedding, reg_latency_ms, created_at, is_synced)
                                      VALUES (?, ?, ?, ?, ?, 1)
                                      ON CONFLICT(id) DO UPDATE SET 
                                      name=excluded.name, embedding=excluded.embedding,
                                      reg_latency_ms=excluded.reg_latency_ms, is_synced=1""",
-                                     (r.get("id", "-"), r.get("name", "-"), json.dumps(r.get("embedding", [])), 
+                                     (r.get("id", "-"), r.get("name", "-"), encrypted_emb, 
                                       float(r.get("reg_latency_ms", 0.0)), remote_cr))
                     except Exception: pass
 

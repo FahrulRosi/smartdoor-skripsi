@@ -57,6 +57,7 @@ REG_MIN_BLUR_SCORE = 60.0
 LOCK_GPIO_PIN   = 18
 BUTTON_PIN      = 26  
 BUZZER_PIN      = 23  
+ENCRYPTION_KEY  = "VsreqR9RZ65RprbhhhJA5yi4TTt5fzDislDDEJPYy6c="
 UNLOCK_DURATION = 5  
 
 # Definisi Warna BGR untuk OpenCV

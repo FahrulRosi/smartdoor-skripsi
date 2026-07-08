@@ -553,11 +553,18 @@ class FaceRegistrationApp:
                     continue
                 self.missed_frames, face = 0, faces[0]
                 bbox_memory = face.bbox
+                
+                # Fase kalibrasi sensor cahaya kamera saat aplikasi pertama menyala
+                if time.time() - getattr(self, 'app_start_time', time.time()) < 2.2:
+                    display = cv2.flip(self.detector.draw(display, face), 1)
+                    Helpers.draw_hud(display, self.stage, "Mengkalibrasi Sensor...", "Tahan Posisi Wajah Anda", "", "CALIBRATING", face.bbox, config.COLOR_YELLOW)
+                    with self.frame_lock: self.display_frame = display
+                    continue
+
                 current_light = Helpers.get_light_condition_dynamic(raw, face.bbox)
-                if self.stage == RegistrationStage.FACEMESH: self.locked_light_cond = current_light
+                if self.stage == RegistrationStage.FACEMESH and getattr(self, 'locked_light_cond', None) is None:
+                    self.locked_light_cond = current_light
                 light_cond = getattr(self, 'locked_light_cond', "Normal")
-                if time.time() - getattr(self, 'app_start_time', time.time()) < 2.5:
-                    light_cond = "Normal"; self.locked_light_cond = current_light 
                 enhanced = Helpers.enhance_adaptive(raw, face.bbox, light_cond)
                 if not self._timer_started: self.action_start_time, self._timer_started = time.time(), True
                 display = cv2.flip(self.detector.draw(display, face), 1)

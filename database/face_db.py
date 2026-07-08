@@ -196,10 +196,7 @@ class FaceDatabase:
             pure_name = name.rsplit('_', 1)[0] if "_" in name else name
             p = DataTransformer.prepare_payload(pure_name, user_id, embedding, cap_data)
             
-            encrypted_name = EncryptionHelper.encrypt(pure_name)
             encrypted_emb = EncryptionHelper.encrypt(json.dumps(p["embedding"]))
-            encrypted_pose = EncryptionHelper.encrypt(p["pose_data"])
-            encrypted_blink = EncryptionHelper.encrypt(p["blink_data"])
             
             lc = cap_data.get("light_condition", "Normal")
             created_at = p.get("registered_at", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
@@ -216,12 +213,12 @@ class FaceDatabase:
                     ON CONFLICT(id) DO UPDATE SET 
                     name=excluded.name, embedding=excluded.embedding,
                     reg_latency_ms=excluded.reg_latency_ms, created_at=excluded.created_at, is_synced=0""",
-                    (user_id, encrypted_name, encrypted_emb, 
+                    (user_id, pure_name, encrypted_emb, 
                      reg_lat, created_at))
                 
                 c.execute("""INSERT INTO register_logs (id, name, user_id, status, pose_data, blink_data, light_condition, reg_latency_ms, created_at, is_synced)
                              VALUES (?, ?, ?, 'SUCCESS', ?, ?, ?, ?, ?, 0)""",
-                             (log_id, encrypted_name, user_id, encrypted_pose, encrypted_blink, lc, reg_lat, created_at))
+                             (log_id, pure_name, user_id, p["pose_data"], p["blink_data"], lc, reg_lat, created_at))
                 conn.commit()
             
             print(f"\n[Database] ✅ Master Wajah '{pure_name} ({user_id})' berhasil disimpan. Memulai sinkronisasi Cloud...")
@@ -237,11 +234,10 @@ class FaceDatabase:
             c = conn.cursor()
             c.execute("SELECT id, name, embedding, reg_latency_ms, created_at FROM registered_faces")
             for row in c.fetchall():
-                decrypted_name = EncryptionHelper.decrypt(row[1])
                 decrypted_emb = EncryptionHelper.decrypt(row[2])
-                label_id = f"{row[0]} - {decrypted_name}"
+                label_id = f"{row[0]} - {row[1]}"
                 faces[label_id] = {
-                    "id": row[0], "name": decrypted_name, "embedding": json.loads(decrypted_emb),
+                    "id": row[0], "name": row[1], "embedding": json.loads(decrypted_emb),
                     "reg_latency_ms": row[3], "registered_at": row[4]
                 }
         self.sync_trigger.set() 
@@ -298,10 +294,6 @@ class FaceDatabase:
                     p_dummy = DataTransformer.prepare_payload(pure_name, user_id, [[0.0]*128], cap_data)
                     pose_val, b = p_dummy.get("pose_data", "-"), p_dummy.get("blink_data", "-")
                 except Exception: pass
-            
-            encrypted_name = EncryptionHelper.encrypt(pure_name)
-            encrypted_pose = EncryptionHelper.encrypt(pose_val)
-            encrypted_blink = EncryptionHelper.encrypt(b)
 
             try:
                 with self.db_lock, closing(self._get_connection()) as conn:
@@ -310,7 +302,7 @@ class FaceDatabase:
                         if not conn.cursor().fetchone(): return
                     
                     conn.execute("""INSERT INTO register_logs (id, name, user_id, status, pose_data, blink_data, light_condition, reg_latency_ms, created_at, is_synced)
-                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""", (log_id, encrypted_name, user_id, status, encrypted_pose, encrypted_blink, local_light_cond, reg_lat, created_at))
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""", (log_id, pure_name, user_id, status, pose_val, b, local_light_cond, reg_lat, created_at))
                     conn.commit()
                 self.sync_trigger.set() 
             except Exception: pass
@@ -330,9 +322,6 @@ class FaceDatabase:
                     elif "kedip" in tl or "mata" in tl: blink_str += info + " | "
 
             clean_name = user_name.rsplit('_', 1)[0] if "_" in user_name else user_name
-            encrypted_name = EncryptionHelper.encrypt(clean_name)
-            encrypted_headpose = EncryptionHelper.encrypt(headpose_str.strip(" | ") or "-")
-            encrypted_blink = EncryptionHelper.encrypt(blink_str.strip(" | ") or "-")
 
             try:
                 with self.db_lock, closing(self._get_connection()) as conn:
@@ -343,7 +332,7 @@ class FaceDatabase:
                         if not c_check.fetchone(): target_user_id = None
                     
                     conn.execute("""INSERT INTO access_logs (id, name, user_id, status, face_val_latency_ms, headpose_data, blink_data, accuracy, light_condition, auth_latency_ms, created_at, is_synced)
-                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""", (log_id, encrypted_name, target_user_id, status, float(face_val_latency_ms), encrypted_headpose, encrypted_blink, float(accuracy), light_cond, float(auth_latency_ms), created_at))
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""", (log_id, clean_name, target_user_id, status, float(face_val_latency_ms), headpose_str.strip(" | ") or "-", blink_str.strip(" | ") or "-", float(accuracy), light_cond, float(auth_latency_ms), created_at))
                     conn.commit()
                 self.sync_trigger.set() 
             except Exception: pass

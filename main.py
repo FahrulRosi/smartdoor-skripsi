@@ -36,6 +36,20 @@ class UIHelper:
         return cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR)
 
     @staticmethod
+    def enhance_crop(crop, l_str="Normal"):
+        if l_str == "Normal" or not getattr(config, 'ENABLE_CLAHE_ENHANCEMENT', True): return crop
+        d, sig_col, sig_sp = {"Low Light": (5, 60, 60), "Backlight": (5, 45, 45)}.get(l_str, (5, 40, 40))
+        filtered = cv2.bilateralFilter(crop, d, sig_col, sig_sp)
+        gamma = {"Low Light": 0.6, "Backlight": 0.5}.get(l_str, 1.0)
+        if gamma != 1.0:
+            table = np.array([((i / 255.0) ** gamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
+            filtered = cv2.LUT(filtered, table)
+        yuv = cv2.cvtColor(filtered, cv2.COLOR_BGR2YUV)
+        clahe = cv2.createCLAHE(clipLimit={"Low Light": 2.0, "Backlight": 1.8}.get(l_str, 1.5), tileGridSize=(8, 8))
+        yuv[:, :, 0] = clahe.apply(yuv[:, :, 0])
+        return cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR)
+
+    @staticmethod
     def get_aligned_crop(frame, face, target_size=(112, 112)):
         lm, (fh, fw) = getattr(face, 'landmarks', []), frame.shape[:2]
         if not lm or len(lm) < 300: 
@@ -234,7 +248,14 @@ class SmartDoorApp:
 
     def _ai_worker(self):
         self.is_processing = False
+        last_reload_time = 0
         while self.running:
+            # Pemuatan ulang data wajah berkala dari SQLite untuk sinkronisasi real-time
+            current_time = time.time()
+            if current_time - last_reload_time > 5.0:
+                last_reload_time = current_time
+                self._reload_known_faces()
+
             with self.lock: frame = self.shared_frame.copy() if self.shared_frame is not None else None
             if frame is None or time.time() < getattr(self, 'pause_until', 0): time.sleep(0.02); continue
             faces = self.detector.detect(frame)
@@ -263,6 +284,21 @@ class SmartDoorApp:
                     self.is_processing = True
                     threading.Thread(target=self._async_process_face, args=(frame.copy(), UIHelper.enhance_adaptive(frame.copy(), face.bbox, l_str), face, l_str), daemon=True).start()
             time.sleep(0.01)
+
+    def _reload_known_faces(self):
+        try:
+            faces_raw = self.db.load_all_faces()
+            new_known_faces = {}
+            emb_dim = getattr(self.model, 'embedding_size', 128)
+            for k, v in (faces_raw or {}).items():
+                if isinstance(v, dict) and (emb_val := v.get('embedding')):
+                    sub_embs = emb_val if isinstance(emb_val, list) and len(emb_val) > 0 and isinstance(emb_val[0], list) else ([emb_val[0:emb_dim], emb_val[emb_dim:emb_dim*2], emb_val[emb_dim*2:emb_dim*3]] if isinstance(emb_val, list) and len(emb_val) == (emb_dim * 3) else [emb_val])
+                    valid_embs = [np.array(e, dtype=np.float32) for e in sub_embs if len(e) == emb_dim]
+                    if valid_embs: 
+                        new_known_faces[k] = valid_embs
+            self.known_faces_2d = new_known_faces
+        except:
+            pass
 
     def _process_face(self, raw, enhanced, face, l_str):
         if self.ui.get("status") in ("DIBUKA MANUAL", "STARTING"): return
@@ -304,7 +340,8 @@ class SmartDoorApp:
                 self.ui.update({"status": "MEMINDAI...", "color": config.COLOR_YELLOW, "instr": "Harap tenang, memfokuskan..."}); return
 
             avg_emb = None
-            if (cropped := UIHelper.get_aligned_crop(enhanced, face, target_size=(112, 112))) is not None and cropped.size > 0:
+            if (cropped_raw := UIHelper.get_aligned_crop(raw, face, target_size=(112, 112))) is not None and cropped_raw.size > 0:
+                cropped = UIHelper.enhance_crop(cropped_raw, l_str)
                 raw_emb = self.model.get_embedding(cropped)
                 if raw_emb is not None:
                     q_emb = np.array(raw_emb, dtype=np.float32).flatten()

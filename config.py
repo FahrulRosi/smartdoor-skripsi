@@ -49,13 +49,14 @@ MOBILEFACENET_PATH      = "recognition/mobilefacenet.onnx"
 MAX_SPOOF_FRAMES        = 8
 
 # ── Kriteria Kualitas Gambar Registrasi ──────────────────────────────────────
-REG_MIN_BRIGHTNESS = 15.0
+REG_MIN_BRIGHTNESS = 45.0
 REG_MAX_BRIGHTNESS = 245.0
-REG_MIN_BLUR_SCORE = 35.0
+REG_MIN_BLUR_SCORE = 60.0
 
 # ── Door Lock & UI ───────────────────────────────────────────────────────────
 LOCK_GPIO_PIN   = 18
 BUTTON_PIN      = 26  
+BUZZER_PIN      = 23  
 UNLOCK_DURATION = 5  
 
 # Definisi Warna BGR untuk OpenCV

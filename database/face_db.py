@@ -397,8 +397,7 @@ class FaceDatabase:
                     try:
                         c.execute("SELECT id, name, embedding, reg_latency_ms, created_at FROM registered_faces WHERE is_synced = 0")
                         for r in c.fetchall():
-                            decrypted_emb = EncryptionHelper.decrypt(r[2])
-                            payload = {"id": r[0], "name": r[1], "embedding": json.loads(decrypted_emb), "reg_latency_ms": float(r[3] or 0.0), "created_at": r[4]}
+                            payload = {"id": r[0], "name": r[1], "embedding": r[2], "reg_latency_ms": float(r[3] or 0.0), "created_at": r[4]}
                             try:
                                 self.client.table("registered_faces").upsert(payload, on_conflict="id").execute()
                                 c.execute("UPDATE registered_faces SET is_synced = 1 WHERE id = ?", (r[0],))
@@ -506,14 +505,13 @@ class FaceDatabase:
                             
                             for r in res.data:
                                 remote_cr = str(r.get("created_at", ""))
-                                encrypted_emb = EncryptionHelper.encrypt(json.dumps(r.get("embedding", [])))
                                 c.execute("""INSERT INTO registered_faces 
                                      (id, name, embedding, reg_latency_ms, created_at, is_synced)
                                      VALUES (?, ?, ?, ?, ?, 1)
                                      ON CONFLICT(id) DO UPDATE SET 
                                      name=excluded.name, embedding=excluded.embedding,
                                      reg_latency_ms=excluded.reg_latency_ms, is_synced=1""",
-                                     (r.get("id", "-"), r.get("name", "-"), encrypted_emb, 
+                                     (r.get("id", "-"), r.get("name", "-"), r.get("embedding", "-"), 
                                       float(r.get("reg_latency_ms", 0.0)), remote_cr))
                     except Exception: pass
 

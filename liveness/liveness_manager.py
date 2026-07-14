@@ -14,6 +14,7 @@ class LivenessManager:
         self._pose_state = "WAITING_EXTREME" 
         self._hold_frames = 0         
         self._required_frames = 5     
+        self._pose_history = []       # Buffer smoothing pose (rata-rata 3 frame)
         
         # Variabel khusus Kalibrasi Anti-Noise (Blink 2x)
         self._blink_state = 0         
@@ -49,6 +50,18 @@ class LivenessManager:
             return {"status": "pending", "step": "WAIT", "instruction": "Wajah tidak terdeteksi", "progress": "Mencari wajah..."}
 
         yaw, pitch, roll = pose["yaw"], pose["pitch"], pose["roll"]
+        
+        # Smoothing pose: rata-rata 3 frame terakhir untuk meredam noise/jitter
+        self._pose_history.append({"yaw": yaw, "pitch": pitch, "roll": roll})
+        if len(self._pose_history) > 3:
+            self._pose_history.pop(0)
+        if len(self._pose_history) >= 2:
+            yaw = sum(p["yaw"] for p in self._pose_history) / len(self._pose_history)
+            pitch = sum(p["pitch"] for p in self._pose_history) / len(self._pose_history)
+            roll = sum(p["roll"] for p in self._pose_history) / len(self._pose_history)
+            # Update pose dict agar pose[axis] juga pakai nilai smoothed
+            pose["yaw"], pose["pitch"], pose["roll"] = yaw, pitch, roll
+        
         is_center = abs(yaw) < 15.0 and abs(pitch) < 15.0 and abs(roll) < 15.0
 
         # ──── TAHAPAN 0 (Wajah Lurus) ────
@@ -84,7 +97,7 @@ class LivenessManager:
                         self._pose_state = "WAITING_CENTER"
                         self._hold_frames = 0
                 else:
-                    self._hold_frames = 0
+                    self._hold_frames = max(0, self._hold_frames - 2)  # Gradual decay, bukan hard reset
                 
                 prog_sign = "<" if (self.chosen_params["target_dir"] in ("left", "up")) else ">"
                 prog_val = -thr if (self.chosen_params["target_dir"] in ("left", "up")) else thr
@@ -103,7 +116,7 @@ class LivenessManager:
                         self._pose_state = "WAITING_EXTREME"
                         self._hold_frames = 0
                 else:
-                    self._hold_frames = 0
+                    self._hold_frames = max(0, self._hold_frames - 2)  # Gradual decay, bukan hard reset
                 return {"status": "pending", "step": "POSE", "instruction": "Tahan LURUS ke Depan", "progress": "Tunggu wajah lurus..."}
 
         # ──── TAHAPAN 2: BLINK (KALIBRASI ADAPTIF & HITUNG KEDIPAN NATURAL) ────
